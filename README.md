@@ -37,6 +37,8 @@ triak-trade ai-classify-dry-run "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP:
 triak-trade telegram-check
 triak-trade telegram-history-dry-run https://t.me/Tofan_Trade --limit 5
 triak-trade telegram-tofan-dry-run --limit 5
+triak-trade market-data-dry-run BTCUSDT --interval 1m --minutes 5
+triak-trade toobit-klines-dry-run BTCUSDT --interval 1m --minutes 5
 pytest
 ruff check .
 mypy src
@@ -56,3 +58,12 @@ mypy src
 - Real Telegram tests are guarded by `RUN_TELEGRAM_INTEGRATION_TESTS=1`.
 - Telethon sessions are local-only (`.sessions/`, `*.session*`) and must never be committed.
 - `https://t.me/Tofan_Trade` is an integration target, not a hard-coded strategy rule.
+
+## Market Data
+
+- Market data is behind `MarketDataProvider` interface.
+- First provider is Toobit public klines (`/quote/v1/klines` by default, path configurable).
+- No signed/private Toobit endpoints are used in this module.
+- Unit tests use fakes/mocks only.
+- Real Toobit checks are optional and guarded by `RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1`.
+- Candle cache service stores/fetches OHLCV through repository for future backtesting.

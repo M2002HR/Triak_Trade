@@ -34,3 +34,6 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Never commit Telegram session artifacts (`.sessions/`, `*.session*`).
 - Real Telegram integration tests must be explicitly guarded via environment flags.
 - `https://t.me/Tofan_Trade` is a future/guarded real-world test target only; never hard-code channel-specific rules.
+- Market data providers must stay behind interfaces; Toobit public klines is first provider.
+- Do not use signed/private Toobit endpoints in market-data modules.
+- Real Toobit market data tests must be explicitly guarded; default tests must use fakes/mocks.

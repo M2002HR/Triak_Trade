@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     EXECUTION_MODE: Literal["backtest", "paper", "demo"] = "demo"
     TOOBIT_BASE_URL: str = "https://api.toobit.com"
+    TOOBIT_KLINES_PATH: str = "/quote/v1/klines"
+    TOOBIT_MARKET_DATA_TIMEOUT_SECONDS: int = 20
+    TOOBIT_MARKET_DATA_LIMIT: int = 1000
+    TOOBIT_MARKET_DATA_DEFAULT_INTERVAL: str = "1m"
+    RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS: int = 0
+    TOOBIT_REAL_TEST_SYMBOL: str = "BTCUSDT"
     TOOBIT_API_KEY: SecretStr = Field(default=SecretStr("replace_me"))
     TOOBIT_API_SECRET: SecretStr = Field(default=SecretStr("replace_me"))
     TELEGRAM_API_ID: int = 0

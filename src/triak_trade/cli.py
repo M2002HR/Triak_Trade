@@ -6,7 +6,8 @@ import asyncio
 import json
 import os
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import httpx
 import typer
@@ -21,7 +22,9 @@ from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
 from triak_trade.db.engine import build_engine_from_settings
-from triak_trade.domain.models import RawTelegramMessage
+from triak_trade.domain.enums import CandleSource
+from triak_trade.domain.models import Candle, RawTelegramMessage
+from triak_trade.market_data.toobit import ToobitMarketDataProvider
 from triak_trade.parsing.normalizer import MessageNormalizer
 from triak_trade.parsing.regex_parser import RegexSignalParser
 from triak_trade.parsing.validator import ParsedSignalValidator
@@ -390,4 +393,80 @@ def telegram_tofan_dry_run_cmd(
         payload["last_date"] = sorted_messages[-1].date.isoformat()
     if show_text:
         payload["sample_text"] = [item.text for item in messages[:3]]
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("market-data-dry-run")
+def market_data_dry_run_cmd(
+    symbol: str,
+    interval: str = typer.Option("1m"),
+    minutes: int = typer.Option(5, min=1),
+) -> None:
+    """Generate fake candle output without network calls."""
+    _load_settings()
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    candles: list[Candle] = []
+    base = Decimal("100")
+    for idx in range(minutes):
+        open_time = now - timedelta(minutes=minutes - idx)
+        open_price = base + Decimal(str(idx))
+        close_price = open_price + Decimal("0.2")
+        candles.append(
+            Candle(
+                symbol=symbol.upper(),
+                interval=interval,
+                open_time=open_time,
+                close_time=open_time + timedelta(minutes=1),
+                open=open_price,
+                high=close_price + Decimal("0.1"),
+                low=open_price - Decimal("0.1"),
+                close=close_price,
+                volume=Decimal("10"),
+                source=CandleSource.FIXTURE,
+            )
+        )
+    payload = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "candle_count": len(candles),
+        "first_open_time": candles[0].open_time.isoformat() if candles else None,
+        "last_open_time": candles[-1].open_time.isoformat() if candles else None,
+        "source": CandleSource.FIXTURE.value,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("toobit-klines-dry-run")
+def toobit_klines_dry_run_cmd(
+    symbol: str,
+    interval: str = typer.Option("1m"),
+    minutes: int = typer.Option(5, min=1),
+    real: bool = typer.Option(False, "--real"),
+) -> None:
+    """Run guarded Toobit public kline fetch."""
+    settings = _load_settings()
+    if not real:
+        raise typer.BadParameter("Blocked by default. Pass --real with integration guard enabled.")
+    if settings.RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS != 1:
+        raise typer.BadParameter(
+            "Real mode requires RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1 in root .env.local"
+        )
+
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(minutes=minutes)
+    provider = ToobitMarketDataProvider(
+        base_url=settings.TOOBIT_BASE_URL,
+        klines_path=settings.TOOBIT_KLINES_PATH,
+        timeout_seconds=settings.TOOBIT_MARKET_DATA_TIMEOUT_SECONDS,
+        limit=settings.TOOBIT_MARKET_DATA_LIMIT,
+    )
+    candles = asyncio.run(provider.get_klines(symbol, interval, start_time, end_time))
+    payload = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "candle_count": len(candles),
+        "first_open_time": candles[0].open_time.isoformat() if candles else None,
+        "last_open_time": candles[-1].open_time.isoformat() if candles else None,
+        "source": CandleSource.TOOBIT.value if candles else "none",
+    }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
