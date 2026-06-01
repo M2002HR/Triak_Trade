@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -35,10 +35,12 @@ class Settings(BaseSettings):
     TELEGRAM_API_HASH: SecretStr = Field(default=SecretStr("replace_me"))
     TELEGRAM_SESSION_NAME: str = "triak_trade"
     TELEGRAM_BOT_TOKEN: SecretStr = Field(default=SecretStr("replace_me"))
-    ADMIN_USER_IDS: list[int] = Field(default_factory=list)
-    GEMINI_API_KEYS: list[SecretStr] = Field(default_factory=list)
-    GROQ_API_KEYS: list[SecretStr] = Field(default_factory=list)
-    SIGNAL_CONSOLIDATION_SECONDS: int = 120
+    ADMIN_USER_IDS: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    GEMINI_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
+    GROQ_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
+    SIGNAL_CONSOLIDATION_SECONDS: int = 180
+    SIGNAL_MAX_UPDATE_WINDOW_HOURS: int = 48
+    CHANNEL_AGENT_CONTEXT_MESSAGE_LIMIT: int = 50
     MAX_RISK_PER_TRADE_PCT: Decimal = Decimal("1.0")
     MAX_DAILY_LOSS_PCT: Decimal = Decimal("3.0")
     MAX_WEEKLY_LOSS_PCT: Decimal = Decimal("6.0")
@@ -61,7 +63,14 @@ class Settings(BaseSettings):
             return []
         if isinstance(value, list):
             return value
-        return [int(item.strip()) for item in value.split(",") if item.strip()]
+        parsed: list[int] = []
+        for item in value.split(","):
+            stripped = item.strip()
+            if not stripped:
+                continue
+            if stripped.lstrip("+-").isdigit():
+                parsed.append(int(stripped))
+        return parsed
 
     @field_validator("GEMINI_API_KEYS", "GROQ_API_KEYS", mode="before")
     @classmethod

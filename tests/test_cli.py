@@ -51,3 +51,10 @@ def test_cli_parse_message_ambiguous() -> None:
     assert result.exit_code == 0
     assert '"proposal_valid": false' in result.stdout
     assert "validation_errors" in result.stdout
+
+
+def test_cli_agent_dry_run() -> None:
+    result = runner.invoke(app, ["agent-dry-run"])
+    assert result.exit_code == 0
+    assert '"tick_actions"' in result.stdout
+    assert '"action_type": "create_order"' in result.stdout

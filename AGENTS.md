@@ -24,3 +24,8 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Runtime configuration single source of truth is root `Triak_Trade/.env.local`.
 - Do not create or use a separate `.env` inside `Ajil_Unified_AI_Gateway`.
 - Every Codex task must include self-verification: run tests, run the implemented interface manually, inspect logs/output, verify success and failure cases, and continue until behavior is correct.
+- Final production parsing/classification must be AI-driven and agentic via Ajil Unified AI Gateway.
+- Regex parsing is only baseline/fallback/safety, not the final decision engine.
+- First real-world Telegram channel for future live-like evaluation is `https://t.me/Tofan_Trade`.
+- Use Tofan_Trade only when Telegram + AI integration is implemented; do not hard-code channel-specific logic.
+- Keep core logic generalized across channels, including noisy/ambiguous/update/cancel/report/ad content.
