@@ -58,3 +58,26 @@ def test_cli_agent_dry_run() -> None:
     assert result.exit_code == 0
     assert '"tick_actions"' in result.stdout
     assert '"action_type": "create_order"' in result.stdout
+
+
+def test_cli_ai_classify_dry_run_signal() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "ai-classify-dry-run",
+            "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000",
+        ],
+    )
+    assert result.exit_code == 0
+    assert '"real_gateway_used": false' in result.stdout
+    assert '"parsed_action": "open"' in result.stdout
+
+
+def test_cli_ai_classify_dry_run_profit_and_ad() -> None:
+    profit = runner.invoke(app, ["ai-classify-dry-run", "TP1 hit ✅ +120% profit"])
+    assert profit.exit_code == 0
+    assert '"parsed_action": "ignore"' in profit.stdout
+
+    ad = runner.invoke(app, ["ai-classify-dry-run", "This is a promo giveaway join now"])
+    assert ad.exit_code == 0
+    assert '"parsed_action": "ignore"' in ad.stdout

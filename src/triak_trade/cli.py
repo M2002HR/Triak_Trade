@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 
+import httpx
 import typer
 
 from triak_trade import __version__
 from triak_trade.agents.channel_agent import ChannelAgent
 from triak_trade.agents.clock import FakeClock
+from triak_trade.agents.context import ChannelContext
+from triak_trade.ai.classifier import AIMessageClassifier
+from triak_trade.ai.gateway_client import AjilGatewayClient
 from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
@@ -141,5 +146,125 @@ def agent_dry_run_cmd() -> None:
             "tick_actions": len(tick_actions),
         },
         "safety": {"requires_admin_approval_default": True, "no_execution": True},
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("ai-classify-dry-run")
+def ai_classify_dry_run_cmd(message: str, real_gateway: bool = typer.Option(False)) -> None:
+    """Run AI classifier in safe dry-run mode."""
+    settings = _load_settings()
+    now = datetime.now(timezone.utc)
+    raw = RawTelegramMessage(
+        channel_id="ai-dry-run",
+        channel_username="dry",
+        message_id=1,
+        text=message,
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    context = ChannelContext(
+        channel_id="ai-dry-run",
+        max_message_limit=settings.CHANNEL_AGENT_CONTEXT_MESSAGE_LIMIT,
+        max_update_window_hours=settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS,
+    )
+    context.add_recent_message(raw)
+
+    using_real_gateway = (
+        real_gateway
+        and settings.AI_GATEWAY_ENABLED
+        and os.getenv("RUN_AI_GATEWAY_INTEGRATION_TESTS") == "1"
+    )
+
+    if using_real_gateway:
+        client = AjilGatewayClient(
+            base_url=settings.AI_GATEWAY_BASE_URL,
+            timeout_seconds=settings.AI_GATEWAY_TIMEOUT_SECONDS,
+            classify_path=settings.AI_GATEWAY_CLASSIFY_PATH,
+        )
+        mode = "real-gateway"
+    else:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body: dict[str, object] = {
+                "classification": "UNKNOWN",
+                "action": "unknown",
+                "market": "unknown",
+                "symbol": "BTCUSDT" if "btc" in message.lower() else None,
+                "side": "long" if "long" in message.lower() else "unknown",
+                "entry_type": "unknown",
+                "entry_low": None,
+                "entry_high": None,
+                "stop_loss": None,
+                "take_profits": [],
+                "leverage": None,
+                "related_signal_id": None,
+                "relation_reason": None,
+                "confidence": "0.35",
+                "reasoning_summary": "dry-run mock response",
+                "risk_notes": ["no real gateway call"],
+                "requires_admin_confirmation": True,
+                "raw_provider_metadata": {"mode": "mock"},
+            }
+            if "entry" in message.lower() and "sl" in message.lower() and "tp" in message.lower():
+                body.update(
+                    {
+                        "classification": "NEW_SIGNAL",
+                        "action": "open",
+                        "market": "futures",
+                        "entry_type": "range",
+                        "entry_low": "68000",
+                        "entry_high": "68200",
+                        "stop_loss": "67400",
+                        "take_profits": ["69000", "70000"],
+                        "leverage": 5,
+                        "confidence": "0.88",
+                        "reasoning_summary": "structured signal detected",
+                    }
+                )
+            elif "profit" in message.lower() or "tp1 hit" in message.lower():
+                body.update(
+                    {
+                        "classification": "RESULT_REPORT",
+                        "action": "ignore",
+                        "confidence": "0.85",
+                        "reasoning_summary": "result report not a new signal",
+                    }
+                )
+            elif (
+                "promo" in message.lower()
+                or "giveaway" in message.lower()
+                or "join now" in message.lower()
+            ):
+                body.update(
+                    {
+                        "classification": "ADVERTISEMENT",
+                        "action": "ignore",
+                        "confidence": "0.86",
+                        "reasoning_summary": "promotional content",
+                    }
+                )
+            return httpx.Response(200, json=body)
+
+        client = AjilGatewayClient(
+            base_url="http://mocked.local",
+            timeout_seconds=settings.AI_GATEWAY_TIMEOUT_SECONDS,
+            classify_path=settings.AI_GATEWAY_CLASSIFY_PATH,
+            transport=httpx.MockTransport(handler),
+        )
+        mode = "mock-gateway"
+
+    classifier = AIMessageClassifier(settings=settings, gateway_client=client)
+    classified = classifier.classify(raw, context)
+    payload: dict[str, object] = {
+        "mode": mode,
+        "real_gateway_requested": real_gateway,
+        "real_gateway_used": using_real_gateway,
+        "parsed_action": classified.parsed_signal.action.value,
+        "parsed_symbol": classified.parsed_signal.symbol,
+        "classification_confidence": str(classified.confidence),
+        "is_potential_new_signal": classified.is_potential_new_signal,
+        "is_related_to_existing_signal": classified.is_related_to_existing_signal,
+        "debug_notes": classified.debug_notes,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))

@@ -29,3 +29,4 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - First real-world Telegram channel for future live-like evaluation is `https://t.me/Tofan_Trade`.
 - Use Tofan_Trade only when Telegram + AI integration is implemented; do not hard-code channel-specific logic.
 - Keep core logic generalized across channels, including noisy/ambiguous/update/cancel/report/ad content.
+- AI gateway integration tests must be explicitly guarded; default unit tests use fakes/mocks and no real AI calls.

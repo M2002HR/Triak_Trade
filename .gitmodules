@@ -1,0 +1,3 @@
+[submodule "external/Ajil_Unified_AI_Gateway"]
+	path = external/Ajil_Unified_AI_Gateway
+	url = ../Ajil_Unified_AI_Gateway
