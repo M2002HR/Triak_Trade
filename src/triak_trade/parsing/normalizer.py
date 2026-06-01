@@ -1,0 +1,121 @@
+"""Message normalizer."""
+
+from __future__ import annotations
+
+import re
+
+from triak_trade.domain.models import NormalizedMessage, RawTelegramMessage
+
+_PERSIAN_DIGITS = str.maketrans(
+    "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9",
+    "0123456789",
+)
+_ARABIC_DIGITS = str.maketrans(
+    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    "0123456789",
+)
+
+_TAG_SYMBOL_RE = re.compile(r"[#$]([A-Za-z]{2,12})")
+_PAIR_SYMBOL_RE = re.compile(
+    r"\b([A-Za-z]{2,10})\s*[/\-\s]\s*(USDT|USD|USDC)\b",
+    re.IGNORECASE,
+)
+_COMPACT_SYMBOL_RE = re.compile(r"\b([A-Za-z]{3,12}(?:USDT|USD|BTC|ETH))\b", re.IGNORECASE)
+
+_KEYWORDS = {
+    "long",
+    "short",
+    "buy",
+    "sell",
+    "entry",
+    "entries",
+    "zone",
+    "stop",
+    "stoploss",
+    "stop loss",
+    "sl",
+    "tp",
+    "target",
+    "targets",
+    "leverage",
+    "lev",
+    "cancel",
+    "cancelled",
+    "close",
+    "closed",
+    "update",
+    "move",
+    "breakeven",
+    "break even",
+    "be",
+    "\u062e\u0631\u06cc\u062f",
+    "\u0641\u0631\u0648\u0634",
+    "\u0644\u0627\u0646\u06af",
+    "\u0634\u0648\u0631\u062a",
+    "\u0648\u0631\u0648\u062f",
+    "\u062d\u062f \u0636\u0631\u0631",
+    "\u062a\u0627\u0631\u06af\u062a",
+    "\u0627\u0647\u0631\u0645",
+    "\u0644\u063a\u0648",
+    "\u0628\u0633\u062a\u0646",
+}
+
+
+class MessageNormalizer:
+    """Deterministic message normalizer."""
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        value = text.translate(_PERSIAN_DIGITS).translate(_ARABIC_DIGITS)
+        value = value.replace("\u066b", ".").replace("\u060c", ",")
+        return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _compact_symbol(base: str, quote: str | None = None) -> str:
+        base_norm = base.strip().upper()
+        if quote is None:
+            return base_norm
+        return f"{base_norm}{quote.strip().upper()}"
+
+    def normalize(self, raw: RawTelegramMessage) -> NormalizedMessage:
+        text = raw.text or ""
+        normalized = self._normalize_text(text)
+
+        symbols: list[str] = []
+        seen: set[str] = set()
+
+        for match in _TAG_SYMBOL_RE.finditer(normalized):
+            symbol = self._compact_symbol(match.group(1))
+            if symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+
+        for match in _PAIR_SYMBOL_RE.finditer(normalized):
+            symbol = self._compact_symbol(match.group(1), match.group(2))
+            if symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+
+        for match in _COMPACT_SYMBOL_RE.finditer(normalized):
+            symbol = self._compact_symbol(match.group(1))
+            if symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+
+        lowered = normalized.lower()
+        keywords: list[str] = []
+        seen_kw: set[str] = set()
+        for keyword in _KEYWORDS:
+            if keyword in lowered or keyword in normalized:
+                kw = keyword.lower()
+                if kw not in seen_kw:
+                    seen_kw.add(kw)
+                    keywords.append(kw)
+
+        return NormalizedMessage(
+            raw=raw,
+            normalized_text=normalized,
+            detected_symbols=symbols,
+            detected_keywords=keywords,
+            language_hint=None,
+        )

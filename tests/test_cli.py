@@ -30,3 +30,24 @@ def test_cli_db_check() -> None:
     result = runner.invoke(app, ["db-check"])
     assert result.exit_code == 0
     assert "DB engine configured" in result.stdout
+
+
+def test_cli_parse_message_valid() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "parse-message",
+            "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+        ],
+    )
+    assert result.exit_code == 0
+    assert '"action": "open"' in result.stdout
+    assert '"symbol": "BTCUSDT"' in result.stdout
+    assert '"side": "long"' in result.stdout
+
+
+def test_cli_parse_message_ambiguous() -> None:
+    result = runner.invoke(app, ["parse-message", "BTC looking good"])
+    assert result.exit_code == 0
+    assert '"proposal_valid": false' in result.stdout
+    assert "validation_errors" in result.stdout
