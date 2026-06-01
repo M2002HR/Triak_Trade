@@ -1,0 +1,31 @@
+from __future__ import annotations
+
+from pydantic import ValidationError
+
+from triak_trade.config.settings import Settings
+
+
+def test_settings_defaults_load() -> None:
+    settings = Settings()
+    assert settings.APP_NAME == "Triak_Trade"
+    assert settings.EXECUTION_MODE in {"demo", "paper"}
+
+
+def test_live_execution_mode_is_rejected() -> None:
+    try:
+        Settings(EXECUTION_MODE="live")
+    except ValidationError as exc:
+        assert "blocked" in str(exc)
+    else:
+        raise AssertionError("Expected ValidationError")
+
+
+def test_admin_ids_are_parsed() -> None:
+    settings = Settings(ADMIN_USER_IDS="1, 2,3")
+    assert settings.ADMIN_USER_IDS == [1, 2, 3]
+
+
+def test_api_keys_are_parsed() -> None:
+    settings = Settings(GEMINI_API_KEYS="a,b", GROQ_API_KEYS="x, y")
+    assert [s.get_secret_value() for s in settings.GEMINI_API_KEYS] == ["a", "b"]
+    assert [s.get_secret_value() for s in settings.GROQ_API_KEYS] == ["x", "y"]
