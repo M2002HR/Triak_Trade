@@ -11,6 +11,7 @@ from triak_trade import __version__
 from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
+from triak_trade.db.engine import build_engine_from_settings
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -42,3 +43,11 @@ def config_check_cmd() -> None:
     """Validate config and print safe status."""
     _load_settings()
     typer.echo("Configuration is valid")
+
+
+@app.command("db-check")
+def db_check_cmd() -> None:
+    """Build DB engine from config without connecting."""
+    settings = _load_settings()
+    engine = build_engine_from_settings(settings)
+    typer.echo(f"DB engine configured (dialect={engine.dialect.name})")

@@ -24,3 +24,9 @@ def test_cli_config_check() -> None:
     result = runner.invoke(app, ["config-check"])
     assert result.exit_code == 0
     assert "Configuration is valid" in result.stdout
+
+
+def test_cli_db_check() -> None:
+    result = runner.invoke(app, ["db-check"])
+    assert result.exit_code == 0
+    assert "DB engine configured" in result.stdout
