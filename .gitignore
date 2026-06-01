@@ -8,4 +8,7 @@ __pycache__/
 .venv/
 .env
 .env.local
+.sessions/
+*.session
+*.session-journal
 .DS_Store

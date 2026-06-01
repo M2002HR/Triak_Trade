@@ -30,3 +30,7 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Use Tofan_Trade only when Telegram + AI integration is implemented; do not hard-code channel-specific logic.
 - Keep core logic generalized across channels, including noisy/ambiguous/update/cancel/report/ad content.
 - AI gateway integration tests must be explicitly guarded; default unit tests use fakes/mocks and no real AI calls.
+- Telethon integration must remain behind interfaces and use fakes in unit tests.
+- Never commit Telegram session artifacts (`.sessions/`, `*.session*`).
+- Real Telegram integration tests must be explicitly guarded via environment flags.
+- `https://t.me/Tofan_Trade` is a future/guarded real-world test target only; never hard-code channel-specific rules.

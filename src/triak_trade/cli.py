@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import asdict
@@ -24,6 +25,8 @@ from triak_trade.domain.models import RawTelegramMessage
 from triak_trade.parsing.normalizer import MessageNormalizer
 from triak_trade.parsing.regex_parser import RegexSignalParser
 from triak_trade.parsing.validator import ParsedSignalValidator
+from triak_trade.telegram.client import FakeTelegramClient, TelegramClientInterface
+from triak_trade.telegram.telethon_client import TelethonTelegramClient
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -267,4 +270,124 @@ def ai_classify_dry_run_cmd(message: str, real_gateway: bool = typer.Option(Fals
         "is_related_to_existing_signal": classified.is_related_to_existing_signal,
         "debug_notes": classified.debug_notes,
     }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("telegram-check")
+def telegram_check_cmd() -> None:
+    """Validate Telegram config without connecting."""
+    settings = _load_settings()
+    api_hash = settings.TELEGRAM_API_HASH.get_secret_value()
+    payload = {
+        "api_id_present": settings.TELEGRAM_API_ID > 0,
+        "api_hash_present": bool(api_hash and api_hash != "replace_me"),
+        "session_dir": settings.TELEGRAM_SESSION_DIR,
+        "session_name": settings.TELEGRAM_SESSION_NAME,
+        "real_test_channel": settings.TELEGRAM_REAL_TEST_CHANNEL,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("telegram-history-dry-run")
+def telegram_history_dry_run_cmd(
+    channel: str,
+    limit: int = typer.Option(5, min=1),
+    real: bool = typer.Option(False, "--real"),
+) -> None:
+    """Fetch Telegram history in fake mode by default."""
+    settings = _load_settings()
+    use_real = real and settings.RUN_TELEGRAM_INTEGRATION_TESTS == 1
+    if real and not use_real:
+        raise typer.BadParameter(
+            "Real Telegram mode requires RUN_TELEGRAM_INTEGRATION_TESTS=1 in root .env.local"
+        )
+
+    if use_real:
+        client: TelegramClientInterface = TelethonTelegramClient(settings)
+        messages = asyncio.run(client.fetch_history(channel, limit=limit))
+        mode = "real"
+    else:
+        now = datetime.now(timezone.utc)
+        fake_messages = [
+            RawTelegramMessage(
+                channel_id=channel,
+                channel_username="fake_channel",
+                message_id=i + 1,
+                text=f"sample message {i + 1}",
+                date=now,
+                edited_at=None,
+                reply_to_msg_id=None,
+            )
+            for i in range(limit)
+        ]
+        client = FakeTelegramClient(history_by_channel={channel: fake_messages})
+        messages = asyncio.run(client.fetch_history(channel, limit=limit))
+        mode = "fake"
+
+    payload = {
+        "mode": mode,
+        "channel": channel,
+        "count": len(messages),
+        "sample": [
+            {
+                "channel_id": item.channel_id,
+                "message_id": item.message_id,
+                "date": item.date.isoformat(),
+            }
+            for item in messages[:5]
+        ],
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("telegram-tofan-dry-run")
+def telegram_tofan_dry_run_cmd(
+    limit: int = typer.Option(20, min=1),
+    real: bool = typer.Option(False, "--real"),
+    show_text: bool = typer.Option(False, "--show-text"),
+) -> None:
+    """Run dry-run fetch for configured real test channel."""
+    settings = _load_settings()
+    channel = settings.TELEGRAM_REAL_TEST_CHANNEL
+    use_real = real and settings.RUN_TELEGRAM_INTEGRATION_TESTS == 1
+    if real and not use_real:
+        raise typer.BadParameter(
+            "Real Telegram mode requires RUN_TELEGRAM_INTEGRATION_TESTS=1 in root .env.local"
+        )
+
+    if use_real:
+        client: TelegramClientInterface = TelethonTelegramClient(settings)
+        messages = asyncio.run(client.fetch_history(channel, limit=limit))
+        mode = "real"
+    else:
+        now = datetime.now(timezone.utc)
+        fake_messages = [
+            RawTelegramMessage(
+                channel_id=channel,
+                channel_username="tofan_trade",
+                message_id=i + 100,
+                text=f"fixture text {i + 1}",
+                date=now,
+                edited_at=None,
+                reply_to_msg_id=None,
+            )
+            for i in range(limit)
+        ]
+        client = FakeTelegramClient(history_by_channel={channel: fake_messages})
+        messages = asyncio.run(client.fetch_history(channel, limit=limit))
+        mode = "fake"
+
+    sorted_messages = sorted(messages, key=lambda item: item.date)
+    payload: dict[str, object] = {
+        "mode": mode,
+        "channel": channel,
+        "count": len(messages),
+        "text_message_count": sum(1 for item in messages if item.text),
+        "sample_message_ids": [item.message_id for item in messages[:5]],
+    }
+    if sorted_messages:
+        payload["first_date"] = sorted_messages[0].date.isoformat()
+        payload["last_date"] = sorted_messages[-1].date.isoformat()
+    if show_text:
+        payload["sample_text"] = [item.text for item in messages[:3]]
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))

@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     TELEGRAM_API_ID: int = 0
     TELEGRAM_API_HASH: SecretStr = Field(default=SecretStr("replace_me"))
     TELEGRAM_SESSION_NAME: str = "triak_trade"
+    TELEGRAM_SESSION_DIR: str = ".sessions"
+    TELEGRAM_HISTORY_BATCH_SIZE: int = 100
+    TELEGRAM_LIVE_CHANNELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    TELEGRAM_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
+    RUN_TELEGRAM_INTEGRATION_TESTS: int = 0
     TELEGRAM_BOT_TOKEN: SecretStr = Field(default=SecretStr("replace_me"))
     ADMIN_USER_IDS: Annotated[list[int], NoDecode] = Field(default_factory=list)
     GEMINI_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
@@ -92,6 +97,15 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return [SecretStr(item) for item in value]
         return [SecretStr(item.strip()) for item in value.split(",") if item.strip()]
+
+    @field_validator("TELEGRAM_LIVE_CHANNELS", mode="before")
+    @classmethod
+    def parse_channel_list(cls, value: str | list[str] | None) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [item.strip() for item in value if item.strip()]
+        return [item.strip() for item in value.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)

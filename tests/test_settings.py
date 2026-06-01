@@ -29,3 +29,8 @@ def test_api_keys_are_parsed() -> None:
     settings = Settings(GEMINI_API_KEYS="a,b", GROQ_API_KEYS="x, y")
     assert [s.get_secret_value() for s in settings.GEMINI_API_KEYS] == ["a", "b"]
     assert [s.get_secret_value() for s in settings.GROQ_API_KEYS] == ["x", "y"]
+
+
+def test_telegram_live_channels_are_parsed() -> None:
+    settings = Settings(TELEGRAM_LIVE_CHANNELS="a, b,https://t.me/Tofan_Trade")
+    assert settings.TELEGRAM_LIVE_CHANNELS == ["a", "b", "https://t.me/Tofan_Trade"]
