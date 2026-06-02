@@ -161,7 +161,7 @@ def dashboard_smoke_test(settings: Settings) -> dict[str, Any]:
     token = settings.DASHBOARD_ADMIN_TOKEN.get_secret_value()
     headers = {"X-Triak-Admin-Token": token}
     with TestClient(app) as client:
-        unauthorized = client.get("/")
+        unauthorized = client.get("/", follow_redirects=False)
         authorized = client.get("/", headers=headers)
         backtest = client.post(
             "/backtests/run",
@@ -176,12 +176,14 @@ def dashboard_smoke_test(settings: Settings) -> dict[str, Any]:
         )
         settings_page = client.get("/settings", headers=headers)
         status_json = client.get("/status", headers=headers)
+        status_unauthorized = client.get("/status", follow_redirects=False)
     return {
-        "unauthorized_blocked": unauthorized.status_code == 401,
+        "unauthorized_blocked": unauthorized.status_code == 303,
         "dashboard_authorized": authorized.status_code == 200,
         "backtest_fixture_ok": backtest.status_code == 200,
         "settings_ok": settings_page.status_code == 200,
         "status_json_ok": status_json.status_code == 200,
+        "status_api_unauthorized": status_unauthorized.status_code == 401,
         "secrets_printed": False,
     }
 

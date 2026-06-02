@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">Local Access</p>
+  <h1>Dashboard Sign In</h1>
+  <p>Use the admin token stored in root .env.local. The token is never shown in the dashboard UI.</p>
+</section>
+<form method="post" action="/login" class="panel form-grid narrow">
+  {% if login_error %}
+    <p class="error">{{ login_error }}</p>
+  {% endif %}
+  <input type="hidden" name="next_path" value="{{ next_path }}">
+  <label>Admin Token
+    <input type="password" name="token" autocomplete="current-password" required>
+  </label>
+  <button type="submit">Sign In</button>
+</form>
+{% endblock %}

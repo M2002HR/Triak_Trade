@@ -71,3 +71,14 @@ def test_status_json_contains_no_secrets(tmp_path: Path) -> None:
     assert "test-token" not in text
     assert "session-secret" not in text
     assert response.json()["live_trading_blocked"] is True
+
+
+def test_login_page_renders(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/login")
+    assert response.status_code == 200
+    assert "Dashboard Sign In" in response.text
+
+
+def test_status_json_unauthorized_is_not_redirected(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/status", follow_redirects=False)
+    assert response.status_code == 401

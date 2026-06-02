@@ -19,6 +19,7 @@ def test_dashboard_smoke_test_passes() -> None:
     assert result.exit_code == 0
     assert '"unauthorized_blocked": true' in result.stdout
     assert '"dashboard_authorized": true' in result.stdout
+    assert '"status_api_unauthorized": true' in result.stdout
 
 
 def test_dashboard_token_hint_does_not_print_token() -> None:

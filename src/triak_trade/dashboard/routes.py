@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -32,9 +32,47 @@ def build_router(
             payload.update(extra)
         return payload
 
+    @router.get("/login", response_class=HTMLResponse)
+    async def login_page(request: Request, next: str = "/") -> Response:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            context(request, {"next_path": next, "login_error": None}),
+        )
+
+    @router.post("/login")
+    async def login_submit(request: Request) -> Response:
+        form = {key: str(value) for key, value in (await request.form()).items()}
+        token = form.get("token", "")
+        next_path = form.get("next_path", "/")
+        if not auth.validate_login_token(token):
+            return templates.TemplateResponse(
+                request,
+                "login.html",
+                context(
+                    request,
+                    {
+                        "next_path": next_path,
+                        "login_error": "Invalid admin token.",
+                    },
+                ),
+                status_code=401,
+            )
+        response = RedirectResponse(url=next_path or "/", status_code=303)
+        auth.set_session_cookie(response)
+        return response
+
+    @router.get("/logout")
+    async def logout(request: Request) -> Response:
+        response = RedirectResponse(url="/login", status_code=303)
+        auth.clear_session_cookie(response)
+        return response
+
     @router.get("/", response_class=HTMLResponse)
-    async def dashboard(request: Request) -> HTMLResponse:
-        auth.require(request)
+    async def dashboard(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -42,8 +80,10 @@ def build_router(
         )
 
     @router.get("/backtests", response_class=HTMLResponse)
-    async def backtests(request: Request) -> HTMLResponse:
-        auth.require(request)
+    async def backtests(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         return templates.TemplateResponse(
             request,
             "backtests.html",
@@ -54,8 +94,10 @@ def build_router(
         )
 
     @router.post("/backtests/run", response_class=HTMLResponse)
-    async def run_backtest(request: Request) -> HTMLResponse:
-        auth.require(request)
+    async def run_backtest(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         form = {key: str(value) for key, value in (await request.form()).items()}
         result = service.run_fixture_backtest_from_form(form)
         return templates.TemplateResponse(
@@ -68,8 +110,10 @@ def build_router(
         )
 
     @router.get("/approvals", response_class=HTMLResponse)
-    async def approvals(request: Request) -> HTMLResponse:
-        auth.require(request)
+    async def approvals(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         return templates.TemplateResponse(
             request,
             "approvals.html",
@@ -81,20 +125,26 @@ def build_router(
         request: Request,
         action_id: str,
         decision: str,
-    ) -> RedirectResponse:
-        auth.require(request)
+    ) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         # Repository-backed pending actions will be wired in a later step.
         _ = (action_id, decision)
         return RedirectResponse(url="/approvals?decision_recorded=placeholder", status_code=303)
 
     @router.get("/logs", response_class=HTMLResponse)
-    async def logs(request: Request) -> HTMLResponse:
-        auth.require(request)
+    async def logs(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         return templates.TemplateResponse(request, "logs.html", context(request, service.logs()))
 
     @router.get("/reports", response_class=HTMLResponse)
-    async def reports(request: Request) -> HTMLResponse:
-        auth.require(request)
+    async def reports(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         return templates.TemplateResponse(
             request,
             "reports.html",
@@ -102,8 +152,10 @@ def build_router(
         )
 
     @router.get("/settings", response_class=HTMLResponse)
-    async def settings_page(request: Request) -> HTMLResponse:
-        auth.require(request)
+    async def settings_page(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         return templates.TemplateResponse(
             request,
             "settings.html",
@@ -111,8 +163,10 @@ def build_router(
         )
 
     @router.post("/settings/auto-mode")
-    async def toggle_auto_mode(request: Request) -> RedirectResponse:
-        auth.require(request)
+    async def toggle_auto_mode(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         form = {key: str(value) for key, value in (await request.form()).items()}
         enabled = form.get("enabled") == "on"
         service.state.set_auto_mode(
@@ -123,8 +177,10 @@ def build_router(
         return RedirectResponse(url="/settings", status_code=303)
 
     @router.post("/settings/kill-switch")
-    async def toggle_kill_switch(request: Request) -> RedirectResponse:
-        auth.require(request)
+    async def toggle_kill_switch(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
         form = {key: str(value) for key, value in (await request.form()).items()}
         enabled = form.get("enabled") == "on"
         service.state.set_kill_switch(
@@ -136,7 +192,7 @@ def build_router(
 
     @router.get("/status")
     async def status(request: Request) -> JSONResponse:
-        auth.require(request)
+        auth.require_api(request)
         return JSONResponse(service.safe_settings() | {"overview": service.overview()["cards"]})
 
     return router
