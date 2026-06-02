@@ -1,0 +1,105 @@
+"""Backtest engine orchestration."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any
+
+from triak_trade.agents.classifier import MessageClassifier, RegexMessageClassifier
+from triak_trade.backtesting.fixtures import fixture_candles, fixture_messages
+from triak_trade.backtesting.models import BacktestRequest
+from triak_trade.backtesting.report import report_to_json, report_to_telegram_summary
+from triak_trade.backtesting.scoring import ChannelScorer
+from triak_trade.backtesting.simulator import BacktestSimulator
+from triak_trade.backtesting.timeline import BacktestTimelineBuilder
+from triak_trade.domain.enums import BacktestFillPolicy
+from triak_trade.domain.models import BacktestReport, Candle, RawTelegramMessage
+
+
+class BacktestEngine:
+    def __init__(self, *, classifier: MessageClassifier | None = None) -> None:
+        self.classifier = classifier or RegexMessageClassifier()
+        self.simulator = BacktestSimulator()
+        self.scorer = ChannelScorer()
+
+    def run(self, request: BacktestRequest) -> BacktestReport:
+        messages = fixture_messages(request.channel)
+        candles = fixture_candles(interval=request.interval)
+        return self.run_from_messages(request=request, messages=messages, candles=candles)
+
+    def run_from_messages(
+        self,
+        *,
+        request: BacktestRequest,
+        messages: list[RawTelegramMessage],
+        candles: list[Candle],
+    ) -> BacktestReport:
+        timeline = BacktestTimelineBuilder(classifier=self.classifier, channel_id=request.channel)
+        events = timeline.build(messages)
+
+        conservative_trades, conservative_final = self.simulator.simulate(
+            events=events,
+            candles=candles,
+            initial_balance=request.initial_balance,
+            risk_per_trade_pct=request.risk_per_trade_pct,
+            fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        )
+        _optimistic_trades, optimistic_final = self.simulator.simulate(
+            events=events,
+            candles=candles,
+            initial_balance=request.initial_balance,
+            risk_per_trade_pct=request.risk_per_trade_pct,
+            fill_policy=BacktestFillPolicy.OPTIMISTIC,
+        )
+        final_balance = (
+            conservative_final
+            if request.fill_policy is BacktestFillPolicy.CONSERVATIVE
+            else optimistic_final
+        )
+        total_pnl = final_balance - request.initial_balance
+
+        metrics, score = self.scorer.score(
+            channel_id=request.channel,
+            events=events,
+            trades=conservative_trades,
+            total_pnl=total_pnl,
+            conservative_pnl=conservative_final - request.initial_balance,
+            optimistic_pnl=optimistic_final - request.initial_balance,
+            from_date=request.from_date,
+            to_date=request.to_date,
+        )
+        report = BacktestReport(
+            channel_id=request.channel,
+            from_date=request.from_date,
+            to_date=request.to_date,
+            initial_balance=request.initial_balance,
+            final_balance=final_balance,
+            metrics=metrics,
+            trades=conservative_trades,
+            fill_policy=request.fill_policy,
+            generated_at=datetime.now(timezone.utc),
+            warnings=[],
+        )
+        report.warnings.append(f"score={score}")
+        return report
+
+
+def run_fixture_backtest() -> tuple[dict[str, Any], str]:
+    request = BacktestRequest(
+        channel="https://t.me/Tofan_Trade",
+        from_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        to_date=datetime(2026, 6, 2, tzinfo=timezone.utc),
+        initial_balance=Decimal("1000"),
+        interval="1m",
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        risk_per_trade_pct=Decimal("1"),
+        use_ai_classifier=False,
+        use_regex_fallback=True,
+        max_messages=5000,
+        symbols=None,
+    )
+    engine = BacktestEngine()
+    report = engine.run(request)
+    score = Decimal(report.warnings[0].split("=")[1]) if report.warnings else Decimal("0")
+    return report_to_json(report, score), report_to_telegram_summary(report, score)

@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     AI_CLASSIFIER_STORE_PROMPT_TEXT: bool = False
     AI_CLASSIFIER_STORE_RESPONSE_TEXT: bool = False
     AI_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
+    BACKTEST_DEFAULT_INITIAL_BALANCE: Decimal = Decimal("1000")
+    BACKTEST_DEFAULT_RISK_PER_TRADE_PCT: Decimal = Decimal("1")
+    BACKTEST_DEFAULT_INTERVAL: str = "1m"
+    BACKTEST_DEFAULT_FILL_POLICY: str = "conservative"
+    BACKTEST_MAX_MESSAGES: int = 5000
+    BACKTEST_MAX_CANDLES: int = 200000
+    BACKTEST_USE_AI_CLASSIFIER: bool = False
+    BACKTEST_USE_REGEX_FALLBACK: bool = True
+    BACKTEST_DEFAULT_CHANNEL: str = "https://t.me/Tofan_Trade"
+    RUN_BACKTEST_INTEGRATION_TESTS: int = 0
     MAX_RISK_PER_TRADE_PCT: Decimal = Decimal("1.0")
     MAX_DAILY_LOSS_PCT: Decimal = Decimal("3.0")
     MAX_WEEKLY_LOSS_PCT: Decimal = Decimal("6.0")

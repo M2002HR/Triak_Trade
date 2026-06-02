@@ -55,3 +55,5 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Admin approval bot authorization is username-based (`ADMIN_TELEGRAM_USERNAMES`), not numeric-id-first.
 - `ADMIN_USER_IDS` remains deprecated/backward-compatible only.
 - Admin decisions record approval/reject/watch only; they must not execute trades directly in admin module.
+- Backtesting engine is simulation-only and must never execute real trades.
+- Backtesting must use classifier interfaces/protocols (AI-ready), not regex internals directly.

@@ -8,6 +8,7 @@ from triak_trade.admin_bot.auth import AdminAuthService, normalize_username
 from triak_trade.admin_bot.callbacks import parse_admin_callback
 from triak_trade.admin_bot.errors import AdminRegistrationError
 from triak_trade.admin_bot.telegram_bot import TelegramAdminBot
+from triak_trade.backtesting.engine import run_fixture_backtest
 from triak_trade.db.repositories import AdminDecisionRepository
 from triak_trade.domain.models import AdminDecision, ProposedAction, SignalState
 
@@ -51,3 +52,49 @@ class AdminApprovalService:
         if self.decisions is not None:
             self.decisions.save_decision(decision)
         return decision
+
+    def backtest_menu(self, username: str | None) -> dict[str, object]:
+        self.auth.require_authorized_username(username)
+        return {
+            "text": "📊 Backtest Menu",
+            "buttons": [
+                "🌪 Tofan_Trade",
+                "🔗 Custom Channel",
+                "📅 Last 7 Days",
+                "📅 Last 30 Days",
+                "🕯 1m",
+                "🕯 5m",
+                "🕯 15m",
+                "✅ Run Backtest",
+                "❌ Cancel",
+                "⬅️ Main Menu",
+            ],
+            "callbacks": [
+                "menu:backtest",
+                "backtest:start",
+                "backtest:channel:tofan",
+                "backtest:range:7d",
+                "backtest:range:30d",
+                "backtest:interval:1m",
+                "backtest:interval:5m",
+                "backtest:confirm",
+                "backtest:run",
+                "backtest:cancel",
+            ],
+        }
+
+    def run_backtest_dry(self, username: str | None) -> dict[str, object]:
+        self.auth.require_authorized_username(username)
+        report_json, summary = run_fixture_backtest()
+        return {
+            "progress": [
+                "🔎 Fetching messages...",
+                "🧠 Classifying signals...",
+                "🕯 Fetching candles...",
+                "⚙️ Simulating trades...",
+                "📊 Calculating metrics...",
+                "✅ Backtest complete.",
+            ],
+            "summary": summary,
+            "report": report_json,
+        }

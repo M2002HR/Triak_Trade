@@ -83,3 +83,11 @@ mypy src
 - Admin must start the bot once so username→chat_id can be registered.
 - Real bot send tests are guard-gated with `RUN_TELEGRAM_BOT_INTEGRATION_TESTS=1`.
 - Approval flow records decisions only; it does not execute trades.
+
+## Backtesting
+
+- Backtest engine is available via CLI (`backtest-fixture`, `backtest-dry-run`).
+- Backtest flow can be initiated from admin workflow scaffolding by authorized usernames.
+- Backtest is simulation-only and never executes trades.
+- AI classification is target architecture; regex remains fallback/safety.
+- `https://t.me/Tofan_Trade` is a guarded real-world test target, not a hard-coded rule.

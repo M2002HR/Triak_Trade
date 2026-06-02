@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from triak_trade.admin_bot.callbacks import parse_admin_callback
+from triak_trade.admin_bot.callbacks import is_supported_menu_callback, parse_admin_callback
 from triak_trade.admin_bot.errors import AdminCallbackParseError
 from triak_trade.domain.enums import AdminDecisionType
 
@@ -18,3 +18,9 @@ def test_callback_parser_invalid_cases() -> None:
         parse_admin_callback("bad")
     with pytest.raises(AdminCallbackParseError):
         parse_admin_callback("admin:unknown:abc")
+
+
+def test_menu_callback_namespaces() -> None:
+    assert is_supported_menu_callback("menu:backtest")
+    assert is_supported_menu_callback("backtest:run")
+    assert not is_supported_menu_callback("backtest:unknown")

@@ -31,3 +31,18 @@ def parse_admin_callback(data: str) -> ParsedAdminCallback:
     if decision is None:
         raise AdminCallbackParseError("unknown decision")
     return ParsedAdminCallback(action_id=action_id, decision=decision)
+
+
+def is_supported_menu_callback(data: str) -> bool:
+    return data in {
+        "menu:backtest",
+        "backtest:start",
+        "backtest:channel:tofan",
+        "backtest:range:7d",
+        "backtest:range:30d",
+        "backtest:interval:1m",
+        "backtest:interval:5m",
+        "backtest:confirm",
+        "backtest:run",
+        "backtest:cancel",
+    }

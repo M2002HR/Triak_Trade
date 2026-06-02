@@ -17,17 +17,24 @@ from triak_trade.admin_bot.auth import AdminAuthService, normalize_username
 from triak_trade.admin_bot.callbacks import parse_admin_callback
 from triak_trade.admin_bot.errors import AdminUnauthorizedError
 from triak_trade.admin_bot.formatter import AdminActionFormatter
+from triak_trade.admin_bot.service import AdminApprovalService
 from triak_trade.admin_bot.telegram_bot import TelegramAdminBot
 from triak_trade.agents.channel_agent import ChannelAgent
 from triak_trade.agents.clock import FakeClock
 from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
+from triak_trade.backtesting import BacktestEngine, BacktestRequest, run_fixture_backtest
 from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
 from triak_trade.db.engine import build_engine_from_settings
-from triak_trade.domain.enums import CandleSource, ProposedActionType, SignalStatus
+from triak_trade.domain.enums import (
+    BacktestFillPolicy,
+    CandleSource,
+    ProposedActionType,
+    SignalStatus,
+)
 from triak_trade.domain.models import Candle, ProposedAction, RawTelegramMessage, SignalState
 from triak_trade.exchange.toobit.account import ToobitAccountClient
 from triak_trade.exchange.toobit.client import ToobitClient
@@ -608,6 +615,53 @@ def toobit_order_test_cmd(
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
+@app.command("backtest-fixture")
+def backtest_fixture_cmd() -> None:
+    _load_settings()
+    report_json, summary = run_fixture_backtest()
+    typer.echo(json.dumps({"summary": summary, "report": report_json}, indent=2, sort_keys=True))
+
+
+@app.command("backtest-dry-run")
+def backtest_dry_run_cmd(
+    channel: str = typer.Option("https://t.me/Tofan_Trade", "--channel"),
+    from_date: str = typer.Option(..., "--from"),
+    to_date: str = typer.Option(..., "--to"),
+    interval: str = typer.Option("1m", "--interval"),
+    real: bool = typer.Option(False, "--real"),
+) -> None:
+    settings = _load_settings()
+    if real:
+        raise typer.BadParameter(
+            "Real backtest mode blocked unless RUN_BACKTEST_INTEGRATION_TESTS=1 and related guards."
+        )
+    request = BacktestRequest(
+        channel=channel,
+        from_date=datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc),
+        to_date=datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc),
+        initial_balance=settings.BACKTEST_DEFAULT_INITIAL_BALANCE,
+        interval=interval,
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        risk_per_trade_pct=settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT,
+        use_ai_classifier=settings.BACKTEST_USE_AI_CLASSIFIER,
+        use_regex_fallback=settings.BACKTEST_USE_REGEX_FALLBACK,
+        max_messages=settings.BACKTEST_MAX_MESSAGES,
+        symbols=None,
+    )
+    report = BacktestEngine().run(request)
+    payload = {
+        "channel": report.channel_id,
+        "final_balance": str(report.final_balance),
+        "max_drawdown": str(report.metrics.max_drawdown),
+        "profit_factor": (
+            str(report.metrics.profit_factor) if report.metrics.profit_factor is not None else None
+        ),
+        "total_pnl": str(report.metrics.total_pnl),
+        "win_rate": str(report.metrics.win_rate),
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
 @app.command("admin-check")
 def admin_check_cmd() -> None:
     settings = _load_settings()
@@ -745,3 +799,22 @@ def admin_send_test_cmd(
         "telegram_message_id": message_id,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("admin-backtest-dry-run")
+def admin_backtest_dry_run_cmd(username: str = typer.Option(..., "--username")) -> None:
+    settings = _load_settings()
+    service = AdminApprovalService(
+        auth=AdminAuthService(settings.ADMIN_TELEGRAM_USERNAMES),
+        bot=TelegramAdminBot(
+            bot_token=settings.TELEGRAM_BOT_TOKEN.get_secret_value(),
+            parse_mode=settings.ADMIN_BOT_PARSE_MODE,
+            disable_web_preview=settings.ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW,
+        ),
+    )
+    try:
+        menu = service.backtest_menu(username)
+        run = service.run_backtest_dry(username)
+    except AdminUnauthorizedError as exc:
+        raise typer.BadParameter("username is not authorized") from exc
+    typer.echo(json.dumps({"menu": menu, "run": run}, indent=2, sort_keys=True))
