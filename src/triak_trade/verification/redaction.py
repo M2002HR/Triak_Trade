@@ -23,6 +23,7 @@ SENSITIVE_KEYS = {
 }
 
 SENSITIVE_PATTERNS = [
+    re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{20,}"),
     re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"signature=([a-fA-F0-9]{32,})"),
     re.compile(r"X-BB-APIKEY[:=]\s*[^,\s]+", re.IGNORECASE),

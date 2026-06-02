@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from typer.testing import CliRunner
 
 from triak_trade.cli import app
+from triak_trade.config.settings import get_settings
 
 runner = CliRunner()
 
@@ -75,7 +77,12 @@ def test_admin_bot_status_and_logs_cli_work() -> None:
     assert "TELEGRAM_BOT_TOKEN" not in status.stdout + logs.stdout
 
 
-def test_run_admin_bot_real_mode_blocked_without_guard() -> None:
+def test_run_admin_bot_real_mode_blocked_without_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADMIN_BOT_RUNTIME_ENABLED", "false")
+    get_settings.cache_clear()
     result = runner.invoke(app, ["run-admin-bot", "--real", "--once"])
+    get_settings.cache_clear()
     assert result.exit_code != 0
     assert "ADMIN_BOT_RUNTIME_ENABLED" in result.output

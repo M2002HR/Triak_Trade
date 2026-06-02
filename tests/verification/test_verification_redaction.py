@@ -24,3 +24,13 @@ def test_redaction_removes_sensitive_patterns() -> None:
     text = "signature=abcdef1234567890abcdef1234567890 X-BB-APIKEY: abc"
     assert "abcdef123456" not in redact_text(text)
     assert "X-BB-APIKEY: abc" not in redact_text(text)
+
+
+def test_redaction_removes_telegram_bot_api_url_tokens() -> None:
+    text = (
+        "POST https://api.telegram.org/"
+        "bot123456789:abcdefghijklmnopqrstuvwxyzABCDEFG/getUpdates"
+    )
+    redacted = redact_text(text)
+    assert "bot123456789:abcdefghijklmnopqrstuvwxyzABCDEFG" not in redacted
+    assert "***REDACTED***" in redacted

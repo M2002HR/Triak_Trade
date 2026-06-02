@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
@@ -36,6 +37,8 @@ async def run_admin_bot_runtime(
     once: bool,
     max_runtime_seconds: int | None = None,
 ) -> dict[str, Any]:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     if real:
         validate_real_admin_bot_runtime(settings)
     state_store = AdminBotStateStore(settings)
