@@ -91,3 +91,11 @@ mypy src
 - Backtest is simulation-only and never executes trades.
 - AI classification is target architecture; regex remains fallback/safety.
 - `https://t.me/Tofan_Trade` is a guarded real-world test target, not a hard-coded rule.
+
+## Verification Pack
+
+- Run `triak-trade verify-system` for safe local verification.
+- Run `triak-trade verify-system --mode safe --write-report` to generate JSON/Markdown reports.
+- Run `triak-trade verify-real` only after setting `RUN_SYSTEM_REAL_SMOKE_TESTS=1` plus specific service guards.
+- Use `triak-trade show-last-report` to inspect the latest generated report.
+- Reports redact secrets and real checks never execute live trades.

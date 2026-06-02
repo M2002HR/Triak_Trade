@@ -57,3 +57,5 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Admin decisions record approval/reject/watch only; they must not execute trades directly in admin module.
 - Backtesting engine is simulation-only and must never execute real trades.
 - Backtesting must use classifier interfaces/protocols (AI-ready), not regex internals directly.
+- System verification reports must redact secrets and keep real checks guarded by explicit env flags.
+- `triak-trade verify-system` is the default safe smoke command before showing project readiness.

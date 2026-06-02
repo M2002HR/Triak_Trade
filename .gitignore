@@ -11,4 +11,8 @@ __pycache__/
 .sessions/
 *.session
 *.session-journal
+runtime/
+reports/
+*.report.json
+*.report.md
 .DS_Store

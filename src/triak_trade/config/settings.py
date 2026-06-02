@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     AI_GATEWAY_PROVIDER_PRIORITY: str = "gemini,groq"
     AI_GATEWAY_DEFAULT_MODEL: str = ""
     AI_GATEWAY_CLASSIFY_PATH: str = "/v1/classify/telegram-signal"
+    RUN_AI_GATEWAY_INTEGRATION_TESTS: int = 0
     AI_CLASSIFIER_ENABLED: bool = False
     AI_CLASSIFIER_MIN_CONFIDENCE: Decimal = Decimal("0.70")
     AI_CLASSIFIER_USE_REGEX_FALLBACK: bool = True
@@ -94,6 +95,15 @@ class Settings(BaseSettings):
     BACKTEST_USE_REGEX_FALLBACK: bool = True
     BACKTEST_DEFAULT_CHANNEL: str = "https://t.me/Tofan_Trade"
     RUN_BACKTEST_INTEGRATION_TESTS: int = 0
+    VERIFICATION_REPORT_DIR: str = "runtime/reports"
+    VERIFICATION_WRITE_JSON: bool = True
+    VERIFICATION_WRITE_MARKDOWN: bool = True
+    VERIFICATION_INCLUDE_SKIPPED: bool = True
+    VERIFICATION_MAX_REAL_TELEGRAM_MESSAGES: int = 5
+    VERIFICATION_MAX_REAL_BACKTEST_HOURS: int = 6
+    RUN_SYSTEM_REAL_SMOKE_TESTS: int = 0
+    RUN_MYSQL_INTEGRATION_TESTS: int = 0
+    RUN_REDIS_INTEGRATION_TESTS: int = 0
     MAX_RISK_PER_TRADE_PCT: Decimal = Decimal("1.0")
     MAX_DAILY_LOSS_PCT: Decimal = Decimal("3.0")
     MAX_WEEKLY_LOSS_PCT: Decimal = Decimal("6.0")

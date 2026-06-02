@@ -8,6 +8,7 @@ import os
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import cast
 
 import httpx
 import typer
@@ -47,6 +48,9 @@ from triak_trade.parsing.regex_parser import RegexSignalParser
 from triak_trade.parsing.validator import ParsedSignalValidator
 from triak_trade.telegram.client import FakeTelegramClient, TelegramClientInterface
 from triak_trade.telegram.telethon_client import TelethonTelegramClient
+from triak_trade.verification.models import VerificationStatus
+from triak_trade.verification.report import find_latest_report, render_terminal_summary
+from triak_trade.verification.runner import VerificationMode, VerificationRunner
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -818,3 +822,55 @@ def admin_backtest_dry_run_cmd(username: str = typer.Option(..., "--username")) 
     except AdminUnauthorizedError as exc:
         raise typer.BadParameter("username is not authorized") from exc
     typer.echo(json.dumps({"menu": menu, "run": run}, indent=2, sort_keys=True))
+
+
+@app.command("verify-system")
+def verify_system_cmd(
+    mode: str = typer.Option("safe", "--mode"),
+    write_report: bool = typer.Option(False, "--write-report/--no-write-report"),
+    output_format: str = typer.Option("text", "--format"),
+) -> None:
+    """Run safe or guarded real system verification."""
+    settings = _load_settings()
+    if mode not in {"safe", "real", "all"}:
+        raise typer.BadParameter("mode must be safe, real, or all")
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("format must be text or json")
+
+    report = VerificationRunner(settings).run(
+        mode=cast(VerificationMode, mode),
+        write_report=write_report,
+    )
+    if output_format == "json":
+        typer.echo(json.dumps(report.model_dump(mode="json"), indent=2, sort_keys=True))
+    else:
+        typer.echo(render_terminal_summary(report))
+    if report.overall_status is VerificationStatus.FAIL:
+        raise typer.Exit(code=1)
+
+
+@app.command("verify-real")
+def verify_real_cmd(
+    write_report: bool = typer.Option(False, "--write-report/--no-write-report"),
+) -> None:
+    """Shortcut for guarded real verification."""
+    settings = _load_settings()
+    report = VerificationRunner(settings).run(mode="real", write_report=write_report)
+    typer.echo(render_terminal_summary(report))
+    if settings.RUN_SYSTEM_REAL_SMOKE_TESTS != 1:
+        typer.echo("Real smoke guard is disabled; real checks were skipped.")
+    if report.overall_status is VerificationStatus.FAIL:
+        raise typer.Exit(code=1)
+
+
+@app.command("show-last-report")
+def show_last_report_cmd() -> None:
+    """Show the latest generated Markdown verification report path and preview."""
+    settings = _load_settings()
+    latest = find_latest_report(settings.VERIFICATION_REPORT_DIR)
+    if latest is None:
+        typer.echo("No verification reports found.")
+        return
+    lines = latest.read_text(encoding="utf-8").splitlines()
+    preview = "\n".join(lines[:20])
+    typer.echo(json.dumps({"path": str(latest), "preview": preview}, indent=2, sort_keys=True))
