@@ -52,6 +52,12 @@ from triak_trade.exchange.toobit.demo_execution import DemoExecutionAdapter
 from triak_trade.exchange.toobit.errors import ToobitError
 from triak_trade.exchange.toobit.spot import ToobitSpotClient
 from triak_trade.market_data.toobit import ToobitMarketDataProvider
+from triak_trade.observability.formatters import format_processing_audit_for_telegram
+from triak_trade.observability.processing_audit import (
+    ProcessingAuditService,
+    build_sample_processing_audit_event,
+)
+from triak_trade.observability.telegram_log_channel import TelegramLogChannelClient
 from triak_trade.parsing.normalizer import MessageNormalizer
 from triak_trade.parsing.regex_parser import RegexSignalParser
 from triak_trade.parsing.validator import ParsedSignalValidator
@@ -831,6 +837,82 @@ def admin_backtest_dry_run_cmd(username: str = typer.Option(..., "--username")) 
     except AdminUnauthorizedError as exc:
         raise typer.BadParameter("username is not authorized") from exc
     typer.echo(json.dumps({"menu": menu, "run": run}, indent=2, sort_keys=True))
+
+
+@app.command("log-channel-check")
+def log_channel_check_cmd() -> None:
+    """Show safe Telegram log-channel status without connecting."""
+    settings = _load_settings()
+    payload = TelegramLogChannelClient(settings=settings).safe_status()
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("log-channel-format-dry-run")
+def log_channel_format_dry_run_cmd() -> None:
+    """Print a safe English processing audit report without network calls."""
+    settings = _load_settings()
+    event = build_sample_processing_audit_event(settings)
+    typer.echo(format_processing_audit_for_telegram(event))
+
+
+@app.command("log-channel-send-test")
+def log_channel_send_test_cmd(real: bool = typer.Option(False, "--real")) -> None:
+    """Send one guarded non-secret test processing report to the log channel."""
+    settings = _load_settings()
+    if not real:
+        raise typer.BadParameter("Blocked by default. Pass --real and enable log-channel guard.")
+    client = TelegramLogChannelClient(settings=settings)
+    if not client.enabled_for_real_send():
+        raise typer.BadParameter(
+            "Real log-channel send requires TELEGRAM_LOG_CHANNEL_ENABLED=true, "
+            "PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true, "
+            "RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1, and TELEGRAM_BOT_TOKEN."
+        )
+    event = build_sample_processing_audit_event(settings)
+    result = asyncio.run(client.send_event(event, real=True))
+    payload = {
+        "sent": result.sent,
+        "skipped": result.skipped,
+        "reason": result.reason,
+        "message_id": result.message_id,
+        "log_channel_username": settings.TELEGRAM_LOG_CHANNEL_USERNAME,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("process-message-audit-dry-run")
+def process_message_audit_dry_run_cmd() -> None:
+    """Run a fake message through ChannelAgent with processing audit enabled."""
+    settings = _load_settings()
+    start = datetime.now(timezone.utc)
+    clock = FakeClock(start)
+    agent = ChannelAgent(channel_id="audit-dry-run", settings=settings, clock=clock)
+    raw = RawTelegramMessage(
+        channel_id="audit-dry-run",
+        channel_username="@AuditDryRun",
+        message_id=101,
+        text="BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+        date=start,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    service = ProcessingAuditService(settings=settings, clock=clock)
+    result = service.process_message_with_audit(raw, agent)
+    payload = {
+        "audit_event": {
+            "event_id": result.event.event_id,
+            "status": result.event.status.value,
+            "classification": result.event.classification,
+            "parsed_action": result.event.parsed_action,
+            "signal_id": result.event.signal_id,
+            "state_before": result.event.state_before,
+            "state_after": result.event.state_after,
+            "duration_ms": result.event.duration_ms,
+        },
+        "proposed_actions": [action.model_dump(mode="json") for action in result.proposed_actions],
+        "formatted_message": result.formatted_message,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @app.command("run-admin-bot")

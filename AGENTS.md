@@ -64,3 +64,7 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Backtesting must use classifier interfaces/protocols (AI-ready), not regex internals directly.
 - System verification reports must redact secrets and keep real checks guarded by explicit env flags.
 - `triak-trade verify-system` is the default safe smoke command before showing project readiness.
+- Processing audit events must capture safe per-message operational visibility without secrets.
+- Telegram processing log channel is `@triak_logs`; all log-channel reports must be in English.
+- Real log-channel sending requires `TELEGRAM_LOG_CHANNEL_ENABLED=true`, `PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true`, and `RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1`.
+- Do not scatter direct log-channel sends through core logic; use observability event/reporting services.

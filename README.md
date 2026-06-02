@@ -43,6 +43,9 @@ triak-trade admin-bot-smoke-test
 triak-trade run-admin-bot --once
 triak-trade admin-bot-status
 triak-trade admin-bot-logs --lines 50
+triak-trade log-channel-check
+triak-trade log-channel-format-dry-run
+triak-trade process-message-audit-dry-run
 pytest
 ruff check .
 mypy src
@@ -108,3 +111,13 @@ mypy src
 - Run `triak-trade verify-real` only after setting `RUN_SYSTEM_REAL_SMOKE_TESTS=1` plus specific service guards.
 - Use `triak-trade show-last-report` to inspect the latest generated report.
 - Reports redact secrets and real checks never execute live trades.
+
+## Processing Audit And Log Channel
+
+- Processing audit events capture per-message classification, state transition, proposed action, timing, and safe debug notes.
+- Telegram log-channel reports are English and target `@triak_logs` by default.
+- Real log-channel sending is disabled by default.
+- Enable real log-channel sending only with `TELEGRAM_LOG_CHANNEL_ENABLED=true`, `PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true`, and `RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1`.
+- The admin bot must be allowed to post to `@triak_logs`.
+- `triak-trade log-channel-format-dry-run` and `triak-trade process-message-audit-dry-run` never call Telegram.
+- No secrets, account data, live orders, or trade execution are included in processing audit reports.

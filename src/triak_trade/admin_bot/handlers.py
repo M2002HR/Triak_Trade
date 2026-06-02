@@ -14,12 +14,16 @@ from triak_trade.admin_bot.menus import (
     UNAUTHORIZED_TEXT,
     WELCOME_TEXT,
     backtest_inline_keyboard,
+    logs_inline_keyboard,
     main_reply_keyboard,
     system_tests_inline_keyboard,
 )
 from triak_trade.admin_bot.state import AdminBotStateStore, utc_now
 from triak_trade.backtesting.engine import run_fixture_backtest
 from triak_trade.config.settings import Settings
+from triak_trade.observability.formatters import format_processing_audit_for_telegram
+from triak_trade.observability.processing_audit import build_sample_processing_audit_event
+from triak_trade.observability.telegram_log_channel import TelegramLogChannelClient
 from triak_trade.verification.models import VerificationStatus
 from triak_trade.verification.report import find_latest_report, render_terminal_summary
 from triak_trade.verification.runner import VerificationRunner
@@ -128,6 +132,14 @@ class AdminBotUpdateHandler:
             ]
         if normalized_text == "📜 گزارش آخر":
             return [OutgoingMessage(chat_id=chat_id, text=self._last_report_text())]
+        if normalized_text == "Logs & Reports":
+            return [
+                OutgoingMessage(
+                    chat_id=chat_id,
+                    text="🛰️ Logs & Reports",
+                    reply_markup=logs_inline_keyboard(),
+                )
+            ]
         if normalized_text == "💰 توبیت":
             return [OutgoingMessage(chat_id=chat_id, text=self._toobit_status_text())]
         if normalized_text == "وضعیت":
@@ -165,6 +177,32 @@ class AdminBotUpdateHandler:
             return [OutgoingMessage(chat_id=chat_id, text=_truncate(text))]
         if callback_data == "system:last_report":
             return [OutgoingMessage(chat_id=chat_id, text=self._last_report_text())]
+        if callback_data == "logs:status":
+            status = TelegramLogChannelClient(settings=self.settings).safe_status()
+            text = (
+                "Log Channel Status\n"
+                f"channel={status['log_channel_username']}\n"
+                f"enabled={status['enabled']}\n"
+                f"audit_send_enabled={status['audit_send_enabled']}\n"
+                f"guard_enabled={status['guard_enabled']}\n"
+                f"bot_token_present={status['bot_token_present']}"
+            )
+            return [OutgoingMessage(chat_id=chat_id, text=text)]
+        if callback_data == "logs:test_dry":
+            event = build_sample_processing_audit_event(self.settings)
+            return [
+                OutgoingMessage(
+                    chat_id=chat_id,
+                    text=_truncate(format_processing_audit_for_telegram(event)),
+                )
+            ]
+        if callback_data == "logs:last_events":
+            return [
+                OutgoingMessage(
+                    chat_id=chat_id,
+                    text="Last processing events require DB-backed listing in a later step.",
+                )
+            ]
         return [
             OutgoingMessage(
                 chat_id=chat_id,

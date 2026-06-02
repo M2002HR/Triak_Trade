@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     ADMIN_BOT_OFFSET_FILE: str = "runtime/admin_bot/update_offset.json"
     RUN_TELEGRAM_BOT_INTEGRATION_TESTS: int = 0
     ADMIN_BOT_TEST_MESSAGE_TEXT: str = "Triak_Trade admin bot test: configuration OK"
+    TELEGRAM_LOG_CHANNEL_USERNAME: str = "@triak_logs"
+    TELEGRAM_LOG_CHANNEL_ENABLED: bool = False
+    TELEGRAM_LOG_CHANNEL_SEND_FULL_TEXT: bool = False
+    TELEGRAM_LOG_CHANNEL_MAX_TEXT_CHARS: int = 500
+    TELEGRAM_LOG_CHANNEL_PARSE_MODE: str = "HTML"
+    TELEGRAM_LOG_CHANNEL_DISABLE_WEB_PAGE_PREVIEW: bool = False
+    RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS: int = 0
+    PROCESSING_AUDIT_ENABLED: bool = True
+    PROCESSING_AUDIT_STORE_IN_DB: bool = True
+    PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL: bool = False
     GEMINI_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     GROQ_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     SIGNAL_CONSOLIDATION_SECONDS: int = 180

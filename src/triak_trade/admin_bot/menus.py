@@ -20,7 +20,8 @@ def main_reply_keyboard() -> dict[str, Any]:
     return {
         "keyboard": [
             [{"text": "📊 بک‌تست"}, {"text": "🧪 تست سیستم"}],
-            [{"text": "📜 گزارش آخر"}, {"text": "💰 توبیت"}],
+            [{"text": "📜 گزارش آخر"}, {"text": "Logs & Reports"}],
+            [{"text": "💰 توبیت"}],
             [{"text": "وضعیت"}],
         ],
         "resize_keyboard": True,
@@ -44,5 +45,16 @@ def system_tests_inline_keyboard() -> dict[str, Any]:
             [{"text": "اجرای verify-system safe", "callback_data": "system:verify"}],
             [{"text": "نمایش آخرین گزارش", "callback_data": "system:last_report"}],
             [{"text": "بازگشت", "callback_data": "menu:main"}],
+        ]
+    }
+
+
+def logs_inline_keyboard() -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "Log Channel Status", "callback_data": "logs:status"}],
+            [{"text": "Dry-run Test Log", "callback_data": "logs:test_dry"}],
+            [{"text": "Last Processing Events", "callback_data": "logs:last_events"}],
+            [{"text": "Back", "callback_data": "menu:main"}],
         ]
     }
