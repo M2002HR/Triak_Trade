@@ -2,13 +2,14 @@
   <label>Channel
     <input name="channel" value="{{ default_channel }}" placeholder="https://t.me/Tofan_Trade">
   </label>
-  <label>Date Range
-    <select name="range">
-      <option>Last 7 days</option>
-      <option>Today</option>
-      <option>Last 30 days</option>
-      <option>Custom</option>
-    </select>
+  <label>From Date (optional)
+    <input name="from_date" placeholder="2026-06-01T00:00:00">
+  </label>
+  <label>To Date (optional)
+    <input name="to_date" placeholder="2026-06-02T00:00:00">
+  </label>
+  <label>Lookback Hours
+    <input name="lookback_hours" value="24">
   </label>
   <label>Interval
     <select name="interval">
@@ -24,21 +25,26 @@
   <label>Risk Per Trade %
     <input name="risk_per_trade_pct" value="1">
   </label>
+  <label>Max Messages
+    <input name="max_messages" value="1000">
+  </label>
   <label>Fill Policy
     <select name="fill_policy">
       <option value="conservative">conservative</option>
       <option value="optimistic">optimistic</option>
     </select>
   </label>
-  <label>Classifier Mode
-    <select name="classifier_mode">
-      <option>fixture</option>
-      <option>regex fallback</option>
-      <option disabled>AI later</option>
-    </select>
-  </label>
   <label class="checkbox">
     <input type="checkbox" name="real_mode"> Real mode guarded
   </label>
-  <button type="submit">Run Safe Backtest</button>
+  <label class="checkbox">
+    <input type="checkbox" name="use_ai" checked> Use AI when available
+  </label>
+  <label class="checkbox">
+    <input type="checkbox" name="send_telegram_summary" checked> Send admin-bot summary when supported
+  </label>
+  <label class="checkbox">
+    <input type="checkbox" name="send_log_channel" checked> Send aggregate log-channel updates
+  </label>
+  <button type="submit">Run Real Backtest</button>
 </form>

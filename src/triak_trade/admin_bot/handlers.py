@@ -20,6 +20,7 @@ from triak_trade.admin_bot.menus import (
 )
 from triak_trade.admin_bot.state import AdminBotStateStore, utc_now
 from triak_trade.backtesting.engine import run_fixture_backtest
+from triak_trade.backtesting.real_runner import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.config.settings import Settings
 from triak_trade.observability.formatters import format_processing_audit_for_telegram
 from triak_trade.observability.processing_audit import build_sample_processing_audit_event
@@ -171,6 +172,13 @@ class AdminBotUpdateHandler:
                 "حالت: simulation only"
             )
             return [OutgoingMessage(chat_id=chat_id, text=text)]
+        if callback_data in {"backtest:real:24h", "backtest:real:7d"}:
+            hours = 24 if callback_data.endswith("24h") else 168
+            return self._run_real_backtest(chat_id, hours=hours)
+        if callback_data == "backtest:latest":
+            return [OutgoingMessage(chat_id=chat_id, text=self._latest_backtest_text())]
+        if callback_data == "backtest:dashboard":
+            return [OutgoingMessage(chat_id=chat_id, text=self._dashboard_text())]
         if callback_data == "system:verify":
             report = VerificationRunner(self.settings).run(mode="safe", write_report=True)
             text = render_terminal_summary(report)
@@ -219,6 +227,69 @@ class AdminBotUpdateHandler:
         lines = latest.read_text(encoding="utf-8", errors="replace").splitlines()
         preview = "\n".join(lines[:12])
         return _truncate(f"آخرین گزارش:\npath={latest}\n\n{preview}")
+
+    def _latest_backtest_text(self) -> str:
+        payload = RealBacktestRunner(settings=self.settings).latest_report_summary()
+        if payload is None:
+            return "هنوز هیچ real backtest report ذخیره نشده است."
+        return _truncate(
+            "📄 Latest real backtest report\n"
+            f"path={payload.get('report_path')}\n"
+            f"success={payload.get('success')}\n"
+            f"real_telegram_used={payload.get('real_telegram_used')}\n"
+            f"real_market_data_used={payload.get('real_market_data_used')}\n"
+            f"parsed_signals={payload.get('parsed_signals')}\n"
+            f"valid_signals={payload.get('valid_signals')}\n"
+            f"trades_simulated={payload.get('trades_simulated')}\n"
+            f"total_pnl={payload.get('total_pnl')}\n"
+            f"channel_score={payload.get('channel_score')}"
+        )
+
+    def _run_real_backtest(self, chat_id: int, *, hours: int) -> list[OutgoingMessage]:
+        runner = RealBacktestRunner(settings=self.settings)
+        readiness = runner.readiness()
+        if not readiness.ready:
+            text = "Real backtest blocked.\n" + "\n".join(readiness.issues)
+            return [OutgoingMessage(chat_id=chat_id, text=_truncate(text))]
+
+        progress = [
+            "🔎 Fetching Telegram messages...",
+            "🧠 Classifying messages...",
+            "🕯 Fetching Toobit candles...",
+            "⚙️ Simulating trades...",
+            "📊 Generating report...",
+        ]
+        request = RealBacktestRunRequest(
+            channel=self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+            hours=hours,
+            interval=self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
+            max_messages=self.settings.REAL_BACKTEST_MAX_MESSAGES,
+            use_ai=self.settings.REAL_BACKTEST_USE_AI,
+            send_telegram_summary=self.settings.REAL_BACKTEST_SEND_TO_ADMIN_BOT,
+            send_log_channel=self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
+        )
+        result = runner.run_sync(request)
+        summary = (
+            "✅ Backtest complete.\n"
+            f"channel={result.channel}\n"
+            f"real_telegram_used={result.real_telegram_used}\n"
+            f"real_market_data_used={result.real_market_data_used}\n"
+            f"ai_used={result.ai_used}\n"
+            f"regex_fallback_used={result.regex_fallback_used}\n"
+            f"total_messages={result.total_messages}\n"
+            f"parsed_signals={result.parsed_signals}\n"
+            f"valid_signals={result.valid_signals}\n"
+            f"trades_simulated={result.trades_simulated}\n"
+            f"total_pnl={result.total_pnl}\n"
+            f"channel_score={result.channel_score}\n"
+            f"dashboard=http://{self.settings.DASHBOARD_HOST}:{self.settings.DASHBOARD_PORT}/reports\n"
+            f"report={result.report_path}"
+        )
+        if result.errors:
+            summary += "\nerrors=" + "; ".join(result.errors)
+        outgoing = [OutgoingMessage(chat_id=chat_id, text=item) for item in progress]
+        outgoing.append(OutgoingMessage(chat_id=chat_id, text=_truncate(summary)))
+        return outgoing
 
     def _toobit_status_text(self) -> str:
         key_present = _secret_present(self.settings.TOOBIT_API_KEY.get_secret_value())

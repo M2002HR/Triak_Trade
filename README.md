@@ -48,6 +48,10 @@ triak-trade log-channel-format-dry-run
 triak-trade process-message-audit-dry-run
 triak-trade dashboard-check
 triak-trade dashboard-smoke-test
+triak-trade real-backtest-check
+triak-trade real-backtest-run --channel https://t.me/Tofan_Trade --hours 24 --interval 1m
+triak-trade real-backtest-tofan --hours 24
+triak-trade backtest-show-latest
 pytest
 ruff check .
 mypy src
@@ -101,7 +105,11 @@ mypy src
 ## Backtesting
 
 - Backtest engine is available via CLI (`backtest-fixture`, `backtest-dry-run`).
-- Backtest flow can be initiated from admin workflow scaffolding by authorized usernames.
+- Real backtest pipeline uses guarded real Telegram history plus Toobit public klines only.
+- `triak-trade real-backtest-check` shows readiness without printing secrets.
+- `triak-trade real-backtest-run` and `real-backtest-tofan` write JSON/Markdown reports under `runtime/reports/backtests`.
+- Dashboard `/backtests` and `/reports` surface the same real reports.
+- Admin bot can run a guarded 24h/7d real backtest and show the latest saved report.
 - Backtest is simulation-only and never executes trades.
 - AI classification is target architecture; regex remains fallback/safety.
 - `https://t.me/Tofan_Trade` is a guarded real-world test target, not a hard-coded rule.

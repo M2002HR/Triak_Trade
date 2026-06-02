@@ -40,3 +40,26 @@ def report_to_telegram_summary(report: BacktestReport, score: Decimal) -> str:
         f"• Optimistic PnL: {metrics.optimistic_pnl}\n\n"
         f"Score: {score.quantize(Decimal('1'))}/100"
     )
+
+
+def report_to_markdown_summary(report: BacktestReport, score: Decimal) -> str:
+    metrics = report.metrics
+    return "\n".join(
+        [
+            "# Backtest Report",
+            "",
+            f"- Channel: `{report.channel_id}`",
+            f"- Range: `{report.from_date.isoformat()} -> {report.to_date.isoformat()}`",
+            f"- Initial Balance: `{report.initial_balance}`",
+            f"- Final Balance: `{report.final_balance}`",
+            f"- Parsed Signals: `{metrics.parsed_signals}`",
+            f"- Valid Signals: `{metrics.valid_signals}`",
+            f"- Total PnL: `{metrics.total_pnl}`",
+            f"- Win Rate: `{metrics.win_rate}`",
+            f"- Profit Factor: `{metrics.profit_factor}`",
+            f"- Max Drawdown: `{metrics.max_drawdown}`",
+            f"- Conservative PnL: `{metrics.conservative_pnl}`",
+            f"- Optimistic PnL: `{metrics.optimistic_pnl}`",
+            f"- Score: `{score}`",
+        ]
+    )

@@ -3,9 +3,9 @@
 <h1>Reports</h1>
 <section class="panel">
   {% if latest %}
-    <h2>Latest Report</h2><p>{{ latest }}</p><pre>{{ preview }}</pre>
+    <h2>Latest Real Backtest Report</h2><p>{{ latest }}</p><pre>{{ preview }}</pre>
   {% else %}
-    <p class="empty">No verification reports found.</p>
+    <p class="empty">No real backtest reports found.</p>
   {% endif %}
 </section>
 <section class="panel"><h2>Files</h2>{% for file in files %}<p>{{ file }}</p>{% endfor %}</section>

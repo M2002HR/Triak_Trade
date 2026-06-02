@@ -52,8 +52,16 @@ class Settings(BaseSettings):
     TOOBIT_API_SECRET: SecretStr = Field(default=SecretStr("replace_me"))
     TELEGRAM_API_ID: int = 0
     TELEGRAM_API_HASH: SecretStr = Field(default=SecretStr("replace_me"))
+    TELEGRAM_STRING_SESSION: SecretStr = Field(default=SecretStr(""))
     TELEGRAM_SESSION_NAME: str = "triak_trade"
     TELEGRAM_SESSION_DIR: str = ".sessions"
+    TELEGRAM_PROXY_ENABLED: bool = False
+    TELEGRAM_PROXY_TYPE: str = "socks5"
+    TELEGRAM_PROXY_HOST: str = ""
+    TELEGRAM_PROXY_PORT: int = 0
+    TELEGRAM_PROXY_RDNS: bool = True
+    TELEGRAM_PROXY_USERNAME: str = ""
+    TELEGRAM_PROXY_PASSWORD: SecretStr = Field(default=SecretStr(""))
     TELEGRAM_HISTORY_BATCH_SIZE: int = 100
     TELEGRAM_LIVE_CHANNELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     TELEGRAM_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
@@ -133,6 +141,18 @@ class Settings(BaseSettings):
     BACKTEST_USE_REGEX_FALLBACK: bool = True
     BACKTEST_DEFAULT_CHANNEL: str = "https://t.me/Tofan_Trade"
     RUN_BACKTEST_INTEGRATION_TESTS: int = 0
+    REAL_BACKTEST_ENABLED: bool = False
+    REAL_BACKTEST_DEFAULT_CHANNEL: str = "https://t.me/Tofan_Trade"
+    REAL_BACKTEST_DEFAULT_LOOKBACK_HOURS: int = 24
+    REAL_BACKTEST_DEFAULT_INTERVAL: str = "1m"
+    REAL_BACKTEST_MAX_MESSAGES: int = 1000
+    REAL_BACKTEST_MAX_CANDLES: int = 100000
+    REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
+    REAL_BACKTEST_USE_AI: bool = True
+    REAL_BACKTEST_USE_REGEX_FALLBACK: bool = True
+    REAL_BACKTEST_SEND_TO_ADMIN_BOT: bool = True
+    REAL_BACKTEST_SEND_TO_LOG_CHANNEL: bool = True
+    REAL_BACKTEST_LOG_PER_MESSAGE: bool = False
     VERIFICATION_REPORT_DIR: str = "runtime/reports"
     VERIFICATION_WRITE_JSON: bool = True
     VERIFICATION_WRITE_MARKDOWN: bool = True

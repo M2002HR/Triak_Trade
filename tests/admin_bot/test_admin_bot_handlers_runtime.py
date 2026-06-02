@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from triak_trade.admin_bot.auth import AdminAuthService
 from triak_trade.admin_bot.handlers import AdminBotUpdateHandler
 from triak_trade.admin_bot.menus import UNAUTHORIZED_TEXT
 from triak_trade.admin_bot.state import AdminBotStateStore
+from triak_trade.backtesting.real_runner import RealBacktestResult
 from triak_trade.config.settings import Settings
 
 
@@ -83,6 +86,65 @@ def test_backtest_menu_and_callback(tmp_path: Path) -> None:
     assert "بک‌تست" in menu.outgoing[0].text
     assert menu.outgoing[0].reply_markup is not None
     assert "simulation only" in run.outgoing[0].text
+
+
+def test_real_backtest_callback_progress(tmp_path: Path, monkeypatch) -> None:
+    class FakeRunner:
+        def __init__(self, settings: Settings) -> None:
+            self.settings = settings
+
+        def readiness(self) -> object:
+            class Readiness:
+                def __init__(self) -> None:
+                    self.ready = True
+                    self.issues: list[str] = []
+
+            return Readiness()
+
+        def run_sync(self, request: object) -> RealBacktestResult:
+            return RealBacktestResult(
+                success=True,
+                channel="https://t.me/Tofan_Trade",
+                from_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                to_date=datetime(2026, 6, 2, tzinfo=timezone.utc),
+                interval="1m",
+                real_telegram_used=True,
+                real_market_data_used=True,
+                ai_used=False,
+                regex_fallback_used=True,
+                total_messages=10,
+                classified_messages=10,
+                parsed_signals=2,
+                valid_signals=1,
+                invalid_signals=1,
+                ignored_messages=7,
+                ambiguous_messages=0,
+                symbols_found=["BTCUSDT"],
+                candles_fetched=100,
+                trades_simulated=1,
+                trades_filled=1,
+                wins=1,
+                losses=0,
+                win_rate=Decimal("1"),
+                total_pnl=Decimal("25"),
+                profit_factor=Decimal("2"),
+                max_drawdown=Decimal("5"),
+                conservative_pnl=Decimal("20"),
+                optimistic_pnl=Decimal("30"),
+                channel_score=Decimal("75"),
+                generated_at=datetime(2026, 6, 2, tzinfo=timezone.utc),
+                report_path="runtime/reports/backtests/report.json",
+                markdown_report_path="runtime/reports/backtests/report.md",
+            )
+
+        def latest_report_summary(self) -> dict[str, object]:
+            return {"report_path": "runtime/reports/backtests/report.json"}
+
+    monkeypatch.setattr("triak_trade.admin_bot.handlers.RealBacktestRunner", FakeRunner)
+
+    run = build_handler(tmp_path).handle_update(callback_update("backtest:real:24h"))
+    assert any("Fetching Telegram messages" in item.text for item in run.outgoing)
+    assert any("real_telegram_used=True" in item.text for item in run.outgoing)
 
 
 def test_system_menu_and_status_do_not_print_secrets(tmp_path: Path) -> None:

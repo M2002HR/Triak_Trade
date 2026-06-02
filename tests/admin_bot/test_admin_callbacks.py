@@ -23,4 +23,6 @@ def test_callback_parser_invalid_cases() -> None:
 def test_menu_callback_namespaces() -> None:
     assert is_supported_menu_callback("menu:backtest")
     assert is_supported_menu_callback("backtest:run")
+    assert is_supported_menu_callback("backtest:real:24h")
+    assert is_supported_menu_callback("backtest:latest")
     assert not is_supported_menu_callback("backtest:unknown")

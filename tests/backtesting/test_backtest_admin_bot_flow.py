@@ -6,6 +6,7 @@ from triak_trade.admin_bot.auth import AdminAuthService
 from triak_trade.admin_bot.service import AdminApprovalService
 from triak_trade.admin_bot.telegram_bot import TelegramAdminBot
 from triak_trade.cli import app
+from triak_trade.config.settings import Settings
 
 runner = CliRunner()
 
@@ -20,6 +21,16 @@ def test_admin_backtest_menu_and_progress_flow() -> None:
     assert "📊 Backtest Menu" in menu["text"]
     assert "backtest:run" in menu["callbacks"]
     assert run["progress"][0].startswith("🔎")
+
+
+def test_admin_real_backtest_service_blocked_without_settings() -> None:
+    service = AdminApprovalService(
+        auth=AdminAuthService(["@we_are_waiting_for_him"]),
+        bot=TelegramAdminBot(bot_token="x", parse_mode="HTML", disable_web_preview=True),
+        settings=Settings(_env_file=None),
+    )
+    result = service.run_real_backtest("@we_are_waiting_for_him", hours=24)
+    assert result["blocked"] is True
 
 
 def test_admin_backtest_dry_run_cli_authorized_and_unauthorized() -> None:

@@ -34,7 +34,13 @@ from triak_trade.agents.clock import FakeClock
 from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
-from triak_trade.backtesting import BacktestEngine, BacktestRequest, run_fixture_backtest
+from triak_trade.backtesting import (
+    BacktestEngine,
+    BacktestRequest,
+    RealBacktestRunner,
+    RealBacktestRunRequest,
+    run_fixture_backtest,
+)
 from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
@@ -96,6 +102,13 @@ def _build_toobit_client(settings: Settings) -> ToobitClient:
         time_path=settings.TOOBIT_TIME_PATH,
         exchange_info_path=settings.TOOBIT_EXCHANGE_INFO_PATH,
     )
+
+
+def _build_real_backtest_runner(
+    settings: Settings,
+    telegram_client: TelegramClientInterface | None = None,
+) -> RealBacktestRunner:
+    return RealBacktestRunner(settings=settings, telegram_client=telegram_client)
 
 
 @app.command("version")
@@ -342,6 +355,7 @@ def telegram_check_cmd() -> None:
     payload = {
         "api_id_present": settings.TELEGRAM_API_ID > 0,
         "api_hash_present": bool(api_hash and api_hash != "replace_me"),
+        "string_session_present": bool(settings.TELEGRAM_STRING_SESSION.get_secret_value().strip()),
         "session_dir": settings.TELEGRAM_SESSION_DIR,
         "session_name": settings.TELEGRAM_SESSION_NAME,
         "real_test_channel": settings.TELEGRAM_REAL_TEST_CHANNEL,
@@ -691,6 +705,116 @@ def backtest_dry_run_cmd(
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
+@app.command("real-backtest-check")
+def real_backtest_check_cmd() -> None:
+    """Show non-secret readiness for the real backtest pipeline."""
+    settings = _load_settings()
+    runner = _build_real_backtest_runner(settings)
+    readiness = runner.readiness().model_dump(mode="json")
+    readiness["admin_bot_running"] = get_admin_bot_status(settings)["running"]
+    readiness["dashboard_running"] = dashboard_status(settings)["running"]
+    typer.echo(json.dumps(readiness, indent=2, sort_keys=True))
+
+
+@app.command("real-backtest-run")
+def real_backtest_run_cmd(
+    channel: str = typer.Option(..., "--channel"),
+    from_date: str | None = typer.Option(None, "--from"),
+    to_date: str | None = typer.Option(None, "--to"),
+    hours: int | None = typer.Option(None, "--hours"),
+    interval: str = typer.Option("1m", "--interval"),
+    max_messages: int = typer.Option(1000, "--max-messages"),
+    use_ai: bool = typer.Option(True, "--use-ai/--no-ai"),
+    send_telegram_summary: bool = typer.Option(
+        True,
+        "--send-telegram-summary/--no-send-telegram-summary",
+    ),
+    send_log_channel: bool = typer.Option(
+        True,
+        "--send-log-channel/--no-send-log-channel",
+    ),
+) -> None:
+    """Run a guarded real Telegram + Toobit public backtest."""
+    settings = _load_settings()
+    runner = _build_real_backtest_runner(settings)
+    request = RealBacktestRunRequest(
+        channel=channel,
+        from_date=datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+        if from_date
+        else None,
+        to_date=datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc) if to_date else None,
+        hours=hours,
+        interval=interval,
+        max_messages=max_messages,
+        use_ai=use_ai,
+        send_telegram_summary=send_telegram_summary,
+        send_log_channel=send_log_channel,
+    )
+    result = runner.run_sync(request)
+    typer.echo(
+        json.dumps(
+            {
+                "success": result.success,
+                "channel": result.channel,
+                "from_date": result.from_date.isoformat(),
+                "to_date": result.to_date.isoformat(),
+                "interval": result.interval,
+                "real_telegram_used": result.real_telegram_used,
+                "real_market_data_used": result.real_market_data_used,
+                "ai_used": result.ai_used,
+                "regex_fallback_used": result.regex_fallback_used,
+                "total_messages": result.total_messages,
+                "parsed_signals": result.parsed_signals,
+                "valid_signals": result.valid_signals,
+                "trades_simulated": result.trades_simulated,
+                "trades_filled": result.trades_filled,
+                "total_pnl": str(result.total_pnl),
+                "channel_score": str(result.channel_score),
+                "skipped_reasons": result.skipped_reasons,
+                "warnings": result.warnings,
+                "errors": result.errors,
+                "report_path": result.report_path,
+                "markdown_report_path": result.markdown_report_path,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("real-backtest-tofan")
+def real_backtest_tofan_cmd(
+    hours: int = typer.Option(24, "--hours"),
+    interval: str = typer.Option("1m", "--interval"),
+    max_messages: int = typer.Option(1000, "--max-messages"),
+    use_ai: bool = typer.Option(True, "--use-ai/--no-ai"),
+) -> None:
+    """Run the default guarded real backtest against the configured real channel."""
+    settings = _load_settings()
+    real_backtest_run_cmd(
+        channel=settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+        from_date=None,
+        to_date=None,
+        hours=hours,
+        interval=interval,
+        max_messages=max_messages,
+        use_ai=use_ai,
+        send_telegram_summary=settings.REAL_BACKTEST_SEND_TO_ADMIN_BOT,
+        send_log_channel=settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
+    )
+
+
+@app.command("backtest-show-latest")
+def backtest_show_latest_cmd() -> None:
+    """Show the latest stored real backtest summary."""
+    settings = _load_settings()
+    runner = _build_real_backtest_runner(settings)
+    payload = runner.latest_report_summary()
+    if payload is None:
+        raise typer.BadParameter("No real backtest report found yet.")
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
 @app.command("admin-check")
 def admin_check_cmd() -> None:
     settings = _load_settings()
@@ -840,6 +964,7 @@ def admin_backtest_dry_run_cmd(username: str = typer.Option(..., "--username")) 
             parse_mode=settings.ADMIN_BOT_PARSE_MODE,
             disable_web_preview=settings.ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW,
         ),
+        settings=settings,
     )
     try:
         menu = service.backtest_menu(username)

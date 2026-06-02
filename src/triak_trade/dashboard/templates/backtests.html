@@ -1,11 +1,26 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Backtest Workbench</h1>
+<section class="panel">
+  <h2>Real Backtest Readiness</h2>
+  <dl class="metrics">
+  {% for key, value in readiness.items() %}
+    <dt>{{ key }}</dt><dd>{{ value }}</dd>
+  {% endfor %}
+  </dl>
+</section>
 {% include "partials/backtest_form.html" %}
 {% if result %}
   <section class="panel">
     {% if result.blocked %}
       <h2>Blocked</h2><p>{{ result.reason }}</p>
+      {% if result.issues %}
+      <ul>
+      {% for issue in result.issues %}
+        <li>{{ issue }}</li>
+      {% endfor %}
+      </ul>
+      {% endif %}
     {% else %}
       <h2>Backtest Result</h2>
       <dl class="metrics">

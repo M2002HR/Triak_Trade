@@ -36,14 +36,42 @@ class TelethonTelegramClient:
         self._validate_credentials()
         try:
             from telethon import TelegramClient  # type: ignore[import-untyped]
+            from telethon.sessions import StringSession  # type: ignore[import-untyped]
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("telethon is not installed") from exc
 
-        self.session_path.parent.mkdir(parents=True, exist_ok=True)
+        string_session = self.settings.TELEGRAM_STRING_SESSION.get_secret_value().strip()
+        if string_session:
+            session: str | StringSession = StringSession(string_session)
+        else:
+            self.session_path.parent.mkdir(parents=True, exist_ok=True)
+            session = str(self.session_path)
         return TelegramClient(
-            str(self.session_path),
+            session,
             self.settings.TELEGRAM_API_ID,
             self.settings.TELEGRAM_API_HASH.get_secret_value(),
+            proxy=self._proxy_tuple(),
+        )
+
+    def _proxy_tuple(self) -> tuple[str, str, int, bool, str | None, str | None] | None:
+        if not self.settings.TELEGRAM_PROXY_ENABLED:
+            return None
+        host = self.settings.TELEGRAM_PROXY_HOST.strip()
+        port = self.settings.TELEGRAM_PROXY_PORT
+        if not host or port <= 0:
+            raise TelegramCredentialError(
+                "TELEGRAM_PROXY_ENABLED=true requires TELEGRAM_PROXY_HOST and TELEGRAM_PROXY_PORT"
+            )
+        username = self.settings.TELEGRAM_PROXY_USERNAME.strip() or None
+        password_value = self.settings.TELEGRAM_PROXY_PASSWORD.get_secret_value().strip()
+        password = password_value or None
+        return (
+            self.settings.TELEGRAM_PROXY_TYPE.strip().lower(),
+            host,
+            port,
+            self.settings.TELEGRAM_PROXY_RDNS,
+            username,
+            password,
         )
 
     async def _ensure_client(self) -> Any:

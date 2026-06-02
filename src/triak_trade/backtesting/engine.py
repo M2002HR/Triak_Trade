@@ -8,7 +8,7 @@ from typing import Any
 
 from triak_trade.agents.classifier import MessageClassifier, RegexMessageClassifier
 from triak_trade.backtesting.fixtures import fixture_candles, fixture_messages
-from triak_trade.backtesting.models import BacktestRequest
+from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
 from triak_trade.backtesting.report import report_to_json, report_to_telegram_summary
 from triak_trade.backtesting.scoring import ChannelScorer
 from triak_trade.backtesting.simulator import BacktestSimulator
@@ -28,6 +28,15 @@ class BacktestEngine:
         candles = fixture_candles(interval=request.interval)
         return self.run_from_messages(request=request, messages=messages, candles=candles)
 
+    def build_events(
+        self,
+        *,
+        channel_id: str,
+        messages: list[RawTelegramMessage],
+    ) -> list[BacktestEvent]:
+        timeline = BacktestTimelineBuilder(classifier=self.classifier, channel_id=channel_id)
+        return timeline.build(messages)
+
     def run_from_messages(
         self,
         *,
@@ -35,9 +44,16 @@ class BacktestEngine:
         messages: list[RawTelegramMessage],
         candles: list[Candle],
     ) -> BacktestReport:
-        timeline = BacktestTimelineBuilder(classifier=self.classifier, channel_id=request.channel)
-        events = timeline.build(messages)
+        events = self.build_events(channel_id=request.channel, messages=messages)
+        return self.run_from_events(request=request, events=events, candles=candles)
 
+    def run_from_events(
+        self,
+        *,
+        request: BacktestRequest,
+        events: list[BacktestEvent],
+        candles: list[Candle],
+    ) -> BacktestReport:
         conservative_trades, conservative_final = self.simulator.simulate(
             events=events,
             candles=candles,

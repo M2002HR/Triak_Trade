@@ -62,6 +62,9 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Real supervised admin bot start command is `triak-trade admin-bot-start --real --watch`.
 - Backtesting engine is simulation-only and must never execute real trades.
 - Backtesting must use classifier interfaces/protocols (AI-ready), not regex internals directly.
+- Real backtest pipeline may use Telethon history, Ajil AI when available, and Toobit public klines only; it must never use private trading endpoints.
+- Real backtest reports must be stored under `runtime/reports/backtests` and remain non-secret.
+- If AI is unavailable during real backtest, report it explicitly and use regex fallback only when configured; never pretend AI was used.
 - System verification reports must redact secrets and keep real checks guarded by explicit env flags.
 - `triak-trade verify-system` is the default safe smoke command before showing project readiness.
 - Processing audit events must capture safe per-message operational visibility without secrets.

@@ -9,6 +9,8 @@ from triak_trade.admin_bot.callbacks import parse_admin_callback
 from triak_trade.admin_bot.errors import AdminRegistrationError
 from triak_trade.admin_bot.telegram_bot import TelegramAdminBot
 from triak_trade.backtesting.engine import run_fixture_backtest
+from triak_trade.backtesting.real_runner import RealBacktestRunner, RealBacktestRunRequest
+from triak_trade.config.settings import Settings
 from triak_trade.db.repositories import AdminDecisionRepository
 from triak_trade.domain.models import AdminDecision, ProposedAction, SignalState
 
@@ -20,10 +22,12 @@ class AdminApprovalService:
         auth: AdminAuthService,
         bot: TelegramAdminBot,
         decisions: AdminDecisionRepository | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.auth = auth
         self.bot = bot
         self.decisions = decisions
+        self.settings = settings
 
     async def send_for_approval(
         self,
@@ -58,26 +62,20 @@ class AdminApprovalService:
         return {
             "text": "📊 Backtest Menu",
             "buttons": [
-                "🌪 Tofan_Trade",
-                "🔗 Custom Channel",
-                "📅 Last 7 Days",
-                "📅 Last 30 Days",
-                "🕯 1m",
-                "🕯 5m",
-                "🕯 15m",
-                "✅ Run Backtest",
+                "🌪 Tofan_Trade real 24h",
+                "🌪 Tofan_Trade real 7d",
+                "⚙️ Custom backtest in dashboard",
+                "📄 Latest backtest report",
+                "🧪 Fixture backtest",
                 "❌ Cancel",
                 "⬅️ Main Menu",
             ],
             "callbacks": [
                 "menu:backtest",
-                "backtest:start",
-                "backtest:channel:tofan",
-                "backtest:range:7d",
-                "backtest:range:30d",
-                "backtest:interval:1m",
-                "backtest:interval:5m",
-                "backtest:confirm",
+                "backtest:real:24h",
+                "backtest:real:7d",
+                "backtest:dashboard",
+                "backtest:latest",
                 "backtest:run",
                 "backtest:cancel",
             ],
@@ -98,3 +96,59 @@ class AdminApprovalService:
             "summary": summary,
             "report": report_json,
         }
+
+    def run_real_backtest(self, username: str | None, *, hours: int) -> dict[str, object]:
+        self.auth.require_authorized_username(username)
+        if self.settings is None:
+            raise AdminRegistrationError("settings are required for real backtest")
+        runner = RealBacktestRunner(settings=self.settings)
+        readiness = runner.readiness()
+        if not readiness.ready:
+            return {
+                "blocked": True,
+                "issues": readiness.issues,
+                "progress": [],
+            }
+        request = RealBacktestRunRequest(
+            channel=self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+            hours=hours,
+            interval=self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
+            max_messages=self.settings.REAL_BACKTEST_MAX_MESSAGES,
+            use_ai=self.settings.REAL_BACKTEST_USE_AI,
+            send_telegram_summary=self.settings.REAL_BACKTEST_SEND_TO_ADMIN_BOT,
+            send_log_channel=self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
+        )
+        result = runner.run_sync(request)
+        return {
+            "blocked": False,
+            "progress": [
+                "🔎 Fetching Telegram messages...",
+                "🧠 Classifying messages...",
+                "🕯 Fetching Toobit candles...",
+                "⚙️ Simulating trades...",
+                "📊 Generating report...",
+                "✅ Backtest complete.",
+            ],
+            "summary": {
+                "real_telegram_used": result.real_telegram_used,
+                "real_market_data_used": result.real_market_data_used,
+                "ai_used": result.ai_used,
+                "regex_fallback_used": result.regex_fallback_used,
+                "total_messages": result.total_messages,
+                "parsed_signals": result.parsed_signals,
+                "valid_signals": result.valid_signals,
+                "trades_simulated": result.trades_simulated,
+                "total_pnl": str(result.total_pnl),
+                "channel_score": str(result.channel_score),
+                "errors": result.errors,
+                "warnings": result.warnings,
+                "report_path": result.report_path,
+            },
+        }
+
+    def latest_backtest_report(self, username: str | None) -> dict[str, object]:
+        self.auth.require_authorized_username(username)
+        if self.settings is None:
+            raise AdminRegistrationError("settings are required for latest real backtest report")
+        payload = RealBacktestRunner(settings=self.settings).latest_report_summary()
+        return {"report": payload}

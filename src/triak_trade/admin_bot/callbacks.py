@@ -44,5 +44,9 @@ def is_supported_menu_callback(data: str) -> bool:
         "backtest:interval:5m",
         "backtest:confirm",
         "backtest:run",
+        "backtest:real:24h",
+        "backtest:real:7d",
+        "backtest:latest",
+        "backtest:dashboard",
         "backtest:cancel",
     }

@@ -11,7 +11,7 @@ WELCOME_TEXT = (
     "هیچ معامله زنده‌ای از این مسیر اجرا نمی‌شود."
 )
 
-BACKTEST_TEXT = "📊 منوی بک‌تست آزمایشی"
+BACKTEST_TEXT = "📊 منوی بک‌تست"
 SYSTEM_TEST_TEXT = "🧪 منوی تست‌های امن سیستم"
 TOOBIT_STATUS_TEXT = "💰 وضعیت اتصال Toobit فقط به صورت حضور تنظیمات نمایش داده می‌شود."
 
@@ -32,6 +32,10 @@ def main_reply_keyboard() -> dict[str, Any]:
 def backtest_inline_keyboard() -> dict[str, Any]:
     return {
         "inline_keyboard": [
+            [{"text": "🌪 Tofan_Trade real 24h", "callback_data": "backtest:real:24h"}],
+            [{"text": "🌪 Tofan_Trade real 7d", "callback_data": "backtest:real:7d"}],
+            [{"text": "📄 Latest backtest report", "callback_data": "backtest:latest"}],
+            [{"text": "⚙️ Custom backtest in dashboard", "callback_data": "backtest:dashboard"}],
             [{"text": "اجرای بک‌تست fixture", "callback_data": "backtest:run"}],
             [{"text": "لغو", "callback_data": "backtest:cancel"}],
             [{"text": "بازگشت", "callback_data": "menu:main"}],

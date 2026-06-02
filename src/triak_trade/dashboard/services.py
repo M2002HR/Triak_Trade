@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from triak_trade.admin_bot.runtime import get_admin_bot_status, tail_admin_bot_logs
+from triak_trade.backtesting import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestRequest
 from triak_trade.backtesting.report import report_to_json
@@ -16,7 +17,6 @@ from triak_trade.config.settings import Settings
 from triak_trade.dashboard.schemas import AutoModeState, KillSwitchState, utc_now
 from triak_trade.domain.enums import BacktestFillPolicy
 from triak_trade.observability.telegram_log_channel import TelegramLogChannelClient
-from triak_trade.verification.report import find_latest_report
 
 
 class DashboardStateService:
@@ -87,11 +87,12 @@ class DashboardService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.state = DashboardStateService(settings)
+        self.real_runner = RealBacktestRunner(settings=settings)
 
     def overview(self) -> dict[str, Any]:
         admin_status = get_admin_bot_status(self.settings)
         log_status = TelegramLogChannelClient(settings=self.settings).safe_status()
-        latest_report = find_latest_report(self.settings.VERIFICATION_REPORT_DIR)
+        latest_report = self.real_runner.report_store.latest()
         auto_mode = self.state.get_auto_mode()
         kill_switch = self.state.get_kill_switch()
         return {
@@ -128,15 +129,71 @@ class DashboardService:
         }
 
     def run_fixture_backtest_from_form(self, form: dict[str, str]) -> dict[str, Any]:
-        if form.get("real_mode") == "on" and self.settings.RUN_BACKTEST_INTEGRATION_TESTS != 1:
-            return {"blocked": True, "reason": "Real backtest guard is disabled."}
+        if form.get("real_mode") == "on":
+            readiness = self.real_runner.readiness()
+            if not readiness.ready:
+                return {
+                    "blocked": True,
+                    "reason": "Real backtest is not ready.",
+                    "issues": readiness.issues,
+                    "readiness": readiness.model_dump(mode="json"),
+                }
+            hours = int(
+                form.get("lookback_hours")
+                or self.settings.REAL_BACKTEST_DEFAULT_LOOKBACK_HOURS
+            )
+            real_request = RealBacktestRunRequest(
+                channel=form.get("channel") or self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+                from_date=(
+                    datetime.fromisoformat(form["from_date"]).replace(tzinfo=timezone.utc)
+                    if form.get("from_date")
+                    else None
+                ),
+                to_date=(
+                    datetime.fromisoformat(form["to_date"]).replace(tzinfo=timezone.utc)
+                    if form.get("to_date")
+                    else None
+                ),
+                hours=hours if not form.get("from_date") and not form.get("to_date") else None,
+                interval=form.get("interval") or self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
+                max_messages=int(
+                    form.get("max_messages") or self.settings.REAL_BACKTEST_MAX_MESSAGES
+                ),
+                use_ai=form.get("use_ai") == "on",
+                send_telegram_summary=form.get("send_telegram_summary") == "on",
+                send_log_channel=form.get("send_log_channel") == "on",
+            )
+            result = self.real_runner.run_sync(real_request)
+            return {
+                "blocked": False,
+                "real_mode": True,
+                "success": result.success,
+                "summary": {
+                    "real_telegram_used": result.real_telegram_used,
+                    "real_market_data_used": result.real_market_data_used,
+                    "ai_used": result.ai_used,
+                    "regex_fallback_used": result.regex_fallback_used,
+                    "total_messages": result.total_messages,
+                    "parsed_signals": result.parsed_signals,
+                    "valid_signals": result.valid_signals,
+                    "invalid_signals": result.invalid_signals,
+                    "trades_simulated": result.trades_simulated,
+                    "trades_filled": result.trades_filled,
+                    "total_pnl": str(result.total_pnl),
+                    "channel_score": str(result.channel_score),
+                    "warnings": result.warnings,
+                    "errors": result.errors,
+                    "report_path": result.report_path,
+                    "markdown_report_path": result.markdown_report_path,
+                },
+            }
         channel = form.get("channel") or self.settings.BACKTEST_DEFAULT_CHANNEL
         interval = form.get("interval") or self.settings.BACKTEST_DEFAULT_INTERVAL
         initial_balance = Decimal(form.get("initial_balance") or "1000")
         risk_pct = Decimal(form.get("risk_per_trade_pct") or "1")
         fill_policy = BacktestFillPolicy(form.get("fill_policy") or "conservative")
         now = datetime.now(timezone.utc)
-        request = BacktestRequest(
+        fixture_request = BacktestRequest(
             channel=channel,
             from_date=now - timedelta(days=7),
             to_date=now,
@@ -149,11 +206,12 @@ class DashboardService:
             max_messages=self.settings.BACKTEST_MAX_MESSAGES,
             symbols=None,
         )
-        report = BacktestEngine().run(request)
+        report = BacktestEngine().run(fixture_request)
         score = Decimal(report.warnings[0].split("=")[1]) if report.warnings else Decimal("0")
         payload = report_to_json(report, score)
         return {
             "blocked": False,
+            "real_mode": False,
             "summary": {
                 "total_messages": payload["metrics"]["total_messages"],
                 "parsed_signals": payload["metrics"]["parsed_signals"],
@@ -172,19 +230,24 @@ class DashboardService:
         }
 
     def reports(self) -> dict[str, Any]:
-        report_dir = Path(self.settings.VERIFICATION_REPORT_DIR)
-        files = sorted(report_dir.glob("*")) if report_dir.exists() else []
-        latest = find_latest_report(self.settings.VERIFICATION_REPORT_DIR)
+        files = self.real_runner.report_store.list_reports()
+        latest = self.real_runner.report_store.latest()
         preview = ""
         if latest is not None:
-            preview = "\n".join(
-                latest.read_text(encoding="utf-8", errors="replace").splitlines()[:25]
-            )
+            try:
+                payload = json.loads(latest.read_text(encoding="utf-8", errors="replace"))
+            except ValueError:
+                preview = "Latest backtest report is not valid JSON."
+            else:
+                preview = json.dumps(payload, indent=2, sort_keys=True)[:4000]
         return {
             "files": [str(item) for item in files],
             "latest": str(latest) if latest else None,
             "preview": preview,
         }
+
+    def real_backtest_readiness(self) -> dict[str, Any]:
+        return self.real_runner.readiness().model_dump(mode="json")
 
     def logs(self) -> dict[str, Any]:
         return {

@@ -19,6 +19,7 @@ def settings(tmp_path: Path) -> Settings:
         DASHBOARD_STATUS_FILE=str(runtime / "status.json"),
         DASHBOARD_LOG_FILE=str(runtime / "dashboard.log"),
         VERIFICATION_REPORT_DIR=str(tmp_path / "reports"),
+        REAL_BACKTEST_REPORT_DIR=str(tmp_path / "backtests"),
     )
 
 
@@ -42,7 +43,7 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     response = client(tmp_path).get("/backtests", headers=headers())
     assert response.status_code == 200
     assert "https://t.me/Tofan_Trade" in response.text
-    assert "Run Safe Backtest" in response.text
+    assert "Run Real Backtest" in response.text
 
 
 def test_approvals_page_renders_empty_state(tmp_path: Path) -> None:
@@ -61,7 +62,7 @@ def test_logs_page_renders_log_channel_status(tmp_path: Path) -> None:
 def test_reports_page_handles_no_reports(tmp_path: Path) -> None:
     response = client(tmp_path).get("/reports", headers=headers())
     assert response.status_code == 200
-    assert "No verification reports found" in response.text
+    assert "No real backtest reports found" in response.text
 
 
 def test_status_json_contains_no_secrets(tmp_path: Path) -> None:

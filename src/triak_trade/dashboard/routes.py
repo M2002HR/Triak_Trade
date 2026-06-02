@@ -89,7 +89,11 @@ def build_router(
             "backtests.html",
             context(
                 request,
-                {"result": None, "default_channel": settings.BACKTEST_DEFAULT_CHANNEL},
+                {
+                    "result": None,
+                    "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+                    "readiness": service.real_backtest_readiness(),
+                },
             ),
         )
 
@@ -105,7 +109,11 @@ def build_router(
             "backtests.html",
             context(
                 request,
-                {"result": result, "default_channel": settings.BACKTEST_DEFAULT_CHANNEL},
+                {
+                    "result": result,
+                    "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+                    "readiness": service.real_backtest_readiness(),
+                },
             ),
         )
 

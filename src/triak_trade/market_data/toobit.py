@@ -151,6 +151,10 @@ class ToobitMarketDataProvider:
             close_time = open_time + timedelta(milliseconds=interval_to_milliseconds(interval))
         else:
             close_time = datetime.fromtimestamp(close_time_ms / 1000, tz=timezone.utc)
+            if close_time <= open_time:
+                close_time = open_time + timedelta(
+                    milliseconds=interval_to_milliseconds(interval)
+                )
 
         return Candle(
             symbol=symbol,
