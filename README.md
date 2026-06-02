@@ -39,6 +39,10 @@ triak-trade telegram-history-dry-run https://t.me/Tofan_Trade --limit 5
 triak-trade telegram-tofan-dry-run --limit 5
 triak-trade market-data-dry-run BTCUSDT --interval 1m --minutes 5
 triak-trade toobit-klines-dry-run BTCUSDT --interval 1m --minutes 5
+triak-trade admin-bot-smoke-test
+triak-trade run-admin-bot --once
+triak-trade admin-bot-status
+triak-trade admin-bot-logs --lines 50
 pytest
 ruff check .
 mypy src
@@ -83,6 +87,11 @@ mypy src
 - Admin must start the bot once so username→chat_id can be registered.
 - Real bot send tests are guard-gated with `RUN_TELEGRAM_BOT_INTEGRATION_TESTS=1`.
 - Approval flow records decisions only; it does not execute trades.
+- Runnable admin bot runtime is available but real polling is blocked unless `ADMIN_BOT_RUNTIME_ENABLED=true`.
+- Fake smoke/runtime commands do not call Telegram: `admin-bot-smoke-test`, `run-admin-bot --once`, and `run-admin-bot --watch --max-runtime-seconds 10`.
+- Real supervised start command: `triak-trade admin-bot-start --real --watch`.
+- Runtime files live under `runtime/admin_bot/` and are gitignored.
+- Bot logs/status must never include bot tokens, API keys, or session data.
 
 ## Backtesting
 

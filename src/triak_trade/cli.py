@@ -18,6 +18,15 @@ from triak_trade.admin_bot.auth import AdminAuthService, normalize_username
 from triak_trade.admin_bot.callbacks import parse_admin_callback
 from triak_trade.admin_bot.errors import AdminUnauthorizedError
 from triak_trade.admin_bot.formatter import AdminActionFormatter
+from triak_trade.admin_bot.runtime import (
+    dump_json,
+    get_admin_bot_status,
+    run_admin_bot_smoke_test,
+    run_admin_bot_sync,
+    start_admin_bot_process,
+    stop_admin_bot_process,
+    tail_admin_bot_logs,
+)
 from triak_trade.admin_bot.service import AdminApprovalService
 from triak_trade.admin_bot.telegram_bot import TelegramAdminBot
 from triak_trade.agents.channel_agent import ChannelAgent
@@ -822,6 +831,86 @@ def admin_backtest_dry_run_cmd(username: str = typer.Option(..., "--username")) 
     except AdminUnauthorizedError as exc:
         raise typer.BadParameter("username is not authorized") from exc
     typer.echo(json.dumps({"menu": menu, "run": run}, indent=2, sort_keys=True))
+
+
+@app.command("run-admin-bot")
+def run_admin_bot_cmd(
+    real: bool = typer.Option(False, "--real"),
+    watch: bool = typer.Option(False, "--watch"),
+    once: bool = typer.Option(False, "--once"),
+    max_runtime_seconds: int | None = typer.Option(None, "--max-runtime-seconds", min=1),
+) -> None:
+    """Run the admin bot runtime in foreground; fake mode is default."""
+    settings = _load_settings()
+    try:
+        result = run_admin_bot_sync(
+            settings,
+            real=real,
+            watch=watch,
+            once=once,
+            max_runtime_seconds=max_runtime_seconds,
+        )
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(dump_json(result))
+
+
+@app.command("admin-bot-start")
+def admin_bot_start_cmd(
+    real: bool = typer.Option(False, "--real"),
+    watch: bool = typer.Option(False, "--watch"),
+) -> None:
+    """Start admin bot as a background process."""
+    settings = _load_settings()
+    try:
+        result = start_admin_bot_process(settings, real=real, watch=watch)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(dump_json(result))
+
+
+@app.command("admin-bot-status")
+def admin_bot_status_cmd() -> None:
+    """Print non-secret admin bot runtime status."""
+    settings = _load_settings()
+    typer.echo(dump_json(get_admin_bot_status(settings)))
+
+
+@app.command("admin-bot-stop")
+def admin_bot_stop_cmd() -> None:
+    """Stop background admin bot process if present."""
+    settings = _load_settings()
+    typer.echo(dump_json(stop_admin_bot_process(settings)))
+
+
+@app.command("admin-bot-restart")
+def admin_bot_restart_cmd(
+    real: bool = typer.Option(False, "--real"),
+    watch: bool = typer.Option(False, "--watch"),
+) -> None:
+    """Restart background admin bot process."""
+    settings = _load_settings()
+    stopped = stop_admin_bot_process(settings)
+    try:
+        started = start_admin_bot_process(settings, real=real, watch=watch)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(dump_json({"stopped": stopped, "started": started}))
+
+
+@app.command("admin-bot-logs")
+def admin_bot_logs_cmd(lines: int = typer.Option(100, "--lines", min=1)) -> None:
+    """Tail redacted admin bot runtime logs."""
+    settings = _load_settings()
+    for line in tail_admin_bot_logs(settings, lines=lines):
+        typer.echo(line)
+
+
+@app.command("admin-bot-smoke-test")
+def admin_bot_smoke_test_cmd() -> None:
+    """Run a fake admin bot smoke test without network calls."""
+    settings = _load_settings()
+    typer.echo(dump_json(run_admin_bot_smoke_test(settings)))
 
 
 @app.command("verify-system")

@@ -65,6 +65,17 @@ class Settings(BaseSettings):
     ADMIN_USER_IDS: Annotated[list[int], NoDecode] = Field(default_factory=list)
     ADMIN_BOT_PARSE_MODE: str = "HTML"
     ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW: bool = True
+    ADMIN_BOT_RUNTIME_ENABLED: bool = False
+    ADMIN_BOT_POLL_INTERVAL_SECONDS: int = 2
+    ADMIN_BOT_LONG_POLL_TIMEOUT_SECONDS: int = 30
+    ADMIN_BOT_SUPERVISOR_RESTART_ON_CRASH: bool = True
+    ADMIN_BOT_SUPERVISOR_MAX_RESTARTS: int = 20
+    ADMIN_BOT_SUPERVISOR_RESTART_DELAY_SECONDS: int = 3
+    ADMIN_BOT_RUNTIME_DIR: str = "runtime/admin_bot"
+    ADMIN_BOT_PID_FILE: str = "runtime/admin_bot/admin_bot.pid"
+    ADMIN_BOT_STATUS_FILE: str = "runtime/admin_bot/status.json"
+    ADMIN_BOT_LOG_FILE: str = "runtime/admin_bot/admin_bot.log"
+    ADMIN_BOT_OFFSET_FILE: str = "runtime/admin_bot/update_offset.json"
     RUN_TELEGRAM_BOT_INTEGRATION_TESTS: int = 0
     ADMIN_BOT_TEST_MESSAGE_TEXT: str = "Triak_Trade admin bot test: configuration OK"
     GEMINI_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)

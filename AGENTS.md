@@ -55,6 +55,11 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Admin approval bot authorization is username-based (`ADMIN_TELEGRAM_USERNAMES`), not numeric-id-first.
 - `ADMIN_USER_IDS` remains deprecated/backward-compatible only.
 - Admin decisions record approval/reject/watch only; they must not execute trades directly in admin module.
+- Admin bot runtime real polling is guarded by `ADMIN_BOT_RUNTIME_ENABLED=true`.
+- Admin bot fake/smoke commands must not call Telegram or any external service.
+- Admin bot runtime files belong under gitignored `runtime/admin_bot/`.
+- Admin bot logs/status must redact secrets and never include bot tokens, API keys, session strings, or full env values.
+- Real supervised admin bot start command is `triak-trade admin-bot-start --real --watch`.
 - Backtesting engine is simulation-only and must never execute real trades.
 - Backtesting must use classifier interfaces/protocols (AI-ready), not regex internals directly.
 - System verification reports must redact secrets and keep real checks guarded by explicit env flags.
