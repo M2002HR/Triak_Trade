@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     TOOBIT_MARKET_DATA_DEFAULT_INTERVAL: str = "1m"
     RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS: int = 0
     TOOBIT_REAL_TEST_SYMBOL: str = "BTCUSDT"
+    TOOBIT_RECV_WINDOW: int = 5000
+    TOOBIT_SIGNED_TIMEOUT_SECONDS: int = 20
+    TOOBIT_TIME_PATH: str = "/api/v1/time"
+    TOOBIT_EXCHANGE_INFO_PATH: str = "/api/v1/exchangeInfo"
+    TOOBIT_SPOT_ORDER_TEST_PATH: str = "/api/v1/spot/orderTest"
+    TOOBIT_SAFE_ACCOUNT_PATH: str = ""
+    RUN_TOOBIT_SIGNED_INTEGRATION_TESTS: int = 0
+    RUN_TOOBIT_ORDERTEST_INTEGRATION_TESTS: int = 0
+    TOOBIT_ORDERTEST_SYMBOL: str = "BTCUSDT"
+    TOOBIT_ORDERTEST_SIDE: str = "BUY"
+    TOOBIT_ORDERTEST_TYPE: str = "LIMIT"
+    TOOBIT_ORDERTEST_QUANTITY: str = ""
+    TOOBIT_ORDERTEST_PRICE: str = ""
     TOOBIT_API_KEY: SecretStr = Field(default=SecretStr("replace_me"))
     TOOBIT_API_SECRET: SecretStr = Field(default=SecretStr("replace_me"))
     TELEGRAM_API_ID: int = 0

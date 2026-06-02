@@ -24,6 +24,11 @@ from triak_trade.core.logging import configure_logging
 from triak_trade.db.engine import build_engine_from_settings
 from triak_trade.domain.enums import CandleSource
 from triak_trade.domain.models import Candle, RawTelegramMessage
+from triak_trade.exchange.toobit.account import ToobitAccountClient
+from triak_trade.exchange.toobit.client import ToobitClient
+from triak_trade.exchange.toobit.demo_execution import DemoExecutionAdapter
+from triak_trade.exchange.toobit.errors import ToobitError
+from triak_trade.exchange.toobit.spot import ToobitSpotClient
 from triak_trade.market_data.toobit import ToobitMarketDataProvider
 from triak_trade.parsing.normalizer import MessageNormalizer
 from triak_trade.parsing.regex_parser import RegexSignalParser
@@ -38,6 +43,18 @@ def _load_settings() -> Settings:
     settings = get_settings()
     configure_logging(settings)
     return settings
+
+
+def _build_toobit_client(settings: Settings) -> ToobitClient:
+    return ToobitClient(
+        base_url=settings.TOOBIT_BASE_URL,
+        api_key=settings.TOOBIT_API_KEY.get_secret_value(),
+        api_secret=settings.TOOBIT_API_SECRET.get_secret_value(),
+        timeout_seconds=settings.TOOBIT_SIGNED_TIMEOUT_SECONDS,
+        recv_window=settings.TOOBIT_RECV_WINDOW,
+        time_path=settings.TOOBIT_TIME_PATH,
+        exchange_info_path=settings.TOOBIT_EXCHANGE_INFO_PATH,
+    )
 
 
 @app.command("version")
@@ -468,5 +485,119 @@ def toobit_klines_dry_run_cmd(
         "first_open_time": candles[0].open_time.isoformat() if candles else None,
         "last_open_time": candles[-1].open_time.isoformat() if candles else None,
         "source": CandleSource.TOOBIT.value if candles else "none",
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("toobit-check")
+def toobit_check_cmd() -> None:
+    """Show safe Toobit configuration presence summary."""
+    settings = _load_settings()
+    payload = {
+        "base_url": settings.TOOBIT_BASE_URL,
+        "api_key_present": bool(
+            settings.TOOBIT_API_KEY.get_secret_value()
+            and settings.TOOBIT_API_KEY.get_secret_value() != "replace_me"
+        ),
+        "api_secret_present": bool(
+            settings.TOOBIT_API_SECRET.get_secret_value()
+            and settings.TOOBIT_API_SECRET.get_secret_value() != "replace_me"
+        ),
+        "execution_mode": settings.EXECUTION_MODE,
+        "live_blocked": True,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("toobit-public-check")
+def toobit_public_check_cmd() -> None:
+    """Call public Toobit endpoints and print safe summary."""
+    settings = _load_settings()
+    client = _build_toobit_client(settings)
+    try:
+        time_payload = asyncio.run(client.get_server_time())
+        exchange_payload = asyncio.run(client.get_exchange_info())
+        payload = {
+            "server_time_keys": sorted(list(time_payload.keys())),
+            "exchange_info_keys": sorted(list(exchange_payload.keys())),
+            "public_check_success": True,
+        }
+    except Exception as exc:
+        payload = {
+            "public_check_success": False,
+            "error_type": type(exc).__name__,
+            "detail": "public endpoint check failed safely",
+        }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("toobit-signed-check")
+def toobit_signed_check_cmd(real: bool = typer.Option(False, "--real")) -> None:
+    """Run guarded signed safe account check."""
+    settings = _load_settings()
+    if not real:
+        raise typer.BadParameter("Blocked by default. Pass --real and enable guard.")
+    if settings.RUN_TOOBIT_SIGNED_INTEGRATION_TESTS != 1:
+        raise typer.BadParameter(
+            "Real signed mode requires RUN_TOOBIT_SIGNED_INTEGRATION_TESTS=1 in root .env.local"
+        )
+
+    client = _build_toobit_client(settings)
+    account = ToobitAccountClient(client, settings.TOOBIT_SAFE_ACCOUNT_PATH)
+    try:
+        result = asyncio.run(account.safe_account_check())
+    except ToobitError as exc:
+        raise typer.BadParameter(f"signed check failed safely: {type(exc).__name__}") from exc
+    typer.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@app.command("toobit-order-test")
+def toobit_order_test_cmd(
+    symbol: str = typer.Option(..., "--symbol"),
+    side: str = typer.Option(..., "--side"),
+    order_type: str = typer.Option(..., "--type"),
+    quantity: str = typer.Option(..., "--quantity"),
+    price: str | None = typer.Option(None, "--price"),
+    real: bool = typer.Option(False, "--real"),
+) -> None:
+    """Run guarded spot orderTest only (no live order)."""
+    settings = _load_settings()
+    if not real:
+        raise typer.BadParameter("Blocked by default. Pass --real and enable guard.")
+    if settings.RUN_TOOBIT_ORDERTEST_INTEGRATION_TESTS != 1:
+        raise typer.BadParameter(
+            "OrderTest real mode requires RUN_TOOBIT_ORDERTEST_INTEGRATION_TESTS=1 in .env.local"
+        )
+    if settings.EXECUTION_MODE != "demo":
+        raise typer.BadParameter("OrderTest requires EXECUTION_MODE=demo")
+    try:
+        quantity_decimal = Decimal(quantity)
+        price_decimal = Decimal(price) if price is not None else None
+    except Exception as exc:
+        raise typer.BadParameter("quantity/price must be valid decimals") from exc
+
+    client = _build_toobit_client(settings)
+    spot = ToobitSpotClient(client, settings)
+    adapter = DemoExecutionAdapter(settings, spot)
+    try:
+        result = asyncio.run(
+            adapter.create_demo_order(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=quantity_decimal,
+                price=price_decimal,
+                run_order_test=True,
+            )
+        )
+    except Exception as exc:
+        raise typer.BadParameter(f"order-test failed safely: {type(exc).__name__}") from exc
+
+    payload = {
+        "accepted": result.accepted,
+        "symbol": result.symbol,
+        "side": result.side,
+        "type": result.order_type,
+        "status": result.status,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))

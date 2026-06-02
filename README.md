@@ -67,3 +67,11 @@ mypy src
 - Unit tests use fakes/mocks only.
 - Real Toobit checks are optional and guarded by `RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1`.
 - Candle cache service stores/fetches OHLCV through repository for future backtesting.
+
+## Toobit Signed Safety Layer
+
+- Signed Toobit client exists for safe checks and Spot `orderTest` only.
+- Unit tests use mocks only; real signed checks are guard-gated.
+- Live trading remains blocked.
+- Withdrawal endpoints are forbidden and not implemented.
+- Runtime secrets come only from root `.env.local`.

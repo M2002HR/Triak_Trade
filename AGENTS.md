@@ -37,3 +37,18 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Market data providers must stay behind interfaces; Toobit public klines is first provider.
 - Do not use signed/private Toobit endpoints in market-data modules.
 - Real Toobit market data tests must be explicitly guarded; default tests must use fakes/mocks.
+- Mandatory real integration verification policy:
+- Unit tests must never call real external services.
+- Real integration tests must be skipped by default and run only with explicit guard env vars.
+- All real credentials must come only from root `Triak_Trade/.env.local`.
+- Never print secrets, tokens, API keys, API secrets, session strings, or full env values.
+- Real checks must use the smallest safe request and print only non-secret summaries.
+- Never execute live trades or withdrawals.
+- Before finishing any task: run `ruff check .`, `mypy src`, `pytest`, run module dry-run CLI, and if a guard is enabled run the smallest real integration check, then manually inspect outputs/logs for safety and correctness.
+- Telegram real check guard: `RUN_TELEGRAM_INTEGRATION_TESTS=1` (small fetch from `https://t.me/Tofan_Trade`, no session/credential exposure).
+- AI gateway real check guard: `RUN_AI_GATEWAY_INTEGRATION_TESTS=1` (safe classification samples, no key exposure, ads/results must not be new signals).
+- Toobit public market data guard: `RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1` (tiny `BTCUSDT` range, summary only).
+- Toobit signed/private guard: `RUN_TOOBIT_SIGNED_INTEGRATION_TESTS=1` (read-only/safe endpoints first, no live order placement, no withdrawal endpoints).
+- Demo execution guard: `RUN_TOOBIT_DEMO_EXECUTION_TESTS=1` and `EXECUTION_MODE=demo`; live mode remains blocked.
+- Spot `orderTest` real verification guard: `RUN_TOOBIT_ORDERTEST_INTEGRATION_TESTS=1` and `EXECUTION_MODE=demo`.
+- Never call `POST /api/v1/spot/order` in safety-validation phases; use `POST /api/v1/spot/orderTest` only.
