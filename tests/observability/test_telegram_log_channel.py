@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 
@@ -61,6 +63,8 @@ async def test_log_channel_client_sends_expected_request_with_mock_transport() -
     )
 
     assert result.sent is True
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
     assert result.message_id == 77
     assert len(requests) == 1
     assert requests[0].url.path.endswith("/sendMessage")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -67,6 +68,8 @@ class TelegramLogChannelClient:
                 reason="log channel guard disabled",
             )
 
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
         token = self.settings.TELEGRAM_BOT_TOKEN.get_secret_value()
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
