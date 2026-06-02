@@ -52,3 +52,6 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Demo execution guard: `RUN_TOOBIT_DEMO_EXECUTION_TESTS=1` and `EXECUTION_MODE=demo`; live mode remains blocked.
 - Spot `orderTest` real verification guard: `RUN_TOOBIT_ORDERTEST_INTEGRATION_TESTS=1` and `EXECUTION_MODE=demo`.
 - Never call `POST /api/v1/spot/order` in safety-validation phases; use `POST /api/v1/spot/orderTest` only.
+- Admin approval bot authorization is username-based (`ADMIN_TELEGRAM_USERNAMES`), not numeric-id-first.
+- `ADMIN_USER_IDS` remains deprecated/backward-compatible only.
+- Admin decisions record approval/reject/watch only; they must not execute trades directly in admin module.

@@ -34,3 +34,8 @@ def test_api_keys_are_parsed() -> None:
 def test_telegram_live_channels_are_parsed() -> None:
     settings = Settings(TELEGRAM_LIVE_CHANNELS="a, b,https://t.me/Tofan_Trade")
     assert settings.TELEGRAM_LIVE_CHANNELS == ["a", "b", "https://t.me/Tofan_Trade"]
+
+
+def test_admin_telegram_usernames_are_parsed() -> None:
+    settings = Settings(ADMIN_TELEGRAM_USERNAMES="@A, b")
+    assert settings.ADMIN_TELEGRAM_USERNAMES == ["@A", "b"]

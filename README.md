@@ -75,3 +75,11 @@ mypy src
 - Live trading remains blocked.
 - Withdrawal endpoints are forbidden and not implemented.
 - Runtime secrets come only from root `.env.local`.
+
+## Admin Bot Approval
+
+- Admin auth is username-based via `ADMIN_TELEGRAM_USERNAMES` (case-insensitive, `@` optional).
+- `ADMIN_USER_IDS` is deprecated/backward-compatible only.
+- Admin must start the bot once so username→chat_id can be registered.
+- Real bot send tests are guard-gated with `RUN_TELEGRAM_BOT_INTEGRATION_TESTS=1`.
+- Approval flow records decisions only; it does not execute trades.

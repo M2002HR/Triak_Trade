@@ -59,7 +59,14 @@ class Settings(BaseSettings):
     TELEGRAM_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
     RUN_TELEGRAM_INTEGRATION_TESTS: int = 0
     TELEGRAM_BOT_TOKEN: SecretStr = Field(default=SecretStr("replace_me"))
+    ADMIN_TELEGRAM_USERNAMES: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["@we_are_waiting_for_him"]
+    )
     ADMIN_USER_IDS: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    ADMIN_BOT_PARSE_MODE: str = "HTML"
+    ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW: bool = True
+    RUN_TELEGRAM_BOT_INTEGRATION_TESTS: int = 0
+    ADMIN_BOT_TEST_MESSAGE_TEXT: str = "Triak_Trade admin bot test: configuration OK"
     GEMINI_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     GROQ_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     SIGNAL_CONSOLIDATION_SECONDS: int = 180
@@ -120,6 +127,15 @@ class Settings(BaseSettings):
     @field_validator("TELEGRAM_LIVE_CHANNELS", mode="before")
     @classmethod
     def parse_channel_list(cls, value: str | list[str] | None) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [item.strip() for item in value if item.strip()]
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    @field_validator("ADMIN_TELEGRAM_USERNAMES", mode="before")
+    @classmethod
+    def parse_admin_usernames(cls, value: str | list[str] | None) -> list[str]:
         if value is None or value == "":
             return []
         if isinstance(value, list):

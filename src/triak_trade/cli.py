@@ -13,6 +13,11 @@ import httpx
 import typer
 
 from triak_trade import __version__
+from triak_trade.admin_bot.auth import AdminAuthService, normalize_username
+from triak_trade.admin_bot.callbacks import parse_admin_callback
+from triak_trade.admin_bot.errors import AdminUnauthorizedError
+from triak_trade.admin_bot.formatter import AdminActionFormatter
+from triak_trade.admin_bot.telegram_bot import TelegramAdminBot
 from triak_trade.agents.channel_agent import ChannelAgent
 from triak_trade.agents.clock import FakeClock
 from triak_trade.agents.context import ChannelContext
@@ -22,8 +27,8 @@ from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
 from triak_trade.db.engine import build_engine_from_settings
-from triak_trade.domain.enums import CandleSource
-from triak_trade.domain.models import Candle, RawTelegramMessage
+from triak_trade.domain.enums import CandleSource, ProposedActionType, SignalStatus
+from triak_trade.domain.models import Candle, ProposedAction, RawTelegramMessage, SignalState
 from triak_trade.exchange.toobit.account import ToobitAccountClient
 from triak_trade.exchange.toobit.client import ToobitClient
 from triak_trade.exchange.toobit.demo_execution import DemoExecutionAdapter
@@ -599,5 +604,144 @@ def toobit_order_test_cmd(
         "side": result.side,
         "type": result.order_type,
         "status": result.status,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("admin-check")
+def admin_check_cmd() -> None:
+    settings = _load_settings()
+    usernames = [normalize_username(item) for item in settings.ADMIN_TELEGRAM_USERNAMES]
+    payload = {
+        "bot_token_present": bool(
+            settings.TELEGRAM_BOT_TOKEN.get_secret_value()
+            and settings.TELEGRAM_BOT_TOKEN.get_secret_value() != "replace_me"
+        ),
+        "admin_usernames_count": len(usernames),
+        "admin_usernames": sorted(usernames),
+        "deprecated_admin_user_ids_present": len(settings.ADMIN_USER_IDS) > 0,
+        "integration_guard": settings.RUN_TELEGRAM_BOT_INTEGRATION_TESTS == 1,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("admin-format-dry-run")
+def admin_format_dry_run_cmd() -> None:
+    _load_settings()
+    formatter = AdminActionFormatter()
+    now = datetime.now(timezone.utc)
+    action = ProposedAction(
+        action_id="test_action_123",
+        action_type=ProposedActionType.CREATE_ORDER,
+        signal_id="sig_1",
+        risk_increasing=True,
+        requires_admin_approval=True,
+        confidence=Decimal("0.81"),
+        reason="consolidation completed",
+        payload={"channel_id": "chan", "symbol": "BTCUSDT", "side": "LONG", "entry": "68000-68200"},
+        created_at=now,
+    )
+    signal = SignalState(
+        signal_id="sig_1",
+        channel_id="chan",
+        status=SignalStatus.PENDING_CONSOLIDATION,
+        created_from_message_id=1,
+        related_message_ids=[1],
+        current_signal=None,
+        version=1,
+        created_at=now,
+        updated_at=now,
+        expires_at=None,
+    )
+    formatted = formatter.format_action(action, signal=signal)
+    payload = {
+        "text": formatted.text,
+        "buttons": [button.__dict__ for button in formatted.buttons],
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("admin-callback-dry-run")
+def admin_callback_dry_run_cmd(
+    callback_data: str,
+    username: str = typer.Option(..., "--username"),
+) -> None:
+    settings = _load_settings()
+    auth = AdminAuthService(settings.ADMIN_TELEGRAM_USERNAMES)
+    try:
+        auth.require_authorized_username(username)
+    except AdminUnauthorizedError as exc:
+        raise typer.BadParameter("username is not authorized") from exc
+    parsed = parse_admin_callback(callback_data)
+    payload = {
+        "authorized": True,
+        "username": normalize_username(username),
+        "action_id": parsed.action_id,
+        "decision": parsed.decision.value,
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("admin-register-dry-run")
+def admin_register_dry_run_cmd(
+    username: str = typer.Option(...),
+    chat_id: int = typer.Option(...),
+) -> None:
+    settings = _load_settings()
+    bot = TelegramAdminBot(
+        bot_token=settings.TELEGRAM_BOT_TOKEN.get_secret_value(),
+        parse_mode=settings.ADMIN_BOT_PARSE_MODE,
+        disable_web_preview=settings.ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW,
+    )
+    reg = bot.handle_start(username=username, chat_id=chat_id)
+    payload = {"username": reg.username, "chat_id": reg.chat_id, "registered": True}
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("admin-send-test")
+def admin_send_test_cmd(
+    real: bool = typer.Option(False, "--real"),
+    chat_id: int | None = None,
+) -> None:
+    settings = _load_settings()
+    if not real:
+        raise typer.BadParameter("Blocked by default. Pass --real and enable guard.")
+    if settings.RUN_TELEGRAM_BOT_INTEGRATION_TESTS != 1:
+        raise typer.BadParameter(
+            "Real admin bot mode requires RUN_TELEGRAM_BOT_INTEGRATION_TESTS=1 in .env.local"
+        )
+    if not settings.ADMIN_TELEGRAM_USERNAMES:
+        raise typer.BadParameter("ADMIN_TELEGRAM_USERNAMES is required")
+
+    token = settings.TELEGRAM_BOT_TOKEN.get_secret_value()
+    if not token or token == "replace_me":
+        raise typer.BadParameter("TELEGRAM_BOT_TOKEN is required")
+
+    bot = TelegramAdminBot(
+        bot_token=token,
+        parse_mode=settings.ADMIN_BOT_PARSE_MODE,
+        disable_web_preview=settings.ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW,
+    )
+    target_chat_id = chat_id
+    target_username: str | None = None
+    if target_chat_id is None:
+        normalized = normalize_username(settings.ADMIN_TELEGRAM_USERNAMES[0])
+        reg = bot.registrations.get(normalized)
+        if reg is None:
+            raise typer.BadParameter(
+                "Admin must start the bot first or pass --chat-id for guarded test."
+            )
+        target_chat_id = reg.chat_id
+        target_username = normalized
+
+    response = asyncio.run(
+        bot.send_test_message(target_chat_id, settings.ADMIN_BOT_TEST_MESSAGE_TEXT)
+    )
+    result = response.get("result")
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    payload = {
+        "message_sent": True,
+        "recipient_username": target_username,
+        "telegram_message_id": message_id,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
