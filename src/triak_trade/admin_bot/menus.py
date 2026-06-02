@@ -21,7 +21,7 @@ def main_reply_keyboard() -> dict[str, Any]:
         "keyboard": [
             [{"text": "📊 بک‌تست"}, {"text": "🧪 تست سیستم"}],
             [{"text": "📜 گزارش آخر"}, {"text": "Logs & Reports"}],
-            [{"text": "💰 توبیت"}],
+            [{"text": "💰 توبیت"}, {"text": "🌐 Dashboard"}],
             [{"text": "وضعیت"}],
         ],
         "resize_keyboard": True,

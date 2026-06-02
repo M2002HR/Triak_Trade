@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Logs & Audit Events</h1>
+<section class="panel">
+  <h2>Telegram Log Channel</h2>
+  <p>Channel: {{ log_channel.log_channel_username }}</p>
+  <p>Enabled: {{ log_channel.enabled }}</p>
+  <p>Guard Enabled: {{ log_channel.guard_enabled }}</p>
+</section>
+{% include "partials/log_table.html" %}
+{% endblock %}

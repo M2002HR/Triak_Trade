@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="hero">
+  <p class="eyebrow">Operations Control</p>
+  <h1>Triak Trade Management Dashboard</h1>
+  <p>Signal intelligence, audit visibility, backtesting, and safety controls.</p>
+</header>
+{% include "partials/status_cards.html" %}
+<section class="actions">
+  <a class="button" href="/reports">Run Safe Verification</a>
+  <a class="button" href="/backtests">Run Fixture Backtest</a>
+  <a class="button" href="/logs">View Logs</a>
+  <a class="button danger" href="/settings">Kill Switch</a>
+</section>
+<section class="grid-two">
+  <div class="panel"><h2>Recent Audit Events</h2><p class="empty">No DB-backed events wired yet.</p></div>
+  <div class="panel"><h2>Recent Proposed Actions</h2><p class="empty">No pending actions.</p></div>
+</section>
+{% endblock %}

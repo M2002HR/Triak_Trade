@@ -88,6 +88,23 @@ class Settings(BaseSettings):
     PROCESSING_AUDIT_ENABLED: bool = True
     PROCESSING_AUDIT_STORE_IN_DB: bool = True
     PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL: bool = False
+    DASHBOARD_ENABLED: bool = True
+    DASHBOARD_HOST: str = "127.0.0.1"
+    DASHBOARD_PORT: int = 8088
+    DASHBOARD_AUTH_ENABLED: bool = True
+    DASHBOARD_ADMIN_TOKEN: SecretStr = Field(default=SecretStr(""))
+    DASHBOARD_SESSION_SECRET: SecretStr = Field(default=SecretStr(""))
+    DASHBOARD_RUNTIME_DIR: str = "runtime/dashboard"
+    DASHBOARD_PID_FILE: str = "runtime/dashboard/dashboard.pid"
+    DASHBOARD_STATUS_FILE: str = "runtime/dashboard/status.json"
+    DASHBOARD_LOG_FILE: str = "runtime/dashboard/dashboard.log"
+    DASHBOARD_AUTO_RELOAD: bool = False
+    AUTO_MODE_ENABLED: bool = False
+    AUTO_MODE_SCOPE: str = "demo_only"
+    AUTO_MODE_REQUIRE_RISK_ENGINE: bool = True
+    AUTO_MODE_REQUIRE_KILL_SWITCH_CLEAR: bool = True
+    KILL_SWITCH_ENABLED: bool = False
+    KILL_SWITCH_REASON: str = ""
     GEMINI_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     GROQ_API_KEYS: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     SIGNAL_CONSOLIDATION_SECONDS: int = 180

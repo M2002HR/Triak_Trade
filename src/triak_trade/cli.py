@@ -38,6 +38,16 @@ from triak_trade.backtesting import BacktestEngine, BacktestRequest, run_fixture
 from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
+from triak_trade.dashboard.runtime import (
+    dashboard_logs,
+    dashboard_safe_config,
+    dashboard_smoke_test,
+    dashboard_status,
+    dashboard_token_hint,
+    run_dashboard,
+    start_dashboard_process,
+    stop_dashboard_process,
+)
 from triak_trade.db.engine import build_engine_from_settings
 from triak_trade.domain.enums import (
     BacktestFillPolicy,
@@ -913,6 +923,87 @@ def process_message_audit_dry_run_cmd() -> None:
         "formatted_message": result.formatted_message,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("dashboard-check")
+def dashboard_check_cmd() -> None:
+    """Show safe dashboard configuration."""
+    settings = _load_settings()
+    typer.echo(json.dumps(dashboard_safe_config(settings), indent=2, sort_keys=True))
+
+
+@app.command("run-dashboard")
+def run_dashboard_cmd(
+    host: str | None = typer.Option(None, "--host"),
+    port: int | None = typer.Option(None, "--port"),
+    reload: bool = typer.Option(False, "--reload"),
+    max_runtime_seconds: int | None = typer.Option(None, "--max-runtime-seconds", min=1),
+) -> None:
+    """Run dashboard in foreground."""
+    settings = _load_settings()
+    result = run_dashboard(
+        settings,
+        host=host,
+        port=port,
+        reload=reload,
+        max_runtime_seconds=max_runtime_seconds,
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@app.command("dashboard-start")
+def dashboard_start_cmd() -> None:
+    """Start dashboard as a background process."""
+    settings = _load_settings()
+    try:
+        result = start_dashboard_process(settings)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@app.command("dashboard-status")
+def dashboard_status_cmd() -> None:
+    """Show dashboard runtime status."""
+    settings = _load_settings()
+    typer.echo(json.dumps(dashboard_status(settings), indent=2, sort_keys=True))
+
+
+@app.command("dashboard-stop")
+def dashboard_stop_cmd() -> None:
+    """Stop background dashboard process."""
+    settings = _load_settings()
+    typer.echo(json.dumps(stop_dashboard_process(settings), indent=2, sort_keys=True))
+
+
+@app.command("dashboard-restart")
+def dashboard_restart_cmd() -> None:
+    """Restart background dashboard process."""
+    settings = _load_settings()
+    stopped = stop_dashboard_process(settings)
+    started = start_dashboard_process(settings)
+    typer.echo(json.dumps({"stopped": stopped, "started": started}, indent=2, sort_keys=True))
+
+
+@app.command("dashboard-logs")
+def dashboard_logs_cmd(lines: int = typer.Option(100, "--lines", min=1)) -> None:
+    """Tail redacted dashboard logs."""
+    settings = _load_settings()
+    for line in dashboard_logs(settings, lines=lines):
+        typer.echo(line)
+
+
+@app.command("dashboard-smoke-test")
+def dashboard_smoke_test_cmd() -> None:
+    """Run local TestClient checks without external calls."""
+    settings = _load_settings()
+    typer.echo(json.dumps(dashboard_smoke_test(settings), indent=2, sort_keys=True))
+
+
+@app.command("dashboard-token-hint")
+def dashboard_token_hint_cmd() -> None:
+    """Show where the local dashboard token is stored without printing it."""
+    typer.echo(dashboard_token_hint())
 
 
 @app.command("run-admin-bot")

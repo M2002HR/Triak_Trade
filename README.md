@@ -46,6 +46,8 @@ triak-trade admin-bot-logs --lines 50
 triak-trade log-channel-check
 triak-trade log-channel-format-dry-run
 triak-trade process-message-audit-dry-run
+triak-trade dashboard-check
+triak-trade dashboard-smoke-test
 pytest
 ruff check .
 mypy src
@@ -121,3 +123,12 @@ mypy src
 - The admin bot must be allowed to post to `@triak_logs`.
 - `triak-trade log-channel-format-dry-run` and `triak-trade process-message-audit-dry-run` never call Telegram.
 - No secrets, account data, live orders, or trade execution are included in processing audit reports.
+
+## Management Dashboard
+
+- FastAPI/Jinja dashboard runs locally at `http://127.0.0.1:8088` by default.
+- Auth uses `DASHBOARD_ADMIN_TOKEN`; the token is stored only in root `.env.local`.
+- Use `triak-trade dashboard-check` for safe non-secret config status.
+- Use `triak-trade dashboard-start`, `dashboard-status`, `dashboard-logs`, and `dashboard-stop` for runtime control.
+- Auto Mode and Kill Switch are runtime state toggles only; no live execution exists.
+- Dashboard approvals record/placeholder decisions only and never execute orders.

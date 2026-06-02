@@ -68,3 +68,7 @@ Triak_Trade is a modular signal intelligence and demo-trading platform with stri
 - Telegram processing log channel is `@triak_logs`; all log-channel reports must be in English.
 - Real log-channel sending requires `TELEGRAM_LOG_CHANNEL_ENABLED=true`, `PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true`, and `RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1`.
 - Do not scatter direct log-channel sends through core logic; use observability event/reporting services.
+- Dashboard is local-first FastAPI/Jinja control UI; do not add Node/React unless explicitly needed.
+- Dashboard auth tokens and session secrets must live only in root `.env.local` and must never be printed.
+- Dashboard Auto Mode and Kill Switch are runtime state only until future Risk Engine/Demo Execution modules exist.
+- Dashboard approval actions must not execute orders.

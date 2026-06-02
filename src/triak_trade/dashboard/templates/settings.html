@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Safe Settings</h1>
+<section class="grid-two">
+  <form method="post" action="/settings/auto-mode" class="panel">
+    <h2>Auto Mode</h2>
+    <label class="checkbox"><input type="checkbox" name="enabled" {% if settings_view.auto_mode.enabled %}checked{% endif %}> Enabled</label>
+    <input name="reason" placeholder="Reason" value="{{ settings_view.auto_mode.reason }}">
+    <p>Configured only. Execution requires future Risk Engine + Demo Execution modules.</p>
+    <button>Update Auto Mode</button>
+  </form>
+  <form method="post" action="/settings/kill-switch" class="panel">
+    <h2>Kill Switch</h2>
+    <label class="checkbox"><input type="checkbox" name="enabled" {% if settings_view.kill_switch.enabled %}checked{% endif %}> Enabled</label>
+    <input name="reason" placeholder="Reason" value="{{ settings_view.kill_switch.reason }}">
+    <p>Future execution modules must check this state before any action.</p>
+    <button>Update Kill Switch</button>
+  </form>
+</section>
+<section class="panel"><pre>{{ settings_view }}</pre></section>
+{% endblock %}

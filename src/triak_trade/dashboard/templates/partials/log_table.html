@@ -1,0 +1,9 @@
+<div class="panel logbox">
+  {% if runtime_logs %}
+    {% for line in runtime_logs %}
+      <pre>{{ line }}</pre>
+    {% endfor %}
+  {% else %}
+    <p class="empty">No runtime logs found.</p>
+  {% endif %}
+</div>

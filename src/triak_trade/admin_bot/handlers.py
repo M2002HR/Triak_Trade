@@ -142,6 +142,8 @@ class AdminBotUpdateHandler:
             ]
         if normalized_text == "💰 توبیت":
             return [OutgoingMessage(chat_id=chat_id, text=self._toobit_status_text())]
+        if normalized_text == "🌐 Dashboard":
+            return [OutgoingMessage(chat_id=chat_id, text=self._dashboard_text())]
         if normalized_text == "وضعیت":
             return [OutgoingMessage(chat_id=chat_id, text=self._runtime_status_text())]
         return [
@@ -237,6 +239,13 @@ class AdminBotUpdateHandler:
             f"pid={state.pid}\n"
             f"handled_updates_count={state.handled_updates_count}\n"
             f"last_update_id={state.last_update_id}"
+        )
+
+    def _dashboard_text(self) -> str:
+        return (
+            "Dashboard is local-only. Use your local machine/browser.\n"
+            f"URL: http://{self.settings.DASHBOARD_HOST}:{self.settings.DASHBOARD_PORT}\n"
+            "The admin token is stored in root .env.local and is not sent through Telegram."
         )
 
     def _record_handled(self, result: HandledUpdate) -> None:

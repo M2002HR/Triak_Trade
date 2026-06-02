@@ -23,6 +23,11 @@ dependencies = [
   "python-json-logger>=2.0",
   "python-dotenv>=1.0",
   "telethon>=1.36",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "jinja2>=3.1",
+  "itsdangerous>=2.2",
+  "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +47,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+triak_trade = ["dashboard/templates/**/*.html", "dashboard/static/*"]
 
 [tool.ruff]
 line-length = 100

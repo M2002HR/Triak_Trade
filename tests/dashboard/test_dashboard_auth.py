@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from triak_trade.config.settings import Settings
+from triak_trade.dashboard.app import create_dashboard_app
+
+
+def settings() -> Settings:
+    return Settings(_env_file=None, DASHBOARD_ADMIN_TOKEN="test-token")
+
+
+def test_dashboard_unauthorized_request_blocked() -> None:
+    client = TestClient(create_dashboard_app(settings()))
+    response = client.get("/")
+    assert response.status_code == 401
+
+
+def test_dashboard_authorized_request_works() -> None:
+    client = TestClient(create_dashboard_app(settings()))
+    response = client.get("/", headers={"X-Triak-Admin-Token": "test-token"})
+    assert response.status_code == 200
+    assert "Triak Trade Management Dashboard" in response.text
+
+
+def test_dashboard_query_token_allowed_for_local_dev() -> None:
+    client = TestClient(create_dashboard_app(settings()))
+    response = client.get("/?token=test-token")
+    assert response.status_code == 200

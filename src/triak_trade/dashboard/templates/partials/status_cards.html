@@ -1,0 +1,8 @@
+<section class="cards">
+  {% for card in overview.cards %}
+    <article class="card">
+      <span>{{ card.label }}</span>
+      <strong>{{ card.value }}</strong>
+    </article>
+  {% endfor %}
+</section>

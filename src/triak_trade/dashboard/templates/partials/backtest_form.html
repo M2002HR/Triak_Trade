@@ -1,0 +1,44 @@
+<form method="post" action="/backtests/run" class="panel form-grid">
+  <label>Channel
+    <input name="channel" value="{{ default_channel }}" placeholder="https://t.me/Tofan_Trade">
+  </label>
+  <label>Date Range
+    <select name="range">
+      <option>Last 7 days</option>
+      <option>Today</option>
+      <option>Last 30 days</option>
+      <option>Custom</option>
+    </select>
+  </label>
+  <label>Interval
+    <select name="interval">
+      <option value="1m">1m</option>
+      <option value="5m">5m</option>
+      <option value="15m">15m</option>
+      <option value="1h">1h</option>
+    </select>
+  </label>
+  <label>Initial Balance
+    <input name="initial_balance" value="1000">
+  </label>
+  <label>Risk Per Trade %
+    <input name="risk_per_trade_pct" value="1">
+  </label>
+  <label>Fill Policy
+    <select name="fill_policy">
+      <option value="conservative">conservative</option>
+      <option value="optimistic">optimistic</option>
+    </select>
+  </label>
+  <label>Classifier Mode
+    <select name="classifier_mode">
+      <option>fixture</option>
+      <option>regex fallback</option>
+      <option disabled>AI later</option>
+    </select>
+  </label>
+  <label class="checkbox">
+    <input type="checkbox" name="real_mode"> Real mode guarded
+  </label>
+  <button type="submit">Run Safe Backtest</button>
+</form>
