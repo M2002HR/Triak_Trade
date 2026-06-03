@@ -93,6 +93,7 @@ def build_router(
                     "result": None,
                     "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
                     "readiness": service.real_backtest_readiness(),
+                    "bootstrap": service.backtest_bootstrap(),
                 },
             ),
         )
@@ -113,9 +114,41 @@ def build_router(
                     "result": result,
                     "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
                     "readiness": service.real_backtest_readiness(),
+                    "bootstrap": service.backtest_bootstrap(),
                 },
             ),
         )
+
+    @router.get("/api/backtests/readiness")
+    async def backtest_readiness(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        return JSONResponse(service.real_backtest_readiness())
+
+    @router.get("/api/backtests/runs")
+    async def list_backtest_runs(request: Request, limit: int = 20) -> JSONResponse:
+        auth.require_api(request)
+        return JSONResponse({"runs": service.list_backtest_runs(limit=limit)})
+
+    @router.get("/api/backtests/runs/{run_id}")
+    async def get_backtest_run(request: Request, run_id: str) -> JSONResponse:
+        auth.require_api(request)
+        run = service.get_backtest_run(run_id)
+        if run is None:
+            return JSONResponse({"detail": "run_not_found"}, status_code=404)
+        return JSONResponse(run)
+
+    @router.post("/api/backtests/start")
+    async def start_backtest_run(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "invalid_payload"}, status_code=400)
+        try:
+            result = service.start_live_backtest(payload)
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        status_code = 202 if result.get("started") else 409
+        return JSONResponse(result, status_code=status_code)
 
     @router.get("/approvals", response_class=HTMLResponse)
     async def approvals(request: Request) -> Response:
@@ -137,7 +170,6 @@ def build_router(
         redirect = auth.redirect_if_needed(request)
         if redirect is not None:
             return redirect
-        # Repository-backed pending actions will be wired in a later step.
         _ = (action_id, decision)
         return RedirectResponse(url="/approvals?decision_recorded=placeholder", status_code=303)
 

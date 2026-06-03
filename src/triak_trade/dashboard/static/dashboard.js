@@ -1,1 +1,504 @@
 document.documentElement.dataset.dashboardReady = "true";
+
+(() => {
+  const bootstrapNode = document.getElementById("backtest-bootstrap");
+  if (!bootstrapNode) {
+    return;
+  }
+
+  const bootstrap = JSON.parse(bootstrapNode.textContent || "{}");
+  const state = {
+    bootstrap,
+    activeRunId: bootstrap.recent_runs?.[0]?.run_id || null,
+    activeRun: bootstrap.recent_runs?.[0] || null,
+    selectedMessageId: null,
+    pollTimer: null,
+    listTimer: null,
+  };
+
+  const nodes = {
+    form: document.getElementById("backtest-live-form"),
+    channel: document.getElementById("backtest-channel"),
+    fromDate: document.getElementById("backtest-from-date"),
+    toDate: document.getElementById("backtest-to-date"),
+    interval: document.getElementById("backtest-interval"),
+    maxMessages: document.getElementById("backtest-max-messages"),
+    useAi: document.getElementById("backtest-use-ai"),
+    sendLogChannel: document.getElementById("backtest-send-log-channel"),
+    logPerMessage: document.getElementById("backtest-log-per-message"),
+    startButton: document.getElementById("backtest-start-button"),
+    formStatus: document.getElementById("backtest-form-status"),
+    readinessHeadline: document.getElementById("readiness-headline"),
+    readinessBadges: document.getElementById("readiness-badges"),
+    readinessIssues: document.getElementById("readiness-issues"),
+    activeRunHeadline: document.getElementById("active-run-headline"),
+    runTitle: document.getElementById("run-title"),
+    runSubtitle: document.getElementById("run-subtitle"),
+    runPhasePill: document.getElementById("run-phase-pill"),
+    metrics: document.getElementById("backtest-metrics"),
+    currentPhaseLabel: document.getElementById("current-phase-label"),
+    currentPhaseSummary: document.getElementById("current-phase-summary"),
+    currentMessageLabel: document.getElementById("current-message-label"),
+    currentMessageSummary: document.getElementById("current-message-summary"),
+    messageCountLabel: document.getElementById("message-count-label"),
+    messageStream: document.getElementById("message-stream"),
+    eventFeed: document.getElementById("event-feed"),
+    recentRuns: document.getElementById("recent-runs"),
+    modal: document.getElementById("message-modal"),
+    modalTitle: document.getElementById("message-modal-title"),
+    modalStatus: document.getElementById("message-modal-status"),
+    modalMeta: document.getElementById("message-modal-meta"),
+    modalStageGraph: document.getElementById("message-modal-stage-graph"),
+    modalPreview: document.getElementById("message-modal-preview"),
+    modalSummary: document.getElementById("message-modal-summary"),
+    modalDebug: document.getElementById("message-modal-debug"),
+  };
+
+  seedDefaults();
+  bindEvents();
+  renderReadiness(bootstrap.readiness || {});
+  renderRecentRuns(bootstrap.recent_runs || []);
+  if (state.activeRun) {
+    renderRun(state.activeRun);
+    startPolling();
+  } else {
+    renderEmptyRun();
+  }
+  refreshRunsList();
+
+  function seedDefaults() {
+    nodes.interval.value = bootstrap.default_interval || "1m";
+    nodes.maxMessages.value = String(bootstrap.default_max_messages || 1000);
+    nodes.useAi.checked = Boolean(bootstrap.default_use_ai);
+    nodes.sendLogChannel.checked = Boolean(bootstrap.default_send_log_channel);
+    nodes.logPerMessage.checked = Boolean(bootstrap.default_log_per_message);
+    applyDateRange(bootstrap.default_from_date, bootstrap.default_to_date);
+  }
+
+  function bindEvents() {
+    nodes.form?.addEventListener("submit", handleSubmit);
+    document.querySelectorAll("[data-preset-hours]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const hours = Number(button.getAttribute("data-preset-hours") || "24");
+        const end = new Date();
+        const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
+        applyDateRange(start.toISOString(), end.toISOString());
+      });
+    });
+    nodes.messageStream?.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-message-id]") : null;
+      if (!target) {
+        return;
+      }
+      const messageId = Number(target.getAttribute("data-message-id") || "0");
+      state.selectedMessageId = messageId;
+      const trace = state.activeRun?.messages?.find((item) => item.message_id === messageId);
+      if (trace) {
+        openModal(trace);
+      }
+    });
+    nodes.recentRuns?.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-run-id]") : null;
+      if (!target) {
+        return;
+      }
+      state.activeRunId = target.getAttribute("data-run-id");
+      fetchRun();
+    });
+    document.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-close-modal='true']") : null;
+      if (target) {
+        closeModal();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeModal();
+      }
+    });
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    const payload = buildPayload();
+    if (!payload) {
+      return;
+    }
+    setFormStatus("Starting real backtest worker...", "working");
+    nodes.startButton.disabled = true;
+    try {
+      const response = await fetch("/api/backtests/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.detail || data.reason || "Backtest start failed.";
+        setFormStatus(detail, "error");
+        if (data.issues) {
+          renderReadiness({ ...(bootstrap.readiness || {}), issues: data.issues, ready: false });
+        }
+        return;
+      }
+      if (data.blocked) {
+        setFormStatus(data.reason || "Backtest is blocked.", "error");
+        renderReadiness(data.readiness || { ready: false, issues: data.issues || [] });
+        return;
+      }
+      state.activeRunId = data.run.run_id;
+      state.activeRun = data.run;
+      renderRun(data.run);
+      setFormStatus("Backtest started. Streaming live progress now.", "success");
+      startPolling();
+      refreshRunsList();
+    } catch (error) {
+      setFormStatus(`Backtest start failed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+    } finally {
+      nodes.startButton.disabled = false;
+    }
+  }
+
+  function buildPayload() {
+    const fromValue = nodes.fromDate.value;
+    const toValue = nodes.toDate.value;
+    if (!fromValue || !toValue) {
+      setFormStatus("Start and end dates are required.", "error");
+      return null;
+    }
+    const fromDate = new Date(fromValue);
+    const toDate = new Date(toValue);
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      setFormStatus("Date range is invalid.", "error");
+      return null;
+    }
+    if (toDate <= fromDate) {
+      setFormStatus("End date must be after start date.", "error");
+      return null;
+    }
+    return {
+      channel: nodes.channel.value.trim(),
+      from_date: fromDate.toISOString(),
+      to_date: toDate.toISOString(),
+      interval: nodes.interval.value,
+      max_messages: Number(nodes.maxMessages.value || "1000"),
+      use_ai: nodes.useAi.checked,
+      send_log_channel: nodes.sendLogChannel.checked,
+      log_per_message: nodes.logPerMessage.checked,
+    };
+  }
+
+  function startPolling() {
+    if (state.pollTimer) {
+      window.clearInterval(state.pollTimer);
+    }
+    state.pollTimer = window.setInterval(fetchRun, 2000);
+    fetchRun();
+  }
+
+  async function fetchRun() {
+    if (!state.activeRunId) {
+      return;
+    }
+    try {
+      const response = await fetch(`/api/backtests/runs/${state.activeRunId}`);
+      if (!response.ok) {
+        return;
+      }
+      const run = await response.json();
+      state.activeRun = run;
+      renderRun(run);
+      if (run.status !== "running" && run.status !== "queued" && state.pollTimer) {
+        window.clearInterval(state.pollTimer);
+        state.pollTimer = null;
+      }
+    } catch (_error) {
+      setFormStatus("Live run refresh failed. Retrying...", "warning");
+    }
+  }
+
+  async function refreshRunsList() {
+    if (state.listTimer) {
+      window.clearTimeout(state.listTimer);
+    }
+    try {
+      const response = await fetch("/api/backtests/runs?limit=8");
+      if (response.ok) {
+        const data = await response.json();
+        renderRecentRuns(data.runs || []);
+      }
+    } catch (_error) {
+      // Keep silent on list refresh; main run polling is more important.
+    }
+    state.listTimer = window.setTimeout(refreshRunsList, 10000);
+  }
+
+  function renderReadiness(readiness) {
+    const ready = Boolean(readiness.ready);
+    nodes.readinessHeadline.textContent = ready ? "Ready" : "Blocked";
+    nodes.readinessBadges.innerHTML = "";
+    const checks = [
+      ["Real Backtest", readiness.real_backtest_enabled],
+      ["Telegram Creds", readiness.telegram_credentials_present],
+      ["Telegram Session", readiness.telegram_session_configured],
+      ["Market Data", readiness.toobit_public_market_ready],
+      ["AI Gateway", readiness.ai_gateway_enabled],
+      ["Regex Fallback", readiness.regex_fallback_enabled],
+      ["Log Channel", readiness.log_channel_enabled],
+    ];
+    checks.forEach(([label, value]) => {
+      const badge = document.createElement("span");
+      badge.className = `status-badge ${value ? "ok" : "warn"}`;
+      badge.textContent = `${label}: ${value ? "on" : "off"}`;
+      nodes.readinessBadges.appendChild(badge);
+    });
+    const issues = Array.isArray(readiness.issues) ? readiness.issues : [];
+    if (!issues.length) {
+      nodes.readinessIssues.innerHTML = '<div class="issue ok">All real backtest guards are satisfied.</div>';
+      return;
+    }
+    nodes.readinessIssues.innerHTML = issues
+      .map((issue) => `<div class="issue warn">${escapeHtml(issue)}</div>`)
+      .join("");
+  }
+
+  function renderRun(run) {
+    renderCurrentRunHeader(run);
+    renderMetrics(run);
+    renderEventFeed(run.events || []);
+    renderMessages(run.messages || []);
+    renderRecentRuns((bootstrap.recent_runs || []).map((item) => item.run_id === run.run_id ? run : item));
+    if (state.selectedMessageId) {
+      const trace = run.messages?.find((item) => item.message_id === state.selectedMessageId);
+      if (trace) {
+        openModal(trace);
+      }
+    }
+  }
+
+  function renderCurrentRunHeader(run) {
+    nodes.activeRunHeadline.textContent = run.status === "running" ? "Streaming" : run.current_phase_label;
+    nodes.runTitle.textContent = `${run.channel_resolved} • ${run.interval}`;
+    nodes.runSubtitle.textContent = `${formatDate(run.from_date)} → ${formatDate(run.to_date)}`;
+    nodes.runPhasePill.textContent = run.current_phase_label;
+    nodes.runPhasePill.className = `phase-pill phase-${run.status}`;
+    nodes.currentPhaseLabel.textContent = run.current_phase_label;
+    nodes.currentPhaseSummary.textContent = run.current_phase_summary || "No summary yet.";
+    const currentTrace = run.messages?.find((item) => item.message_id === run.current_message_id);
+    nodes.currentMessageLabel.textContent = currentTrace ? `Message ${currentTrace.message_id}` : "None";
+    nodes.currentMessageSummary.textContent = currentTrace
+      ? `${currentTrace.current_stage} • ${currentTrace.result_summary || currentTrace.preview_text || "Processing"}`
+      : "No message is being processed right now.";
+  }
+
+  function renderMetrics(run) {
+    const cards = [
+      ["Messages", run.total_messages],
+      ["Classified", run.classified_messages],
+      ["Parsed Signals", run.parsed_signals],
+      ["Valid Signals", run.valid_signals],
+      ["Ignored", run.ignored_messages],
+      ["Ambiguous", run.ambiguous_messages],
+      ["Trades Simulated", run.trades_simulated],
+      ["Trades Filled", run.trades_filled],
+    ];
+    nodes.metrics.innerHTML = cards
+      .map(([label, value]) => `
+        <div class="metric-card">
+          <span>${escapeHtml(String(label))}</span>
+          <strong>${escapeHtml(String(value ?? 0))}</strong>
+        </div>
+      `)
+      .join("");
+  }
+
+  function renderEventFeed(events) {
+    if (!events.length) {
+      nodes.eventFeed.textContent = "No activity yet.";
+      nodes.eventFeed.classList.add("empty-state-box");
+      return;
+    }
+    nodes.eventFeed.classList.remove("empty-state-box");
+    nodes.eventFeed.innerHTML = events
+      .slice()
+      .reverse()
+      .slice(0, 40)
+      .map((event) => `
+        <article class="event-item event-${escapeHtml(event.status)}">
+          <div class="event-line">
+            <strong>${escapeHtml(event.phase.replaceAll("_", " "))}</strong>
+            <span>${formatDate(event.at)}</span>
+          </div>
+          <p>${escapeHtml(event.summary)}</p>
+          ${event.current_message_id ? `<small>message ${escapeHtml(String(event.current_message_id))}</small>` : ""}
+        </article>
+      `)
+      .join("");
+  }
+
+  function renderMessages(messages) {
+    nodes.messageCountLabel.textContent = `${messages.length} messages`;
+    if (!messages.length) {
+      nodes.messageStream.textContent = "No messages have been processed yet.";
+      nodes.messageStream.classList.add("empty-state-box");
+      return;
+    }
+    nodes.messageStream.classList.remove("empty-state-box");
+    nodes.messageStream.innerHTML = messages
+      .map((trace) => {
+        const active = state.activeRun?.current_message_id === trace.message_id;
+        return `
+          <button type="button" class="message-card ${active ? "active" : ""}" data-message-id="${escapeHtml(String(trace.message_id))}">
+            <div class="message-card-top">
+              <div>
+                <strong>Message ${escapeHtml(String(trace.message_id))}</strong>
+                <span>${escapeHtml(trace.channel_username || trace.channel_id)}</span>
+              </div>
+              <div class="message-badges">
+                <span class="mini-badge state-${escapeHtml(trace.final_status)}">${escapeHtml(trace.final_status)}</span>
+                <span class="mini-badge stage-${escapeHtml(trace.current_stage)}">${escapeHtml(trace.current_stage)}</span>
+              </div>
+            </div>
+            <p class="message-card-preview">${escapeHtml(trace.preview_text || "(empty text message)")}</p>
+            <div class="message-card-meta">
+              <span>${escapeHtml(trace.classification || "unknown")}</span>
+              <span>${escapeHtml(trace.parsed_action || "unknown")}</span>
+              <span>${escapeHtml(trace.symbol || "no symbol")}</span>
+              <span>${formatDate(trace.message_date)}</span>
+            </div>
+          </button>
+        `;
+      })
+      .join("");
+  }
+
+  function renderRecentRuns(runs) {
+    if (!runs.length) {
+      nodes.recentRuns.textContent = "No previous runs found.";
+      nodes.recentRuns.classList.add("empty-state-box");
+      return;
+    }
+    nodes.recentRuns.classList.remove("empty-state-box");
+    nodes.recentRuns.innerHTML = runs
+      .map((run) => `
+        <button type="button" class="recent-run-card ${state.activeRunId === run.run_id ? "active" : ""}" data-run-id="${escapeHtml(run.run_id)}">
+          <strong>${escapeHtml(run.channel_input || run.channel_resolved)}</strong>
+          <span>${escapeHtml(run.current_phase_label || run.current_phase || run.status)}</span>
+          <small>${formatDate(run.created_at)}</small>
+        </button>
+      `)
+      .join("");
+  }
+
+  function renderEmptyRun() {
+    nodes.activeRunHeadline.textContent = "No active run";
+    nodes.runTitle.textContent = "Waiting For A Backtest";
+    nodes.runSubtitle.textContent = "Start a run to stream message-by-message progress.";
+    nodes.runPhasePill.textContent = "Queued";
+    nodes.runPhasePill.className = "phase-pill phase-queued";
+    nodes.metrics.innerHTML = "";
+    nodes.currentPhaseLabel.textContent = "Queued";
+    nodes.currentPhaseSummary.textContent = "Waiting to start.";
+    nodes.currentMessageLabel.textContent = "None";
+    nodes.currentMessageSummary.textContent = "No message is being processed yet.";
+  }
+
+  function openModal(trace) {
+    nodes.modal.hidden = false;
+    nodes.modalTitle.textContent = `Message ${trace.message_id} Timeline`;
+    nodes.modalStatus.textContent = trace.final_status;
+    nodes.modalStatus.className = `phase-pill phase-${trace.final_status}`;
+    nodes.modalMeta.innerHTML = `
+      <div class="meta-chip"><strong>Classification</strong><span>${escapeHtml(trace.classification || "unknown")}</span></div>
+      <div class="meta-chip"><strong>Action</strong><span>${escapeHtml(trace.parsed_action || "unknown")}</span></div>
+      <div class="meta-chip"><strong>Symbol</strong><span>${escapeHtml(trace.symbol || "none")}</span></div>
+      <div class="meta-chip"><strong>Confidence</strong><span>${escapeHtml(trace.confidence || "n/a")}</span></div>
+      <div class="meta-chip"><strong>Time</strong><span>${formatDate(trace.message_date)}</span></div>
+      <div class="meta-chip"><strong>Link</strong><span>${trace.message_link ? `<a href="${escapeHtml(trace.message_link)}" target="_blank" rel="noreferrer">Open</a>` : "not available"}</span></div>
+    `;
+    nodes.modalStageGraph.innerHTML = (trace.stages || [])
+      .map((stage) => {
+        const current = trace.current_stage === stage.key;
+        return `
+          <article class="stage-node stage-${escapeHtml(stage.status)} ${current ? "current" : ""}">
+            <div class="stage-node-head">
+              <span class="stage-dot"></span>
+              <strong>${escapeHtml(stage.label)}</strong>
+              <small>${escapeHtml(stage.status)}</small>
+            </div>
+            <p>${escapeHtml(stage.detail || "No detail yet.")}</p>
+          </article>
+        `;
+      })
+      .join("");
+    nodes.modalPreview.textContent = trace.full_text || trace.preview_text || "(empty text message)";
+    nodes.modalSummary.innerHTML = `
+      <div class="summary-row"><strong>Final Status</strong><span>${escapeHtml(trace.final_status)}</span></div>
+      <div class="summary-row"><strong>Current Stage</strong><span>${escapeHtml(trace.current_stage)}</span></div>
+      <div class="summary-row"><strong>Result</strong><span>${escapeHtml(trace.result_summary || "No final summary yet.")}</span></div>
+      ${trace.signal_id ? `<div class="summary-row"><strong>Signal ID</strong><span>${escapeHtml(trace.signal_id)}</span></div>` : ""}
+    `;
+    nodes.modalDebug.innerHTML = (trace.debug_notes || []).length
+      ? trace.debug_notes.map((note) => `<div class="debug-note">${escapeHtml(note)}</div>`).join("")
+      : '<div class="debug-note empty">No debug notes.</div>';
+    document.body.classList.add("modal-open");
+  }
+
+  function closeModal() {
+    if (!nodes.modal) {
+      return;
+    }
+    nodes.modal.hidden = true;
+    document.body.classList.remove("modal-open");
+  }
+
+  function setFormStatus(message, kind) {
+    nodes.formStatus.textContent = message;
+    nodes.formStatus.className = `inline-status ${kind}`;
+  }
+
+  function applyDateRange(fromIso, toIso) {
+    nodes.fromDate.value = toLocalInputValue(fromIso);
+    nodes.toDate.value = toLocalInputValue(toIso);
+  }
+
+  function toLocalInputValue(isoString) {
+    if (!isoString) {
+      return "";
+    }
+    const value = new Date(isoString);
+    if (Number.isNaN(value.getTime())) {
+      return "";
+    }
+    const offset = value.getTimezoneOffset();
+    const local = new Date(value.getTime() - offset * 60 * 1000);
+    return local.toISOString().slice(0, 16);
+  }
+
+  function formatDate(value) {
+    if (!value) {
+      return "n/a";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(date);
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+})();

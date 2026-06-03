@@ -43,7 +43,8 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     response = client(tmp_path).get("/backtests", headers=headers())
     assert response.status_code == 200
     assert "https://t.me/Tofan_Trade" in response.text
-    assert "Run Real Backtest" in response.text
+    assert "Start Backtest" in response.text
+    assert "Live Telegram Backtest Monitor" in response.text
 
 
 def test_approvals_page_renders_empty_state(tmp_path: Path) -> None:

@@ -1,34 +1,157 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Backtest Workbench</h1>
-<section class="panel">
-  <h2>Real Backtest Readiness</h2>
-  <dl class="metrics">
-  {% for key, value in readiness.items() %}
-    <dt>{{ key }}</dt><dd>{{ value }}</dd>
-  {% endfor %}
-  </dl>
+<section class="hero backtest-hero">
+  <div>
+    <p class="eyebrow">Backtest Workbench</p>
+    <h1>Live Telegram Backtest Monitor</h1>
+    <p class="subtle hero-copy">
+      Watch the system process each Telegram message, stage by stage. You can see which message is
+      active now, which stage is running, what the result was, and how the final backtest report was formed.
+    </p>
+  </div>
+  <div class="hero-stat-cluster">
+    <div class="hero-stat">
+      <span>Readiness</span>
+      <strong id="readiness-headline">Checking</strong>
+    </div>
+    <div class="hero-stat">
+      <span>Latest Run</span>
+      <strong id="active-run-headline">No active run</strong>
+    </div>
+  </div>
 </section>
-{% include "partials/backtest_form.html" %}
-{% if result %}
-  <section class="panel">
-    {% if result.blocked %}
-      <h2>Blocked</h2><p>{{ result.reason }}</p>
-      {% if result.issues %}
-      <ul>
-      {% for issue in result.issues %}
-        <li>{{ issue }}</li>
-      {% endfor %}
-      </ul>
-      {% endif %}
-    {% else %}
-      <h2>Backtest Result</h2>
-      <dl class="metrics">
-      {% for key, value in result.summary.items() %}
-        <dt>{{ key }}</dt><dd>{{ value }}</dd>
-      {% endfor %}
-      </dl>
+
+<script id="backtest-bootstrap" type="application/json">{{ bootstrap | tojson }}</script>
+
+<section class="grid-two backtest-layout" data-backtest-workbench="true">
+  <div class="backtest-main-column">
+    {% include "partials/backtest_form.html" %}
+
+    <section class="panel readiness-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Readiness</p>
+          <h2>Real Pipeline Guards</h2>
+        </div>
+        <div id="readiness-badges" class="badge-row"></div>
+      </div>
+      <div id="readiness-issues" class="issues-list"></div>
+    </section>
+
+    <section class="panel current-run-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Live Run</p>
+          <h2 id="run-title">Waiting For A Backtest</h2>
+          <p id="run-subtitle" class="subtle">Start a run to stream message-by-message progress.</p>
+        </div>
+        <div id="run-phase-pill" class="phase-pill phase-queued">Queued</div>
+      </div>
+
+      <div class="metrics backtest-metrics" id="backtest-metrics"></div>
+
+      <div class="live-progress-shell">
+        <div class="phase-card">
+          <span class="phase-card-label">Current Phase</span>
+          <strong id="current-phase-label">Queued</strong>
+          <p id="current-phase-summary" class="phase-summary">Waiting to start.</p>
+        </div>
+        <div class="phase-card attention-card">
+          <span class="phase-card-label">Current Message</span>
+          <strong id="current-message-label">None</strong>
+          <p id="current-message-summary" class="phase-summary">No message is being processed yet.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel message-stream-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Message Stream</p>
+          <h2>Per-Message Trace</h2>
+          <p class="subtle">Click any row to open a full stage timeline, message text, and decision details.</p>
+        </div>
+        <div id="message-count-label" class="counter-pill">0 messages</div>
+      </div>
+      <div id="message-stream" class="message-stream empty-state-box">
+        No messages have been processed yet.
+      </div>
+    </section>
+  </div>
+
+  <div class="backtest-side-column">
+    <section class="panel feed-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Run Feed</p>
+          <h2>Stage Activity</h2>
+        </div>
+      </div>
+      <div id="event-feed" class="event-feed empty-state-box">No activity yet.</div>
+    </section>
+
+    <section class="panel recent-runs-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>Recent Backtests</h2>
+        </div>
+      </div>
+      <div id="recent-runs" class="recent-runs empty-state-box">No previous runs found.</div>
+    </section>
+
+    {% if result %}
+      <section class="panel legacy-result-panel">
+        {% if result.blocked %}
+          <h2>Blocked</h2>
+          <p>{{ result.reason }}</p>
+          {% if result.issues %}
+          <ul>
+          {% for issue in result.issues %}
+            <li>{{ issue }}</li>
+          {% endfor %}
+          </ul>
+          {% endif %}
+        {% else %}
+          <h2>Legacy Result</h2>
+          <dl class="metrics">
+          {% for key, value in result.summary.items() %}
+            <dt>{{ key }}</dt><dd>{{ value }}</dd>
+          {% endfor %}
+          </dl>
+        {% endif %}
+      </section>
     {% endif %}
-  </section>
-{% endif %}
+  </div>
+</section>
+
+<div id="message-modal" class="modal-shell" hidden>
+  <div class="modal-backdrop" data-close-modal="true"></div>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="message-modal-title">
+    <button type="button" class="modal-close" data-close-modal="true" aria-label="Close message details">×</button>
+    <div class="modal-header">
+      <div>
+        <p class="eyebrow">Message Timeline</p>
+        <h2 id="message-modal-title">Message Details</h2>
+      </div>
+      <div id="message-modal-status" class="phase-pill phase-queued">Queued</div>
+    </div>
+    <div id="message-modal-meta" class="modal-meta"></div>
+    <div id="message-modal-stage-graph" class="stage-graph"></div>
+    <div class="modal-grid">
+      <section class="modal-panel">
+        <h3>Message Preview</h3>
+        <pre id="message-modal-preview" class="modal-pre"></pre>
+      </section>
+      <section class="modal-panel">
+        <h3>Decision Summary</h3>
+        <div id="message-modal-summary" class="modal-summary"></div>
+      </section>
+    </div>
+    <section class="modal-panel">
+      <h3>Debug Notes</h3>
+      <div id="message-modal-debug" class="debug-note-list"></div>
+    </section>
+  </div>
+</div>
 {% endblock %}

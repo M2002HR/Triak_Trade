@@ -14,6 +14,10 @@ from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestRequest
 from triak_trade.backtesting.report import report_to_json
 from triak_trade.config.settings import Settings
+from triak_trade.dashboard.backtest_runtime import (
+    DashboardBacktestCoordinator,
+    normalize_channel_reference,
+)
 from triak_trade.dashboard.schemas import AutoModeState, KillSwitchState, utc_now
 from triak_trade.domain.enums import BacktestFillPolicy
 from triak_trade.observability.telegram_log_channel import TelegramLogChannelClient
@@ -88,6 +92,10 @@ class DashboardService:
         self.settings = settings
         self.state = DashboardStateService(settings)
         self.real_runner = RealBacktestRunner(settings=settings)
+        self.backtests = DashboardBacktestCoordinator(
+            settings=settings,
+            runner_factory=lambda: RealBacktestRunner(settings=settings),
+        )
 
     def overview(self) -> dict[str, Any]:
         admin_status = get_admin_bot_status(self.settings)
@@ -128,6 +136,73 @@ class DashboardService:
             "recent_proposed_actions": [],
         }
 
+    def backtest_bootstrap(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        recent_runs = [run.model_dump(mode="json") for run in self.backtests.list_runs(limit=8)]
+        return {
+            "default_channel": self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+            "default_interval": self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
+            "default_max_messages": self.settings.REAL_BACKTEST_MAX_MESSAGES,
+            "default_use_ai": self.settings.REAL_BACKTEST_USE_AI,
+            "default_send_log_channel": self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
+            "default_log_per_message": True,
+            "default_from_date": (now - timedelta(hours=24)).isoformat(),
+            "default_to_date": now.isoformat(),
+            "readiness": self.real_backtest_readiness(),
+            "recent_runs": recent_runs,
+        }
+
+    def start_live_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
+        channel_input = str(payload.get("channel") or "").strip()
+        if not channel_input:
+            raise ValueError("channel is required")
+        readiness = self.backtests.readiness()
+        if not readiness.get("ready", False):
+            return {
+                "started": False,
+                "blocked": True,
+                "reason": "Real backtest is not ready.",
+                "issues": list(readiness.get("issues", [])),
+                "readiness": readiness,
+            }
+
+        from_date = self._parse_datetime(payload.get("from_date"))
+        to_date = self._parse_datetime(payload.get("to_date"))
+        if from_date is None or to_date is None:
+            raise ValueError("from_date and to_date are required")
+
+        request = RealBacktestRunRequest(
+            channel=normalize_channel_reference(channel_input),
+            from_date=from_date,
+            to_date=to_date,
+            hours=None,
+            interval=str(payload.get("interval") or self.settings.REAL_BACKTEST_DEFAULT_INTERVAL),
+            max_messages=int(
+                payload.get("max_messages") or self.settings.REAL_BACKTEST_MAX_MESSAGES
+            ),
+            use_ai=bool(payload.get("use_ai", self.settings.REAL_BACKTEST_USE_AI)),
+            send_telegram_summary=False,
+            send_log_channel=bool(
+                payload.get("send_log_channel", self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL)
+            ),
+            log_per_message=bool(payload.get("log_per_message", True)),
+        )
+        run = self.backtests.start_run(request, channel_input=channel_input)
+        return {
+            "started": True,
+            "blocked": False,
+            "run": run.model_dump(mode="json"),
+        }
+
+    def get_backtest_run(self, run_id: str) -> dict[str, Any] | None:
+        run = self.backtests.get_run(run_id)
+        if run is None:
+            return None
+        return run.model_dump(mode="json")
+
+    def list_backtest_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        return [run.model_dump(mode="json") for run in self.backtests.list_runs(limit=limit)]
+
     def run_fixture_backtest_from_form(self, form: dict[str, str]) -> dict[str, Any]:
         if form.get("real_mode") == "on":
             readiness = self.real_runner.readiness()
@@ -162,6 +237,7 @@ class DashboardService:
                 use_ai=form.get("use_ai") == "on",
                 send_telegram_summary=form.get("send_telegram_summary") == "on",
                 send_log_channel=form.get("send_log_channel") == "on",
+                log_per_message=form.get("log_per_message") == "on",
             )
             result = self.real_runner.run_sync(real_request)
             return {
@@ -260,20 +336,41 @@ class DashboardService:
         return {"pending_actions": [], "empty_state": "No pending proposed actions."}
 
     def safe_settings(self) -> dict[str, Any]:
-        auto_mode = self.state.get_auto_mode()
-        kill_switch = self.state.get_kill_switch()
+        token = self.settings.DASHBOARD_ADMIN_TOKEN.get_secret_value()
+        session_secret = self.settings.DASHBOARD_SESSION_SECRET.get_secret_value()
+        auto_mode = self.state.get_auto_mode().model_dump(mode="json")
+        kill_switch = self.state.get_kill_switch().model_dump(mode="json")
         return {
-            "dashboard_enabled": self.settings.DASHBOARD_ENABLED,
-            "dashboard_host": self.settings.DASHBOARD_HOST,
-            "dashboard_port": self.settings.DASHBOARD_PORT,
-            "dashboard_auth_enabled": self.settings.DASHBOARD_AUTH_ENABLED,
-            "log_channel_enabled": self.settings.TELEGRAM_LOG_CHANNEL_ENABLED,
-            "auto_mode": auto_mode.model_dump(mode="json"),
-            "kill_switch": kill_switch.model_dump(mode="json"),
+            "app_name": self.settings.APP_NAME,
+            "app_env": self.settings.APP_ENV,
+            "log_level": self.settings.LOG_LEVEL,
             "live_trading_blocked": True,
+            "execution_mode": self.settings.EXECUTION_MODE,
+            "dashboard_enabled": self.settings.DASHBOARD_ENABLED,
+            "dashboard_auth_enabled": self.settings.DASHBOARD_AUTH_ENABLED,
+            "dashboard_token_present": bool(token),
+            "dashboard_session_secret_present": bool(session_secret),
+            "real_backtest_enabled": self.settings.REAL_BACKTEST_ENABLED,
+            "telegram_real_test_channel": self.settings.TELEGRAM_REAL_TEST_CHANNEL,
+            "ai_gateway_enabled": self.settings.AI_GATEWAY_ENABLED,
+            "toobit_base_url": self.settings.TOOBIT_BASE_URL,
+            "auto_mode": auto_mode,
+            "kill_switch": kill_switch,
         }
 
     def _toobit_configured(self) -> bool:
         key = self.settings.TOOBIT_API_KEY.get_secret_value()
         secret = self.settings.TOOBIT_API_SECRET.get_secret_value()
         return bool(key and key != "replace_me" and secret and secret != "replace_me")
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if value in {None, ""}:
+            return None
+        if isinstance(value, datetime):
+            raw = value
+        else:
+            raw = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw.astimezone(timezone.utc)

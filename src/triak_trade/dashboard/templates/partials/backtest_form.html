@@ -1,50 +1,83 @@
-<form method="post" action="/backtests/run" class="panel form-grid">
-  <label>Channel
-    <input name="channel" value="{{ default_channel }}" placeholder="https://t.me/Tofan_Trade">
-  </label>
-  <label>From Date (optional)
-    <input name="from_date" placeholder="2026-06-01T00:00:00">
-  </label>
-  <label>To Date (optional)
-    <input name="to_date" placeholder="2026-06-02T00:00:00">
-  </label>
-  <label>Lookback Hours
-    <input name="lookback_hours" value="24">
-  </label>
-  <label>Interval
-    <select name="interval">
-      <option value="1m">1m</option>
-      <option value="5m">5m</option>
-      <option value="15m">15m</option>
-      <option value="1h">1h</option>
-    </select>
-  </label>
-  <label>Initial Balance
-    <input name="initial_balance" value="1000">
-  </label>
-  <label>Risk Per Trade %
-    <input name="risk_per_trade_pct" value="1">
-  </label>
-  <label>Max Messages
-    <input name="max_messages" value="1000">
-  </label>
-  <label>Fill Policy
-    <select name="fill_policy">
-      <option value="conservative">conservative</option>
-      <option value="optimistic">optimistic</option>
-    </select>
-  </label>
-  <label class="checkbox">
-    <input type="checkbox" name="real_mode"> Real mode guarded
-  </label>
-  <label class="checkbox">
-    <input type="checkbox" name="use_ai" checked> Use AI when available
-  </label>
-  <label class="checkbox">
-    <input type="checkbox" name="send_telegram_summary" checked> Send admin-bot summary when supported
-  </label>
-  <label class="checkbox">
-    <input type="checkbox" name="send_log_channel" checked> Send aggregate log-channel updates
-  </label>
-  <button type="submit">Run Real Backtest</button>
-</form>
+<section class="panel backtest-command-center">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Backtest Control</p>
+      <h2>Run A Real Channel Backtest</h2>
+      <p class="subtle">
+        Enter a Telegram channel and a date range. The dashboard will run the real history fetch,
+        classify each message, fetch market data, simulate trades, and stream every step live.
+      </p>
+    </div>
+    <div class="preset-cluster" role="group" aria-label="Backtest date presets">
+      <button type="button" class="ghost-button" data-preset-hours="24">Last 24h</button>
+      <button type="button" class="ghost-button" data-preset-hours="72">Last 72h</button>
+      <button type="button" class="ghost-button" data-preset-hours="168">Last 7d</button>
+    </div>
+  </div>
+
+  <form id="backtest-live-form" class="backtest-form-grid">
+    <label class="field span-2">Telegram Channel
+      <input
+        id="backtest-channel"
+        name="channel"
+        value="{{ default_channel }}"
+        placeholder="@Tofan_Trade or https://t.me/Tofan_Trade"
+        autocomplete="off"
+        required
+      >
+      <span class="help-text">Username, <code>@channel</code>, or full Telegram link.</span>
+    </label>
+
+    <label class="field">Start Date &amp; Time
+      <input id="backtest-from-date" name="from_date" type="datetime-local" required>
+    </label>
+
+    <label class="field">End Date &amp; Time
+      <input id="backtest-to-date" name="to_date" type="datetime-local" required>
+    </label>
+
+    <label class="field">Interval
+      <select id="backtest-interval" name="interval">
+        <option value="1m">1m</option>
+        <option value="5m">5m</option>
+        <option value="15m">15m</option>
+        <option value="1h">1h</option>
+      </select>
+    </label>
+
+    <label class="field">Max Messages
+      <input id="backtest-max-messages" name="max_messages" type="number" min="1" step="1" value="1000" required>
+    </label>
+
+    <label class="toggle-card">
+      <input id="backtest-use-ai" name="use_ai" type="checkbox">
+      <span>
+        <strong>Use AI Classifier</strong>
+        <small>Falls back to regex when AI is disabled or unavailable.</small>
+      </span>
+    </label>
+
+    <label class="toggle-card">
+      <input id="backtest-send-log-channel" name="send_log_channel" type="checkbox">
+      <span>
+        <strong>Send Telegram Run Logs</strong>
+        <small>Send aggregate updates to the Telegram log channel.</small>
+      </span>
+    </label>
+
+    <label class="toggle-card span-2">
+      <input id="backtest-log-per-message" name="log_per_message" type="checkbox">
+      <span>
+        <strong>Send Per-Message Telegram Trace</strong>
+        <small>Send one formatted Telegram log message for every Telegram message processed in the channel.</small>
+      </span>
+    </label>
+
+    <div class="action-row span-2">
+      <button id="backtest-start-button" class="button launch-button" type="submit">
+        Start Backtest
+      </button>
+      <div id="backtest-form-status" class="inline-status" aria-live="polite"></div>
+    </div>
+  </form>
+</section>

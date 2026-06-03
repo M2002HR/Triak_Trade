@@ -35,7 +35,7 @@ def test_backtest_fixture_post_runs_summary(tmp_path: Path) -> None:
         },
     )
     assert response.status_code == 200
-    assert "Backtest Result" in response.text
+    assert "Legacy Result" in response.text
     assert "total_pnl" in response.text
 
 

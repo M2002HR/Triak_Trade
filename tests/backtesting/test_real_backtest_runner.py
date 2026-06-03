@@ -31,6 +31,15 @@ class FakeMarketDataProvider:
         return Decimal("0")
 
 
+class FakeLogClient:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def send_text(self, text: str, *, real: bool = False) -> object:
+        self.texts.append(text)
+        return {"sent": True, "real": real}
+
+
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
     values: dict[str, object] = {
         "REAL_BACKTEST_ENABLED": True,
@@ -165,7 +174,8 @@ def test_real_backtest_runner_skips_unknown_symbol_safely(tmp_path: Path) -> Non
     result = runner.run_sync(
         RealBacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
-            hours=24,
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
             interval="1m",
             max_messages=100,
             use_ai=False,
@@ -177,6 +187,84 @@ def test_real_backtest_runner_skips_unknown_symbol_safely(tmp_path: Path) -> Non
     assert result.success is False
     assert "No candle data available for detected symbols" in "\n".join(result.errors)
     assert any("BTCUSDT" in item for item in result.skipped_reasons)
+
+
+def test_real_backtest_runner_emits_message_progress(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path, AI_GATEWAY_ENABLED=False),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    assert any(event.event_type == "run" for event in progress_events)
+    assert any(event.event_type == "message" for event in progress_events)
+    message_event = next(event for event in progress_events if event.trace is not None)
+    assert message_event.trace is not None
+    assert message_event.trace.message_link == "https://t.me/Tofan_Trade/1"
+    assert message_event.trace.classification in {"new_signal", None}
+
+
+def test_real_backtest_runner_sends_per_message_log_trace(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)})
+    log_client = FakeLogClient()
+    runner = RealBacktestRunner(
+        settings=_settings(
+            tmp_path,
+            AI_GATEWAY_ENABLED=False,
+            REAL_BACKTEST_SEND_TO_LOG_CHANNEL=True,
+        ),
+        telegram_client=telegram,
+        market_data_provider=provider,
+        log_client=log_client,
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        )
+    )
+
+    assert result.success is True
+    assert any("Backtest Message Trace" in text for text in log_client.texts)
+    assert any("Message Link" in text for text in log_client.texts)
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:
