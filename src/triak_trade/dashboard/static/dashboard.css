@@ -519,6 +519,10 @@ pre {
   z-index: 999;
 }
 
+.modal-shell[hidden] {
+  display: none !important;
+}
+
 .modal-backdrop {
   position: absolute;
   inset: 0;
