@@ -245,6 +245,9 @@ class RealBacktestRunner:
         self.market_data_provider = market_data_provider or ToobitMarketDataProvider(
             base_url=settings.TOOBIT_BASE_URL,
             klines_path=settings.TOOBIT_KLINES_PATH,
+            mark_price_klines_path=settings.TOOBIT_FUTURES_MARK_PRICE_KLINES_PATH,
+            index_klines_path=settings.TOOBIT_FUTURES_INDEX_KLINES_PATH,
+            contract_ticker_price_path=settings.TOOBIT_FUTURES_TICKER_PRICE_PATH,
             timeout_seconds=settings.TOOBIT_MARKET_DATA_TIMEOUT_SECONDS,
             limit=settings.TOOBIT_MARKET_DATA_LIMIT,
         )

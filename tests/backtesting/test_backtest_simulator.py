@@ -52,6 +52,28 @@ def _candle(minute: int, high: str, low: str, o: str = "100", c: str = "101") ->
     )
 
 
+def _contract_candle(
+    minute: int,
+    high: str,
+    low: str,
+    o: str = "100",
+    c: str = "101",
+) -> Candle:
+    t = datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(minutes=minute)
+    return Candle(
+        symbol="BTC-SWAP-USDT",
+        interval="1m",
+        open_time=t,
+        close_time=t + timedelta(minutes=1),
+        open=Decimal(o),
+        high=Decimal(high),
+        low=Decimal(low),
+        close=Decimal(c),
+        volume=Decimal("10"),
+        source=CandleSource.FIXTURE,
+    )
+
+
 def test_simulator_long_short_and_fill_policies() -> None:
     open_event = BacktestEvent(
         timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
@@ -79,6 +101,26 @@ def test_simulator_long_short_and_fill_policies() -> None:
     )
     assert trades_cons[0].status in {"sl_hit_same_candle", "sl_hit"}
     assert trades_opt[0].status in {"tp_hit_same_candle", "tp_hit"}
+
+
+def test_simulator_matches_contract_candle_symbol_to_signal_symbol() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN, TradeSide.LONG),
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=[_contract_candle(0, "102", "99", o="100", c="101")],
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    assert trades[0].status != "not_filled"
+    assert trades[0].entry_price is not None
 
 
 def test_simulator_cancel_before_resolution() -> None:

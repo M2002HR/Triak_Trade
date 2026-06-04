@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     EXECUTION_MODE: Literal["backtest", "paper", "demo"] = "demo"
     TOOBIT_BASE_URL: str = "https://api.toobit.com"
     TOOBIT_KLINES_PATH: str = "/quote/v1/klines"
+    TOOBIT_FUTURES_MARK_PRICE_KLINES_PATH: str = "/quote/v1/markPrice/klines"
+    TOOBIT_FUTURES_INDEX_KLINES_PATH: str = "/quote/v1/index/klines"
+    TOOBIT_FUTURES_TICKER_PRICE_PATH: str = "/quote/v1/contract/ticker/price"
     TOOBIT_MARKET_DATA_TIMEOUT_SECONDS: int = 20
     TOOBIT_MARKET_DATA_LIMIT: int = 1000
     TOOBIT_MARKET_DATA_DEFAULT_INTERVAL: str = "1m"

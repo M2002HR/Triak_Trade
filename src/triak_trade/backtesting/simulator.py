@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from triak_trade.backtesting.models import BacktestEvent
+from triak_trade.core.symbols import same_market_symbol
 from triak_trade.domain.enums import BacktestFillPolicy, EntryType, SignalAction, TradeSide
 from triak_trade.domain.models import Candle, SimulatedTrade
 
@@ -336,7 +337,7 @@ class BacktestSimulator:
         candles: list[Candle],
         symbol: str,
     ) -> tuple[Decimal | None, datetime | None]:
-        relevant_candles = [c for c in candles if c.symbol == symbol]
+        relevant_candles = [c for c in candles if same_market_symbol(c.symbol, symbol)]
         next_candle = next((c for c in relevant_candles if c.open_time >= signal_time), None)
         if next_candle is None:
             return None, None
@@ -396,7 +397,10 @@ class BacktestSimulator:
                 break
             closed_signal_ids: list[str] = []
             for signal_id, position in list(open_positions.items()):
-                if position.symbol != candle.symbol or candle.open_time < position.entry_time:
+                if (
+                    not same_market_symbol(position.symbol, candle.symbol)
+                    or candle.open_time < position.entry_time
+                ):
                     continue
                 expiry_status = self._expire_position_if_needed(
                     position=position,
@@ -688,7 +692,7 @@ class BacktestSimulator:
         )
 
     def _last_price(self, candles: list[Candle], symbol: str, fallback: Decimal) -> Decimal:
-        relevant = [c for c in candles if c.symbol == symbol]
+        relevant = [c for c in candles if same_market_symbol(c.symbol, symbol)]
         if not relevant:
             return fallback
         return relevant[-1].close
