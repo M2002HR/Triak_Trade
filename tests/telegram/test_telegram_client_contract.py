@@ -267,4 +267,4 @@ async def test_telethon_fetch_history_only_passes_min_id_when_requested(
     await client.fetch_history("https://t.me/Tofan_Trade", limit=1, min_message_id=11)
 
     assert stub.calls[0] == {"limit": 1}
-    assert stub.calls[1] == {"limit": 1, "min_id": 10}
+    assert stub.calls[1] == {"min_id": 10}

@@ -94,7 +94,7 @@ class TelethonTelegramClient:
         result: list[RawTelegramMessage] = []
         effective_min_id = max((min_message_id or 0) - 1, 0)
         iter_kwargs: dict[str, int] = {}
-        if limit is not None:
+        if limit is not None and effective_min_id <= 0:
             iter_kwargs["limit"] = limit
         if effective_min_id > 0:
             iter_kwargs["min_id"] = effective_min_id
@@ -110,6 +110,8 @@ class TelethonTelegramClient:
                     continue
                 result.append(raw)
         result.sort(key=lambda item: item.date)
+        if limit is not None:
+            result = result[:limit]
         return result
 
     async def listen_new_messages(
