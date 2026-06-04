@@ -26,3 +26,6 @@ def test_prompt_contract_contains_required_rules() -> None:
     assert "next 3 following messages" in prompt
     assert "includes image context" in prompt
     assert "Tofan_Trade" in prompt
+    assert "All price-like numeric fields must be strings" in prompt
+    assert "ignored_numeric_tokens" in prompt
+    assert "Never extract prices" in prompt

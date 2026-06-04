@@ -40,18 +40,27 @@ def _ok_payload() -> dict[str, object]:
         "action": "open",
         "market": "futures",
         "symbol": "BTCUSDT",
+        "symbol_raw": "BTC/USDT",
         "side": "long",
         "entry_type": "range",
         "entry_low": "68000",
         "entry_high": "68200",
+        "entry_prices": ["68000", "68200"],
         "stop_loss": "67400",
         "take_profits": ["69000", "70000"],
         "leverage": 5,
+        "leverage_mode": "cross",
+        "close_fraction": None,
+        "move_stop_to_entry": False,
         "related_signal_id": None,
         "relation_reason": None,
+        "source_message_ids": [1],
+        "extracted_from_context": False,
+        "missing_fields": [],
         "confidence": "0.90",
         "reasoning_summary": "clear signal",
         "risk_notes": [],
+        "ignored_numeric_tokens": [],
         "requires_admin_confirmation": True,
         "raw_provider_metadata": {"provider": "mock"},
     }
@@ -195,6 +204,30 @@ def test_gateway_client_schema_invalid(context: AIMessageContext) -> None:
     )
     with pytest.raises(AIGatewayResponseError):
         client.classify_message(context)
+
+
+def test_gateway_client_retries_after_invalid_response_and_succeeds(
+    context: AIMessageContext,
+) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, json={"bad": "payload"})
+        return httpx.Response(200, json=_ok_payload())
+
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        retry_attempts=2,
+        retry_backoff_seconds=0,
+        transport=httpx.MockTransport(handler),
+    )
+    result = client.classify_message(context)
+    assert calls == 2
+    assert result.symbol == "BTCUSDT"
 
 
 def test_gateway_client_accepts_direct_schema_payload(context: AIMessageContext) -> None:

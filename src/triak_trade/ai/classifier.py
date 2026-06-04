@@ -17,6 +17,9 @@ from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeS
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal, RawTelegramMessage
 from triak_trade.parsing.validator import ParsedSignalValidator
 
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+_RAW_URL_RE = re.compile(r"https?://\S+")
+
 
 class AIMessageClassifier(MessageClassifier):
     def __init__(
@@ -46,9 +49,8 @@ class AIMessageClassifier(MessageClassifier):
                 return classified
             return self._safe_unknown(message, f"ai-failed:{exc.__class__.__name__}")
 
-        parsed = self._repair_with_context(
-            self._result_to_parsed_signal(result, message),
-            ai_context,
+        parsed = self._sanitize_open_signal(
+            self._result_to_parsed_signal(result, message)
         )
         valid, errors = self.validator.validate_for_proposal(
             parsed,
@@ -85,6 +87,7 @@ class AIMessageClassifier(MessageClassifier):
                 f"ai_route_provider={route.provider}",
                 f"ai_route_model={route.model}",
                 f"ai_route_multimodal={route.multimodal}",
+                f"ai_retry_attempts={self.gateway_client.retry_attempts}",
                 f"reply_chain_count={len(ai_context.reply_chain_messages)}",
                 f"following_message_count={len(ai_context.following_messages)}",
                 f"classification={result.classification}",
@@ -153,88 +156,90 @@ class AIMessageClassifier(MessageClassifier):
             debug_notes=["classifier=ai", note],
         )
 
-    def _repair_with_context(
-        self,
-        parsed: ParsedSignal,
-        context: AIMessageContext,
-    ) -> ParsedSignal:
-        text_blocks = [
-            block
-            for block in [
-                context.message_text,
-                *[item.get("text") for item in context.reply_chain_messages],
-                *[item.get("text") for item in context.following_messages],
-            ]
-            if isinstance(block, str) and block.strip()
-        ]
-
-        extracted_take_profits = self._extract_take_profits(text_blocks)
-        extracted_stop_loss = self._extract_stop_loss(text_blocks)
-        extracted_leverage = self._extract_leverage(text_blocks)
-
-        take_profits = parsed.take_profits
-        if len(extracted_take_profits) > len(take_profits):
-            take_profits = extracted_take_profits
-
-        stop_loss = parsed.stop_loss
-        if stop_loss is None and extracted_stop_loss is not None:
-            stop_loss = extracted_stop_loss
-
-        leverage = parsed.leverage
-        if leverage is None and extracted_leverage is not None:
-            leverage = extracted_leverage
-
-        if (
-            take_profits == parsed.take_profits
-            and stop_loss == parsed.stop_loss
-            and leverage == parsed.leverage
-        ):
+    def _sanitize_open_signal(self, parsed: ParsedSignal) -> ParsedSignal:
+        if parsed.action is not SignalAction.OPEN:
             return parsed
 
-        return parsed.model_copy(
-            update={
-                "take_profits": take_profits,
-                "stop_loss": stop_loss,
-                "leverage": leverage,
-            }
+        take_profits = self._sanitize_take_profits(parsed)
+        update: dict[str, object] = {}
+        if take_profits != parsed.take_profits:
+            update["take_profits"] = take_profits
+        if parsed.entry_low is not None and parsed.entry_high is not None:
+            entry_low, entry_high = sorted((parsed.entry_low, parsed.entry_high))
+            if entry_low != parsed.entry_low or entry_high != parsed.entry_high:
+                update["entry_low"] = entry_low
+                update["entry_high"] = entry_high
+        if not update:
+            return parsed
+        return parsed.model_copy(update=update)
+
+    def _sanitize_take_profits(self, parsed: ParsedSignal) -> list[Decimal]:
+        take_profits: list[Decimal] = []
+        for value in parsed.take_profits:
+            if value <= Decimal("0"):
+                continue
+            if value not in take_profits:
+                take_profits.append(value)
+        if not take_profits:
+            return []
+
+        reference = self._entry_reference(parsed)
+        directional = self._filter_directional_take_profits(
+            take_profits,
+            side=parsed.side,
+            reference=reference,
+            stop_loss=parsed.stop_loss,
         )
+        candidates = directional or take_profits
+
+        decimal_like = [
+            value for value in candidates if value != value.to_integral_value()
+        ]
+        if len(decimal_like) >= 2:
+            candidates = decimal_like
+
+        magnitude_filtered = self._filter_magnitude_outliers(candidates)
+        return magnitude_filtered or candidates
 
     @staticmethod
-    def _extract_take_profits(text_blocks: list[str]) -> list[Decimal]:
-        numbers: list[str] = []
-        for text in text_blocks:
-            lowered = text.lower()
-            if not any(keyword in lowered for keyword in ("tp", "target", "targets")):
-                continue
-            matches = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", " "))
-            numbers.extend(matches)
-        deduped = list(dict.fromkeys(numbers))
-        return [Decimal(item) for item in deduped]
+    def _entry_reference(parsed: ParsedSignal) -> Decimal | None:
+        if parsed.entry_low is not None and parsed.entry_high is not None:
+            return (parsed.entry_low + parsed.entry_high) / Decimal("2")
+        return parsed.entry_low or parsed.entry_high
 
     @staticmethod
-    def _extract_stop_loss(text_blocks: list[str]) -> Decimal | None:
-        for text in text_blocks:
-            lowered = text.lower()
-            if not any(keyword in lowered for keyword in ("sl", "stop", "stoploss")):
-                continue
-            matches = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", " "))
-            if matches:
-                return Decimal(matches[-1])
-        return None
+    def _filter_directional_take_profits(
+        take_profits: list[Decimal],
+        *,
+        side: TradeSide,
+        reference: Decimal | None,
+        stop_loss: Decimal | None,
+    ) -> list[Decimal]:
+        boundary = reference if reference is not None else stop_loss
+        if boundary is None:
+            return list(take_profits)
+        filtered: list[Decimal] = []
+        for value in take_profits:
+            if side is TradeSide.LONG and value > boundary:
+                filtered.append(value)
+            elif side is TradeSide.SHORT and value < boundary:
+                filtered.append(value)
+            elif side not in {TradeSide.LONG, TradeSide.SHORT}:
+                filtered.append(value)
+        return filtered
 
     @staticmethod
-    def _extract_leverage(text_blocks: list[str]) -> int | None:
-        for text in text_blocks:
-            lowered = text.lower()
-            if "lev" not in lowered and "x" not in lowered:
-                continue
-            match = re.search(r"(\d{1,3})\s*x", lowered) or re.search(
-                r"(?:lev|leverage)\D*(\d{1,3})",
-                lowered,
-            )
-            if match:
-                return int(match.group(1))
-        return None
+    def _filter_magnitude_outliers(values: list[Decimal]) -> list[Decimal]:
+        positives = sorted(value for value in values if value > Decimal("0"))
+        if len(positives) < 2:
+            return list(values)
+        median = positives[len(positives) // 2]
+        if median <= Decimal("0"):
+            return list(values)
+        low = median / Decimal("3")
+        high = median * Decimal("3")
+        filtered = [value for value in values if low <= value <= high]
+        return filtered
 
     def _build_context(
         self,
@@ -265,7 +270,7 @@ class AIMessageClassifier(MessageClassifier):
             channel_id=message.channel_id,
             channel_username=message.channel_username,
             message_id=message.message_id,
-            message_text=message.text,
+            message_text=self._sanitize_text_block(message.text),
             message_date=message.date,
             message_has_media=bool(raw_payload.get("has_media")),
             message_is_caption=bool(raw_payload.get("caption_present")),
@@ -292,13 +297,21 @@ class AIMessageClassifier(MessageClassifier):
         payload = message.raw_payload
         return {
             "message_id": message.message_id,
-            "text": message.text,
+            "text": AIMessageClassifier._sanitize_text_block(message.text),
             "date": message.date.isoformat(),
             "reply_to": message.reply_to_msg_id,
             "has_media": bool(payload.get("has_media")),
             "caption_present": bool(payload.get("caption_present")),
             "grouped_id": payload.get("grouped_id"),
         }
+
+    @staticmethod
+    def _sanitize_text_block(text: str | None) -> str | None:
+        if text is None:
+            return None
+        without_markdown_urls = _MARKDOWN_LINK_RE.sub(r"\1", text)
+        without_raw_urls = _RAW_URL_RE.sub("", without_markdown_urls)
+        return without_raw_urls
 
     @staticmethod
     def _extract_images(message: RawTelegramMessage) -> list[dict[str, object]]:

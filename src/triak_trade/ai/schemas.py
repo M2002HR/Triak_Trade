@@ -43,18 +43,27 @@ class AIClassificationResult(BaseModel):
     action: str
     market: str
     symbol: str | None
+    symbol_raw: str | None = None
     side: str
     entry_type: str
     entry_low: Decimal | None
     entry_high: Decimal | None
+    entry_prices: list[Decimal] = Field(default_factory=list)
     stop_loss: Decimal | None
     take_profits: list[Decimal] = Field(default_factory=list)
     leverage: int | None
+    leverage_mode: str | None = None
+    close_fraction: Decimal | None = None
+    move_stop_to_entry: bool = False
     related_signal_id: str | None
     relation_reason: str | None
+    source_message_ids: list[int] = Field(default_factory=list)
+    extracted_from_context: bool = False
+    missing_fields: list[str] = Field(default_factory=list)
     confidence: Decimal
     reasoning_summary: str
     risk_notes: list[str] = Field(default_factory=list)
+    ignored_numeric_tokens: list[str] = Field(default_factory=list)
     requires_admin_confirmation: bool
     raw_provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -65,9 +74,18 @@ class AIClassificationResult(BaseModel):
             raise ValueError("confidence must be between 0 and 1")
         return value
 
-    @field_validator("take_profits", mode="before")
+    @field_validator("close_fraction")
     @classmethod
-    def normalize_take_profits(cls, value: Any) -> list[Any]:
+    def validate_close_fraction(cls, value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
+        if value <= Decimal("0") or value > Decimal("1"):
+            raise ValueError("close_fraction must be between 0 and 1")
+        return value
+
+    @field_validator("entry_prices", "take_profits", mode="before")
+    @classmethod
+    def normalize_decimal_lists(cls, value: Any) -> list[Any]:
         def extract(raw: Any) -> list[Any]:
             if raw is None:
                 return []

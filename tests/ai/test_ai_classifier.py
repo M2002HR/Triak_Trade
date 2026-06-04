@@ -36,18 +36,27 @@ def _result_payload(classification: str, action: str) -> dict[str, object]:
         "action": action,
         "market": "futures",
         "symbol": "BTCUSDT",
+        "symbol_raw": "BTC/USDT",
         "side": "long",
         "entry_type": "range",
         "entry_low": "68000",
         "entry_high": "68200",
+        "entry_prices": ["68000", "68200"],
         "stop_loss": "67400",
         "take_profits": ["69000", "70000"],
         "leverage": 5,
+        "leverage_mode": "cross",
+        "close_fraction": None,
+        "move_stop_to_entry": False,
         "related_signal_id": None,
         "relation_reason": None,
+        "source_message_ids": [1],
+        "extracted_from_context": False,
+        "missing_fields": [],
         "confidence": "0.85",
         "reasoning_summary": "summary",
         "risk_notes": [],
+        "ignored_numeric_tokens": [],
         "requires_admin_confirmation": True,
         "raw_provider_metadata": {"provider": "mock"},
     }
@@ -190,10 +199,12 @@ def test_ai_classifier_uses_gemini_route_for_caption_with_image() -> None:
     assert "ai_route_model=gemini-3.1-flash-lite" in result.debug_notes
 
 
-def test_ai_classifier_repairs_fields_from_following_messages() -> None:
+def test_ai_classifier_accepts_context_extracted_fields_from_ai() -> None:
     payload = _result_payload("NEW_SIGNAL", "open")
-    payload["stop_loss"] = None
-    payload["take_profits"] = []
+    payload["stop_loss"] = "67400"
+    payload["take_profits"] = ["69000", "70000", "71500"]
+    payload["source_message_ids"] = [1, 2, 3]
+    payload["extracted_from_context"] = True
     classifier = AIMessageClassifier(
         settings=Settings(),
         gateway_client=_client(payload),
@@ -207,3 +218,50 @@ def test_ai_classifier_repairs_fields_from_following_messages() -> None:
     result = classifier.classify(first, context)
     assert [str(item) for item in result.parsed_signal.take_profits] == ["69000", "70000", "71500"]
     assert str(result.parsed_signal.stop_loss) == "67400"
+
+
+def test_ai_classifier_sanitizes_noisy_take_profit_numbers() -> None:
+    payload = {
+        "classification": "NEW_SIGNAL",
+        "action": "open",
+        "market": "futures",
+        "symbol": "NMR-SWAP-USDT",
+        "side": "short",
+        "entry_type": "market",
+        "entry_low": None,
+        "entry_high": None,
+        "stop_loss": "8.85",
+        "take_profits": ["1", "8.377", "2", "8.310", "3", "8.226", "4", "7.990", "220", "166"],
+        "leverage": 20,
+        "related_signal_id": None,
+        "relation_reason": None,
+        "confidence": "1.0",
+        "reasoning_summary": "clear signal",
+        "risk_notes": [],
+        "requires_admin_confirmation": True,
+        "raw_provider_metadata": {"provider": "mock"},
+    }
+    classifier = AIMessageClassifier(
+        settings=Settings(_env_file=None),
+        gateway_client=_client(payload),
+    )
+    message = _raw(
+        """
+        NMR/USDT SHORT
+        Market
+        TP1 8.377
+        TP2 8.310
+        TP3 8.226
+        TP4 7.990
+        STOPLOSS 8.85
+        [Trade on Toobit](https://t.me/Tofan_Trade/220)
+        [Capital management](https://t.me/Tofan_Trade/166)
+        """
+    )
+    result = classifier.classify(message, _context())
+    assert [str(item) for item in result.parsed_signal.take_profits] == [
+        "8.377",
+        "8.310",
+        "8.226",
+        "7.990",
+    ]

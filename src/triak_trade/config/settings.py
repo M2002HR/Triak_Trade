@@ -147,6 +147,8 @@ class Settings(BaseSettings):
     AI_GATEWAY_AUTH_HEADER_NAME: str = "x-api-token"
     AI_GATEWAY_AUTH_TOKEN: SecretStr = Field(default=SecretStr(""))
     AI_GATEWAY_TRUST_ENV: bool = False
+    AI_GATEWAY_RETRY_ATTEMPTS: int = 3
+    AI_GATEWAY_RETRY_BACKOFF_SECONDS: float = 0.75
     AI_GATEWAY_RUNTIME_DIR: str = "runtime/ai_gateway"
     AI_GATEWAY_PID_FILE: str = "runtime/ai_gateway/ai_gateway.pid"
     AI_GATEWAY_STATUS_FILE: str = "runtime/ai_gateway/status.json"

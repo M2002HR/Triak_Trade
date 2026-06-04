@@ -1021,6 +1021,8 @@ class RealBacktestRunner:
                 vision_provider=self.settings.AI_CLASSIFIER_VISION_PROVIDER,
                 vision_model=self.settings.AI_CLASSIFIER_VISION_MODEL,
                 trust_env=self.settings.AI_GATEWAY_TRUST_ENV,
+                retry_attempts=self.settings.AI_GATEWAY_RETRY_ATTEMPTS,
+                retry_backoff_seconds=self.settings.AI_GATEWAY_RETRY_BACKOFF_SECONDS,
             )
             classifier: MessageClassifier = AIMessageClassifier(
                 settings=self.settings,
@@ -1051,6 +1053,8 @@ class RealBacktestRunner:
                 vision_provider=self.settings.AI_CLASSIFIER_VISION_PROVIDER,
                 vision_model=self.settings.AI_CLASSIFIER_VISION_MODEL,
                 trust_env=self.settings.AI_GATEWAY_TRUST_ENV,
+                retry_attempts=self.settings.AI_GATEWAY_RETRY_ATTEMPTS,
+                retry_backoff_seconds=self.settings.AI_GATEWAY_RETRY_BACKOFF_SECONDS,
             )
             return _ClassificationSelection(
                 classifier=AIMessageClassifier(

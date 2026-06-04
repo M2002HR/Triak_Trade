@@ -257,6 +257,8 @@ def ai_dry_run_check(settings: Settings) -> VerificationCheckResult:
         base_url="http://mock.local",
         timeout_seconds=1,
         classify_path=settings.AI_GATEWAY_CLASSIFY_PATH,
+        retry_attempts=settings.AI_GATEWAY_RETRY_ATTEMPTS,
+        retry_backoff_seconds=0,
         transport=httpx.MockTransport(handler),
     )
     classifier = AIMessageClassifier(settings=settings, gateway_client=client)

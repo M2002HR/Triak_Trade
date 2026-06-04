@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,6 +51,8 @@ class AjilGatewayClient:
     vision_provider: str = "gemini"
     vision_model: str = "gemini-3.1-flash-lite"
     trust_env: bool = False
+    retry_attempts: int = 3
+    retry_backoff_seconds: float = 0.75
     transport: httpx.BaseTransport | None = None
 
     def plan_for_context(self, context: AIMessageContext) -> AIGatewayRoute:
@@ -67,45 +70,62 @@ class AjilGatewayClient:
         )
 
     def classify_message(self, context: AIMessageContext) -> AIClassificationResult:
-        payload = self._build_payload(context)
+        last_error: Exception | None = None
         headers = self._build_headers()
-        try:
-            with httpx.Client(
-                base_url=self.base_url,
-                timeout=self.timeout_seconds,
-                trust_env=self.trust_env,
-                transport=self.transport,
-            ) as client:
-                response = client.post(self.classify_path, json=payload, headers=headers)
-        except httpx.TimeoutException as exc:
-            raise AIGatewayTimeoutError("AI gateway timeout") from exc
-        except httpx.HTTPError as exc:
-            raise AIGatewayHTTPError("AI gateway connection error") from exc
+        attempts = max(1, self.retry_attempts)
+        for attempt in range(1, attempts + 1):
+            payload = self._build_payload(context, attempt=attempt)
+            try:
+                with httpx.Client(
+                    base_url=self.base_url,
+                    timeout=self.timeout_seconds,
+                    trust_env=self.trust_env,
+                    transport=self.transport,
+                ) as client:
+                    response = client.post(self.classify_path, json=payload, headers=headers)
+            except httpx.TimeoutException:
+                last_error = AIGatewayTimeoutError("AI gateway timeout")
+            except httpx.HTTPError:
+                last_error = AIGatewayHTTPError("AI gateway connection error")
+            else:
+                if response.status_code >= 400:
+                    last_error = AIGatewayHTTPError(
+                        f"AI gateway HTTP status {response.status_code}"
+                    )
+                else:
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        last_error = AIGatewayResponseError(
+                            "AI gateway returned malformed JSON"
+                        )
+                    else:
+                        try:
+                            return self._parse_response_payload(data)
+                        except Exception:
+                            last_error = AIGatewayResponseError(
+                                "AI gateway response schema validation failed"
+                            )
+            if attempt < attempts:
+                time.sleep(max(0.0, self.retry_backoff_seconds) * attempt)
+        if last_error is None:
+            raise AIGatewayResponseError("AI gateway classification failed without error detail")
+        raise last_error
 
-        if response.status_code >= 400:
-            raise AIGatewayHTTPError(f"AI gateway HTTP status {response.status_code}")
-
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise AIGatewayResponseError("AI gateway returned malformed JSON") from exc
-
-        try:
-            return self._parse_response_payload(data)
-        except Exception as exc:
-            raise AIGatewayResponseError("AI gateway response schema validation failed") from exc
-
-    def _build_payload(self, context: AIMessageContext) -> dict[str, Any]:
+    def _build_payload(self, context: AIMessageContext, *, attempt: int) -> dict[str, Any]:
         prompt = build_telegram_signal_prompt(context)
         schema = AIClassificationResult.model_json_schema()
         context_payload = context.model_dump(mode="json")
         route = self.plan_for_context(context)
+        task = "Classify this Telegram channel message and return only valid JSON."
+        if attempt > 1:
+            task += (
+                " Previous attempt was invalid. Return one strict JSON object only, "
+                "with every required key present and all price-like fields encoded as strings."
+            )
         user_payload = json.dumps(
             {
-                "task": (
-                    "Classify this Telegram channel message and return "
-                    "only valid JSON."
-                ),
+                "task": task,
                 "context": context_payload,
                 "required_output_schema": schema,
             },
