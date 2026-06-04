@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from html import escape
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1349,18 +1350,18 @@ class RealBacktestRunner:
         lines = [
             f"{emoji} <b>Backtest Message Trace</b>",
             "",
-            f"🔗 <b>Source</b>: {trace.channel_username or trace.channel_id}",
+            f"🔗 <b>Source</b>: {self._tg(trace.channel_username or trace.channel_id)}",
             f"🆔 <b>Message ID</b>: {trace.message_id}",
-            f"🌐 <b>Message Link</b>: {trace.message_link or 'not available'}",
+            f"🌐 <b>Message Link</b>: {self._tg(trace.message_link or 'not available')}",
             (
                 "🕒 <b>Message Time</b>: "
                 f"{trace.message_date.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
             ),
-            f"🧭 <b>Classification</b>: {trace.classification or 'unknown'}",
-            f"⚙️ <b>Action</b>: {trace.parsed_action or 'unknown'}",
-            f"🪙 <b>Symbol</b>: {trace.symbol or 'none'}",
-            f"📈 <b>Confidence</b>: {trace.confidence or 'n/a'}",
-            f"🏁 <b>Final Status</b>: {trace.final_status}",
+            f"🧭 <b>Classification</b>: {self._tg(trace.classification or 'unknown')}",
+            f"⚙️ <b>Action</b>: {self._tg(trace.parsed_action or 'unknown')}",
+            f"🪙 <b>Symbol</b>: {self._tg(trace.symbol or 'none')}",
+            f"📈 <b>Confidence</b>: {self._tg(trace.confidence or 'n/a')}",
+            f"🏁 <b>Final Status</b>: {self._tg(trace.final_status)}",
             "",
             "🧱 <b>Stages</b>:",
         ]
@@ -1372,12 +1373,19 @@ class RealBacktestRunner:
                 "failed": "❌",
                 "skipped": "⏭️",
             }[stage.status]
-            lines.append(f"{stage_emoji} <b>{stage.label}</b>: {stage.detail or stage.status}")
+            lines.append(
+                f"{stage_emoji} <b>{self._tg(stage.label)}</b>: "
+                f"{self._tg(stage.detail or stage.status)}"
+            )
         if trace.preview_text:
-            lines.extend(["", f"📝 <b>Preview</b>: {trace.preview_text}"])
+            lines.extend(["", f"📝 <b>Preview</b>: {self._tg(trace.preview_text)}"])
         if trace.result_summary:
-            lines.extend(["", f"📌 <b>Result</b>: {trace.result_summary}"])
+            lines.extend(["", f"📌 <b>Result</b>: {self._tg(trace.result_summary)}"])
         if trace.debug_notes:
             lines.extend(["", "🧪 <b>Debug Notes</b>:"])
-            lines.extend(f"• {note}" for note in trace.debug_notes[:6])
+            lines.extend(f"• {self._tg(note)}" for note in trace.debug_notes[:6])
         return "\n".join(lines)
+
+    @staticmethod
+    def _tg(value: object) -> str:
+        return escape(str(value), quote=False)

@@ -45,6 +45,10 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     assert "https://t.me/Tofan_Trade" in response.text
     assert "Start Backtest" in response.text
     assert "Live Telegram Backtest Monitor" in response.text
+    send_log_slice = response.text.split('id="backtest-send-log-channel"', 1)[1][:160]
+    log_per_message_slice = response.text.split('id="backtest-log-per-message"', 1)[1][:160]
+    assert "checked" in send_log_slice
+    assert "checked" in log_per_message_slice
 
 
 def test_approvals_page_renders_empty_state(tmp_path: Path) -> None:

@@ -243,6 +243,47 @@ def test_real_backtest_runner_finalizes_trace_when_market_data_missing(tmp_path:
     assert "No candle data returned" in (final_trace.result_summary or "")
 
 
+def test_real_backtest_trace_formatter_escapes_html_sensitive_values(tmp_path: Path) -> None:
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=FakeTelegramClient(),
+        market_data_provider=FakeMarketDataProvider(),
+    )
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    trace = runner._make_trace(
+        RawTelegramMessage(
+            channel_id="https://t.me/Tofan_Trade",
+            channel_username="Tofan_Trade",
+            message_id=220,
+            text="Signal <broken> & noisy [link](https://example.com)",
+            date=now,
+            edited_at=None,
+            reply_to_msg_id=None,
+        )
+    )
+    trace.classification = "new_signal"
+    trace.parsed_action = "open"
+    trace.symbol = "BTCUSDT"
+    trace.confidence = "0.91"
+    trace.final_status = "invalid_signal"
+    trace.result_summary = "Missing <SL> & TP"
+    trace.debug_notes = ["reason=<bad> & uncertain"]
+    runner._set_trace_stage(
+        trace,
+        "finalized",
+        status="completed",
+        detail="Final <decision> & detail",
+    )
+
+    rendered = runner._format_trace_for_telegram(trace)
+
+    assert "<b>Backtest Message Trace</b>" in rendered
+    assert "&lt;broken&gt;" in rendered
+    assert "&lt;SL&gt;" in rendered
+    assert "reason=&lt;bad&gt; &amp; uncertain" in rendered
+    assert "Final &lt;decision&gt; &amp; detail" in rendered
+
+
 def test_real_backtest_runner_emits_message_progress(tmp_path: Path) -> None:
     now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
     message = _message(

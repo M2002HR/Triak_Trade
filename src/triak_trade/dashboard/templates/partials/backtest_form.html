@@ -50,7 +50,12 @@
     </label>
 
     <label class="toggle-card">
-      <input id="backtest-use-ai" name="use_ai" type="checkbox">
+      <input
+        id="backtest-use-ai"
+        name="use_ai"
+        type="checkbox"
+        {% if bootstrap.default_use_ai %}checked{% endif %}
+      >
       <span>
         <strong>Use AI Classifier</strong>
         <small>Falls back to regex when AI is disabled or unavailable.</small>
@@ -58,7 +63,12 @@
     </label>
 
     <label class="toggle-card">
-      <input id="backtest-send-log-channel" name="send_log_channel" type="checkbox">
+      <input
+        id="backtest-send-log-channel"
+        name="send_log_channel"
+        type="checkbox"
+        {% if bootstrap.default_send_log_channel %}checked{% endif %}
+      >
       <span>
         <strong>Send Telegram Run Logs</strong>
         <small>Send aggregate updates to the Telegram log channel.</small>
@@ -66,7 +76,12 @@
     </label>
 
     <label class="toggle-card span-2">
-      <input id="backtest-log-per-message" name="log_per_message" type="checkbox">
+      <input
+        id="backtest-log-per-message"
+        name="log_per_message"
+        type="checkbox"
+        {% if bootstrap.default_log_per_message %}checked{% endif %}
+      >
       <span>
         <strong>Send Per-Message Telegram Trace</strong>
         <small>Send one formatted Telegram log message for every Telegram message processed in the channel.</small>

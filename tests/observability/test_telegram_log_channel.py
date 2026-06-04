@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from triak_trade.config.settings import Settings
+from triak_trade.observability.formatters import format_processing_audit_for_telegram
 from triak_trade.observability.processing_audit import build_sample_processing_audit_event
 from triak_trade.observability.telegram_log_channel import TelegramLogChannelClient
 from triak_trade.verification.redaction import redact_text
@@ -87,3 +88,16 @@ def test_redaction_handles_bot_api_url() -> None:
 
     assert "bot123456789:abcdefghijklmnopqrstuvwxyzABCDEFG" not in redacted
     assert "***REDACTED***" in redacted
+
+
+def test_processing_audit_formatter_escapes_html_sensitive_text() -> None:
+    event = build_sample_processing_audit_event(enabled_settings())
+    event.safe_message_preview = "1 < 2 & 3 > 1"
+    event.reason = "reason=<tag>"
+    event.debug_notes = ["value=<bad>&weird"]
+
+    formatted = format_processing_audit_for_telegram(event)
+
+    assert "1 &lt; 2 &amp; 3 &gt; 1" in formatted
+    assert "reason=&lt;tag&gt;" in formatted
+    assert "value=&lt;bad&gt;&amp;weird" in formatted
