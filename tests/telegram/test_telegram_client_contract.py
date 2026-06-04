@@ -208,3 +208,63 @@ async def test_telethon_client_ensure_media_payload_marks_download_failure(
     hydrated = await client.ensure_media_payload(raw)
 
     assert hydrated.raw_payload["media_download_skipped"] == "download_failed"
+
+
+@pytest.mark.asyncio
+async def test_telethon_fetch_history_only_passes_min_id_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_API_ID=123,
+        TELEGRAM_API_HASH="hash",
+    )
+    client = TelethonTelegramClient(settings)
+
+    class StubMessage:
+        id = 11
+        text = "BTCUSDT LONG"
+        message = "BTCUSDT LONG"
+        raw_text = "BTCUSDT LONG"
+        date = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+        edit_date = None
+        reply_to_msg_id = None
+        media = None
+        photo = None
+        file = None
+        sender_id = None
+        chat_id = None
+
+        def to_dict(self) -> dict[str, object]:
+            return {"id": self.id}
+
+    class StubClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, int]] = []
+
+        async def __aenter__(self) -> StubClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def iter_messages(self, channel: str, **kwargs: int):
+            self.calls.append(kwargs)
+
+            async def _items():
+                yield StubMessage()
+
+            return _items()
+
+    stub = StubClient()
+
+    async def _return_stub() -> StubClient:
+        return stub
+
+    monkeypatch.setattr(client, "_ensure_client", _return_stub)
+
+    await client.fetch_history("https://t.me/Tofan_Trade", limit=1)
+    await client.fetch_history("https://t.me/Tofan_Trade", limit=1, min_message_id=11)
+
+    assert stub.calls[0] == {"limit": 1}
+    assert stub.calls[1] == {"limit": 1, "min_id": 10}

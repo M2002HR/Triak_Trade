@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
@@ -42,6 +43,7 @@ def run_dashboard(
     reload: bool | None = None,
     max_runtime_seconds: int | None = None,
 ) -> dict[str, Any]:
+    _quiet_external_runtime_loggers()
     actual_host = host or settings.DASHBOARD_HOST
     actual_port = port or settings.DASHBOARD_PORT
     config = uvicorn.Config(
@@ -81,6 +83,11 @@ def run_dashboard(
     status.last_heartbeat_at = datetime.now(timezone.utc)
     write_dashboard_status(settings, status)
     return {"ran": True, "url": f"http://{actual_host}:{actual_port}", "stopped": True}
+
+
+def _quiet_external_runtime_loggers() -> None:
+    for logger_name in ("telethon", "httpx", "httpcore"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def start_dashboard_process(settings: Settings) -> dict[str, Any]:
