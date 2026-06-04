@@ -38,3 +38,12 @@ def test_keyword_detection_english_and_persian() -> None:
     assert "entry" in n.detected_keywords
     assert "sl" in n.detected_keywords
     assert "اهرم" in n.detected_keywords or "leverage" in n.detected_keywords
+
+
+def test_markdown_links_and_decorations_are_removed_safely() -> None:
+    normalized = MessageNormalizer().normalize(
+        _raw("**BTC/USDT** [Trade on Toobit](https://t.me/Tofan_Trade/220) STOPLOSS 0.03495")
+    )
+    assert "https://t.me/" not in normalized.normalized_text
+    assert "**" not in normalized.normalized_text
+    assert "BTCUSDT" in normalized.detected_symbols

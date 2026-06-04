@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.auth import DashboardAuth
+from triak_trade.dashboard.realtime import DashboardRealtimeHub
 from triak_trade.dashboard.services import DashboardService
 
 
@@ -17,10 +18,11 @@ def build_router(
     *,
     settings: Settings,
     templates: Jinja2Templates,
+    service: DashboardService,
+    realtime_hub: DashboardRealtimeHub,
 ) -> APIRouter:
     router = APIRouter()
     auth = DashboardAuth(settings)
-    service = DashboardService(settings)
 
     def context(request: Request, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -149,6 +151,29 @@ def build_router(
             return JSONResponse({"detail": str(exc)}, status_code=400)
         status_code = 202 if result.get("started") else 409
         return JSONResponse(result, status_code=status_code)
+
+    @router.websocket("/ws/backtests")
+    async def backtest_websocket(websocket: WebSocket) -> None:
+        if not auth.is_authenticated_websocket(websocket):
+            await websocket.close(code=1008, reason="unauthorized")
+            return
+        await realtime_hub.connect(websocket)
+        try:
+            await websocket.send_json(
+                {
+                    "type": "bootstrap",
+                    "readiness": service.real_backtest_readiness(),
+                    "runs": service.list_backtest_runs(limit=8),
+                }
+            )
+            while True:
+                message = await websocket.receive_text()
+                if message.strip().lower() == "ping":
+                    await websocket.send_json({"type": "pong"})
+        except WebSocketDisconnect:
+            await realtime_hub.disconnect(websocket)
+        except Exception:
+            await realtime_hub.disconnect(websocket)
 
     @router.get("/approvals", response_class=HTMLResponse)
     async def approvals(request: Request) -> Response:

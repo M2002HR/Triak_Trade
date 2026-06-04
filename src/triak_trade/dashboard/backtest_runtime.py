@@ -129,10 +129,12 @@ class DashboardBacktestCoordinator:
         settings: Settings,
         store: DashboardBacktestStore | None = None,
         runner_factory: Callable[[], RealBacktestRunner] | None = None,
+        notifier: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.settings = settings
         self.store = store or DashboardBacktestStore(settings)
         self.runner_factory = runner_factory or (lambda: RealBacktestRunner(settings=settings))
+        self.notifier = notifier
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
 
@@ -170,6 +172,7 @@ class DashboardBacktestCoordinator:
         with self._lock:
             self._threads[run.run_id] = thread
         thread.start()
+        self._notify(run)
         return run
 
     def get_run(self, run_id: str) -> DashboardBacktestRun | None:
@@ -213,6 +216,7 @@ class DashboardBacktestCoordinator:
                 )
             )
             self.store.write(failed)
+            self._notify(failed)
             return
 
         completed = self.store.read(run_id)
@@ -242,6 +246,7 @@ class DashboardBacktestCoordinator:
             )
         )
         self.store.write(completed)
+        self._notify(completed)
 
     def _handle_progress(self, run_id: str, event: RealBacktestProgressEvent) -> None:
         run = self.store.read(run_id)
@@ -267,6 +272,7 @@ class DashboardBacktestCoordinator:
         if event.trace is not None:
             self._merge_trace(run, event.trace)
         self.store.write(run)
+        self._notify(run)
 
     def _merge_trace(self, run: DashboardBacktestRun, trace: RealBacktestMessageTrace) -> None:
         for index, existing in enumerate(run.messages):
@@ -276,6 +282,11 @@ class DashboardBacktestCoordinator:
         else:
             run.messages.append(trace)
         run.messages.sort(key=lambda item: item.message_date, reverse=True)
+
+    def _notify(self, run: DashboardBacktestRun) -> None:
+        if self.notifier is None:
+            return
+        self.notifier({"type": "backtest_run", "run": run.model_dump(mode="json")})
 
 
 def _phase_label(phase: str) -> str:

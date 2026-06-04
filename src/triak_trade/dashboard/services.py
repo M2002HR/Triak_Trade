@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -88,13 +89,19 @@ class DashboardStateService:
 
 
 class DashboardService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        realtime_notifier: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.settings = settings
         self.state = DashboardStateService(settings)
         self.real_runner = RealBacktestRunner(settings=settings)
         self.backtests = DashboardBacktestCoordinator(
             settings=settings,
             runner_factory=lambda: RealBacktestRunner(settings=settings),
+            notifier=realtime_notifier,
         )
 
     def overview(self) -> dict[str, Any]:
@@ -143,7 +150,11 @@ class DashboardService:
             "default_channel": self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
             "default_interval": self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
             "default_max_messages": self.settings.REAL_BACKTEST_MAX_MESSAGES,
-            "default_use_ai": self.settings.REAL_BACKTEST_USE_AI,
+            "default_use_ai": (
+                self.settings.REAL_BACKTEST_USE_AI
+                and self.settings.AI_GATEWAY_ENABLED
+                and self.settings.AI_CLASSIFIER_ENABLED
+            ),
             "default_send_log_channel": self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
             "default_log_per_message": True,
             "default_from_date": (now - timedelta(hours=24)).isoformat(),

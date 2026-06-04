@@ -83,3 +83,11 @@ def test_validator_rejects_unknown() -> None:
     ok, errors = ParsedSignalValidator().validate_for_proposal(unknown, max_leverage=10)
     assert ok is False
     assert "signal action is UNKNOWN" in errors
+
+
+def test_backtest_validator_allows_signal_without_stop_loss_or_tp() -> None:
+    ok, errors = ParsedSignalValidator().validate_for_backtest(
+        _signal(stop_loss=None, take_profits=[], leverage=20),
+    )
+    assert ok is True
+    assert errors == []

@@ -11,9 +11,13 @@ document.documentElement.dataset.dashboardReady = "true";
     bootstrap,
     activeRunId: bootstrap.recent_runs?.[0]?.run_id || null,
     activeRun: bootstrap.recent_runs?.[0] || null,
+    recentRuns: bootstrap.recent_runs || [],
     selectedMessageId: null,
+    modalOpen: false,
     pollTimer: null,
     listTimer: null,
+    ws: null,
+    wsReady: false,
   };
 
   const nodes = {
@@ -57,13 +61,13 @@ document.documentElement.dataset.dashboardReady = "true";
   seedDefaults();
   bindEvents();
   renderReadiness(bootstrap.readiness || {});
-  renderRecentRuns(bootstrap.recent_runs || []);
+  renderRecentRuns(state.recentRuns);
   if (state.activeRun) {
     renderRun(state.activeRun);
-    startPolling();
   } else {
     renderEmptyRun();
   }
+  connectWebSocket();
   refreshRunsList();
 
   function seedDefaults() {
@@ -103,6 +107,7 @@ document.documentElement.dataset.dashboardReady = "true";
         return;
       }
       state.activeRunId = target.getAttribute("data-run-id");
+      closeModal();
       fetchRun();
     });
     document.addEventListener("click", (event) => {
@@ -148,10 +153,12 @@ document.documentElement.dataset.dashboardReady = "true";
       }
       state.activeRunId = data.run.run_id;
       state.activeRun = data.run;
+      upsertRun(data.run);
       renderRun(data.run);
       setFormStatus("Backtest started. Streaming live progress now.", "success");
-      startPolling();
-      refreshRunsList();
+      if (!state.wsReady) {
+        startPolling();
+      }
     } catch (error) {
       setFormStatus(`Backtest start failed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
     } finally {
@@ -207,6 +214,7 @@ document.documentElement.dataset.dashboardReady = "true";
       }
       const run = await response.json();
       state.activeRun = run;
+      upsertRun(run);
       renderRun(run);
       if (run.status !== "running" && run.status !== "queued" && state.pollTimer) {
         window.clearInterval(state.pollTimer);
@@ -224,8 +232,9 @@ document.documentElement.dataset.dashboardReady = "true";
     try {
       const response = await fetch("/api/backtests/runs?limit=8");
       if (response.ok) {
-        const data = await response.json();
-        renderRecentRuns(data.runs || []);
+      const data = await response.json();
+        state.recentRuns = data.runs || [];
+        renderRecentRuns(state.recentRuns);
       }
     } catch (_error) {
       // Keep silent on list refresh; main run polling is more important.
@@ -267,8 +276,8 @@ document.documentElement.dataset.dashboardReady = "true";
     renderMetrics(run);
     renderEventFeed(run.events || []);
     renderMessages(run.messages || []);
-    renderRecentRuns((bootstrap.recent_runs || []).map((item) => item.run_id === run.run_id ? run : item));
-    if (state.selectedMessageId) {
+    renderRecentRuns(state.recentRuns);
+    if (state.modalOpen && state.selectedMessageId) {
       const trace = run.messages?.find((item) => item.message_id === state.selectedMessageId);
       if (trace) {
         openModal(trace);
@@ -404,6 +413,7 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   function openModal(trace) {
+    state.modalOpen = true;
     nodes.modal.hidden = false;
     nodes.modalTitle.textContent = `Message ${trace.message_id} Timeline`;
     nodes.modalStatus.textContent = trace.final_status;
@@ -448,8 +458,89 @@ document.documentElement.dataset.dashboardReady = "true";
     if (!nodes.modal) {
       return;
     }
+    state.modalOpen = false;
+    state.selectedMessageId = null;
     nodes.modal.hidden = true;
     document.body.classList.remove("modal-open");
+  }
+
+  function upsertRun(run) {
+    const runs = Array.isArray(state.recentRuns) ? [...state.recentRuns] : [];
+    const index = runs.findIndex((item) => item.run_id === run.run_id);
+    if (index >= 0) {
+      runs[index] = run;
+    } else {
+      runs.unshift(run);
+    }
+    state.recentRuns = runs
+      .sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
+      .slice(0, 8);
+  }
+
+  function connectWebSocket() {
+    if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws/backtests`;
+    try {
+      state.ws = new WebSocket(wsUrl);
+    } catch (_error) {
+      startPolling();
+      return;
+    }
+    state.ws.onopen = () => {
+      state.wsReady = true;
+      if (state.pollTimer) {
+        window.clearInterval(state.pollTimer);
+        state.pollTimer = null;
+      }
+    };
+    state.ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(String(event.data || "{}"));
+        handleRealtimeMessage(payload);
+      } catch (_error) {
+        // no-op
+      }
+    };
+    state.ws.onclose = () => {
+      state.wsReady = false;
+      state.ws = null;
+      startPolling();
+      window.setTimeout(connectWebSocket, 1500);
+    };
+    state.ws.onerror = () => {
+      state.wsReady = false;
+    };
+  }
+
+  function handleRealtimeMessage(payload) {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+    if (payload.type === "bootstrap") {
+      renderReadiness(payload.readiness || {});
+      state.recentRuns = payload.runs || [];
+      renderRecentRuns(state.recentRuns);
+      if (!state.activeRunId && state.recentRuns.length) {
+        state.activeRunId = state.recentRuns[0].run_id;
+        state.activeRun = state.recentRuns[0];
+        renderRun(state.activeRun);
+      }
+      return;
+    }
+    if (payload.type !== "backtest_run" || !payload.run) {
+      return;
+    }
+    const run = payload.run;
+    upsertRun(run);
+    renderRecentRuns(state.recentRuns);
+    if (!state.activeRunId || state.activeRunId === run.run_id || run.status === "running") {
+      state.activeRunId = run.run_id;
+      state.activeRun = run;
+      renderRun(run);
+    }
   }
 
   function setFormStatus(message, kind) {

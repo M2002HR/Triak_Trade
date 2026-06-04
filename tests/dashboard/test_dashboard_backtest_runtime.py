@@ -232,3 +232,36 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     assert loaded.messages[0].message_id == 77
     assert loaded.messages[0].classification == "new_signal"
     assert loaded.report_path == "runtime/reports/backtests/report.json"
+
+
+def test_dashboard_backtest_coordinator_notifies_on_updates(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    notifications: list[dict[str, object]] = []
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        runner_factory=FakeRunner,
+        notifier=notifications.append,
+    )
+    run = coordinator.start_run(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        ),
+        channel_input="@Tofan_Trade",
+    )
+
+    for _ in range(50):
+        loaded = coordinator.get_run(run.run_id)
+        if loaded is not None and loaded.status in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
+
+    assert any(item.get("type") == "backtest_run" for item in notifications)
+    assert any(item["run"]["run_id"] == run.run_id for item in notifications)  # type: ignore[index]

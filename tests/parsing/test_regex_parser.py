@@ -54,3 +54,35 @@ def test_decimal_values_no_float() -> None:
     assert isinstance(parsed.entry_low, Decimal)
     assert isinstance(parsed.stop_loss, Decimal)
     assert all(isinstance(x, Decimal) for x in parsed.take_profits)
+
+
+def test_extract_noisy_markdown_signal_fields() -> None:
+    parsed = _parse(
+        """
+        **سیگنال فیوچرز**
+        ZAMA/USD
+        LONG
+        LEVERAGE: Cross 20x
+        Entry نقطه ورود
+        MARKET
+        Targets :
+        1 0.03750
+        2 0.03820
+        3 0.03850
+        4 0.04100
+        STOPLOSS حد ضرر
+        0.03495
+        [Trade on Toobit](https://t.me/Tofan_Trade/220)
+        """
+    )
+    assert parsed.action is SignalAction.OPEN
+    assert parsed.symbol == "ZAMAUSD"
+    assert parsed.entry_type is EntryType.MARKET
+    assert parsed.stop_loss == Decimal("0.03495")
+    assert parsed.take_profits == [
+        Decimal("0.03750"),
+        Decimal("0.03820"),
+        Decimal("0.03850"),
+        Decimal("0.04100"),
+    ]
+    assert parsed.leverage == 20

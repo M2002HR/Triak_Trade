@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 from urllib.parse import quote
 
-from fastapi import HTTPException, Request, Response, status
+from fastapi import HTTPException, Request, Response, WebSocket, status
 from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, URLSafeSerializer
 
@@ -51,6 +51,17 @@ class DashboardAuth:
         expected = self.settings.DASHBOARD_ADMIN_TOKEN.get_secret_value()
         return bool(expected and secrets.compare_digest(token, expected))
 
+    def is_authenticated_websocket(self, websocket: WebSocket) -> bool:
+        if not self.settings.DASHBOARD_AUTH_ENABLED:
+            return True
+        expected = self.settings.DASHBOARD_ADMIN_TOKEN.get_secret_value()
+        if not expected:
+            return False
+        provided = websocket.query_params.get("token")
+        if provided is not None and secrets.compare_digest(provided, expected):
+            return True
+        return self._has_valid_session_cookie_value(websocket.cookies.get(self.cookie_name))
+
     def set_session_cookie(self, response: Response) -> None:
         if self.serializer is None:
             return
@@ -67,10 +78,10 @@ class DashboardAuth:
         response.delete_cookie(self.cookie_name)
 
     def _has_valid_session_cookie(self, request: Request) -> bool:
-        if self.serializer is None:
-            return False
-        cookie = request.cookies.get(self.cookie_name)
-        if not cookie:
+        return self._has_valid_session_cookie_value(request.cookies.get(self.cookie_name))
+
+    def _has_valid_session_cookie_value(self, cookie: str | None) -> bool:
+        if self.serializer is None or not cookie:
             return False
         try:
             payload = self.serializer.loads(cookie)

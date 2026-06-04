@@ -9,6 +9,26 @@ from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeS
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal
 
 _NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
+_STOP_SECTION_RE = re.compile(
+    r"(?:\bsl\b|stop\s*loss|stoploss|\bstop\b|\u062d\u062f\s*\u0636\u0631\u0631)"
+    r"[^\d]{0,40}(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_LEVERAGE_RE = re.compile(
+    r"(?:leverage|lev|\u0627\u0647\u0631\u0645)[^\d]{0,20}(\d+)\s*x?",
+    re.IGNORECASE,
+)
+_X_LEVERAGE_RE = re.compile(r"\b(\d+)\s*x\b", re.IGNORECASE)
+_TP_SECTION_MARKERS = (
+    "tp",
+    "target",
+    "targets",
+    "\u062a\u0627\u0631\u06af\u062a",
+)
+_SECTION_BREAK_RE = re.compile(
+    r"(?:\bsl\b|stop\s*loss|stoploss|\bstop\b|entry|entries|leverage|lev|cancel|close|\u062d\u062f\s*\u0636\u0631\u0631)",
+    re.IGNORECASE,
+)
 
 
 class RegexSignalParser:
@@ -23,7 +43,7 @@ class RegexSignalParser:
         side = self._extract_side(lower)
         entry_type, entry_low, entry_high = self._extract_entry(lower)
         stop_loss = self._extract_stop_loss(lower)
-        take_profits = self._extract_take_profits(lower)
+        take_profits = self._extract_take_profits(text)
         leverage = self._extract_leverage(lower)
         market = self._extract_market(lower, side, leverage)
 
@@ -116,15 +136,15 @@ class RegexSignalParser:
             return EntryType.MARKET, None, None
 
         range_match = re.search(
-            r"(?:entry|entries|zone|buy zone|entry zone|\u0648\u0631\u0648\u062f)\s*:?"
-            r"\s*(\d+(?:\.\d+)?)\s*(?:-|to|/)\s*(\d+(?:\.\d+)?)",
+            r"(?:entry|entries|zone|buy zone|entry zone|\u0648\u0631\u0648\u062f)"
+            r"[^\d]{0,20}(\d+(?:\.\d+)?)\s*(?:-|to|/)\s*(\d+(?:\.\d+)?)",
             lower,
         )
         if range_match:
             return EntryType.RANGE, Decimal(range_match.group(1)), Decimal(range_match.group(2))
 
         single_match = re.search(
-            r"(?:entry|entries|zone|\u0648\u0631\u0648\u062f)\s*:?\s*(\d+(?:\.\d+)?)",
+            r"(?:entry|entries|zone|\u0648\u0631\u0648\u062f)[^\d]{0,20}(\d+(?:\.\d+)?)",
             lower,
         )
         if single_match:
@@ -134,40 +154,51 @@ class RegexSignalParser:
 
     @staticmethod
     def _extract_stop_loss(lower: str) -> Decimal | None:
-        match = re.search(
-            r"(?:\bsl\b|stop\s*loss|stoploss|\bstop\b|\u062d\u062f \u0636\u0631\u0631)"
-            r"\s*:?\s*(\d+(?:\.\d+)?)",
-            lower,
-        )
+        match = _STOP_SECTION_RE.search(lower)
         return Decimal(match.group(1)) if match else None
 
     @staticmethod
-    def _extract_take_profits(lower: str) -> list[Decimal]:
+    def _extract_take_profits(text: str) -> list[Decimal]:
+        lower = text.lower()
+        section: str | None = None
+        for marker in _TP_SECTION_MARKERS:
+            index = lower.find(marker)
+            if index == -1:
+                continue
+            candidate = text[index:]
+            break_match = _SECTION_BREAK_RE.search(candidate[1:])
+            if break_match is not None:
+                section = candidate[: break_match.start() + 1]
+            else:
+                section = candidate
+            break
+        if section is None:
+            return []
+
         values: list[Decimal] = []
-        pattern = r"(?:tp\d*|targets?|\u062a\u0627\u0631\u06af\u062a)\s*:?\s*([\d\.,\s/]+)"
-        for match in re.finditer(pattern, lower):
-            for number in _NUMBER_RE.findall(match.group(1)):
-                val = Decimal(number)
-                if val not in values:
-                    values.append(val)
+        for number in _NUMBER_RE.findall(section):
+            if len(number) == 1:
+                continue
+            value = Decimal(number)
+            if value not in values:
+                values.append(value)
         return values
 
     @staticmethod
     def _extract_leverage(lower: str) -> int | None:
-        match = re.search(
-            r"(?:leverage|lev|\u0627\u0647\u0631\u0645)\s*:?\s*(\d+)\s*x?",
-            lower,
-        )
+        match = _LEVERAGE_RE.search(lower)
         if match:
             return int(match.group(1))
-        x_match = re.search(r"\b(\d+)x\b", lower)
+        x_match = _X_LEVERAGE_RE.search(lower)
         return int(x_match.group(1)) if x_match else None
 
     @staticmethod
     def _extract_market(lower: str, side: TradeSide, leverage: int | None) -> MarketType:
         if "spot" in lower:
             return MarketType.SPOT
-        if any(token in lower for token in ["futures", "contract"]):
+        if any(
+            token in lower for token in ["futures", "contract", "\u0641\u06cc\u0648\u0686\u0631"]
+        ):
             return MarketType.FUTURES
         if side in {TradeSide.LONG, TradeSide.SHORT}:
             return MarketType.FUTURES
@@ -190,12 +221,12 @@ class RegexSignalParser:
             has_core = (
                 symbol is not None
                 and side is not TradeSide.UNKNOWN
-                and stop_loss is not None
-                and bool(take_profits)
                 and entry_type is not EntryType.UNKNOWN
             )
-            if has_core:
-                return Decimal("0.90")
+            if has_core and stop_loss is not None and bool(take_profits):
+                return Decimal("0.92")
+            if has_core and (stop_loss is not None or bool(take_profits)):
+                return Decimal("0.82")
             if symbol and side is not TradeSide.UNKNOWN:
                 return Decimal("0.65")
             return Decimal("0.30")

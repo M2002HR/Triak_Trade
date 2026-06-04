@@ -366,11 +366,7 @@ class RealBacktestRunner:
         valid_open_events = [
             event
             for event in open_events
-            if self.validator.validate_for_proposal(
-                event.parsed_signal,
-                max_leverage=self.settings.MAX_LEVERAGE,
-                require_stop_loss=self.settings.REQUIRE_STOP_LOSS,
-            )[0]
+            if self.validator.validate_for_backtest(event.parsed_signal)[0]
         ]
         symbols = sorted({
             symbol
@@ -957,7 +953,7 @@ class RealBacktestRunner:
             parsed = classified.parsed_signal
             trace.classification = self._classify_label(classified)
             trace.parsed_action = parsed.action.value
-            trace.symbol = normalize_market_symbol(parsed.symbol) or parsed.symbol
+            trace.symbol = parsed.symbol
             trace.side = parsed.side.value
             trace.confidence = str(classified.confidence)
             trace.debug_notes = list(classified.debug_notes)
@@ -1003,13 +999,10 @@ class RealBacktestRunner:
                     status="active",
                     detail="Checking whether the signal is structurally complete.",
                 )
-                valid, errors = self.validator.validate_for_proposal(
-                    parsed,
-                    max_leverage=self.settings.MAX_LEVERAGE,
-                    require_stop_loss=self.settings.REQUIRE_STOP_LOSS,
-                )
                 counts["parsed_signals"] += 1
-                if valid and trace.symbol is not None:
+                valid_for_backtest, errors = self.validator.validate_for_backtest(parsed)
+                market_symbol = normalize_market_symbol(parsed.symbol) if parsed.symbol else None
+                if valid_for_backtest and market_symbol is not None:
                     counts["valid_signals"] += 1
                     trace.final_status = "awaiting_market_data"
                     self._set_trace_stage(
@@ -1022,9 +1015,9 @@ class RealBacktestRunner:
                         trace,
                         "market_data",
                         status="pending",
-                        detail=f"Waiting for {trace.symbol} candle data.",
+                        detail=f"Waiting for {market_symbol} candle data.",
                     )
-                    symbol_trace_map.setdefault(trace.symbol, []).append(message.message_id)
+                    symbol_trace_map.setdefault(market_symbol, []).append(message.message_id)
                     if signal_id is not None:
                         signal_trace_map[signal_id] = message.message_id
                 else:

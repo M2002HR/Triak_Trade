@@ -15,12 +15,15 @@ _ARABIC_DIGITS = str.maketrans(
     "0123456789",
 )
 
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_MARKDOWN_DECORATION_RE = re.compile(r"[*_`~]+")
 _TAG_SYMBOL_RE = re.compile(r"[#$]([A-Za-z]{2,12})")
 _PAIR_SYMBOL_RE = re.compile(
-    r"\b([A-Za-z]{2,10})\s*[/\-\s]\s*(USDT|USD|USDC)\b",
+    r"\b([A-Za-z]{2,12})\s*[/\-\s]\s*(USDT|USD|USDC)\b",
     re.IGNORECASE,
 )
-_COMPACT_SYMBOL_RE = re.compile(r"\b([A-Za-z]{3,12}(?:USDT|USD|BTC|ETH))\b", re.IGNORECASE)
+_COMPACT_SYMBOL_RE = re.compile(r"\b([A-Za-z]{3,16}(?:USDT|USD|USDC|BTC|ETH))\b", re.IGNORECASE)
 
 _KEYWORDS = {
     "long",
@@ -67,15 +70,20 @@ class MessageNormalizer:
     @staticmethod
     def _normalize_text(text: str) -> str:
         value = text.translate(_PERSIAN_DIGITS).translate(_ARABIC_DIGITS)
+        value = _MARKDOWN_LINK_RE.sub(r"\1", value)
+        value = _URL_RE.sub(" ", value)
+        value = _MARKDOWN_DECORATION_RE.sub(" ", value)
         value = value.replace("\u066b", ".").replace("\u060c", ",")
-        return re.sub(r"\s+", " ", value).strip()
+        value = value.replace("\n", " ")
+        value = re.sub(r"\s+", " ", value)
+        return value.strip()
 
     @staticmethod
     def _compact_symbol(base: str, quote: str | None = None) -> str:
-        base_norm = base.strip().upper()
+        base_norm = re.sub(r"[^A-Za-z0-9]", "", base.strip().upper())
         if quote is None:
             return base_norm
-        return f"{base_norm}{quote.strip().upper()}"
+        return f"{base_norm}{re.sub(r'[^A-Za-z0-9]', '', quote.strip().upper())}"
 
     def normalize(self, raw: RawTelegramMessage) -> NormalizedMessage:
         text = raw.text or ""
@@ -86,19 +94,19 @@ class MessageNormalizer:
 
         for match in _TAG_SYMBOL_RE.finditer(normalized):
             symbol = self._compact_symbol(match.group(1))
-            if symbol not in seen:
+            if symbol and symbol not in seen:
                 seen.add(symbol)
                 symbols.append(symbol)
 
         for match in _PAIR_SYMBOL_RE.finditer(normalized):
             symbol = self._compact_symbol(match.group(1), match.group(2))
-            if symbol not in seen:
+            if symbol and symbol not in seen:
                 seen.add(symbol)
                 symbols.append(symbol)
 
         for match in _COMPACT_SYMBOL_RE.finditer(normalized):
             symbol = self._compact_symbol(match.group(1))
-            if symbol not in seen:
+            if symbol and symbol not in seen:
                 seen.add(symbol)
                 symbols.append(symbol)
 
