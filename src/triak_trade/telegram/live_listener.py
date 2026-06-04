@@ -32,6 +32,9 @@ class TelegramLiveListenerService:
 
     async def start(self, channels: list[str]) -> None:
         async def _handle(message: RawTelegramMessage) -> None:
+            payload = message.raw_payload
+            if bool(payload.get("has_media")) and bool(payload.get("caption_present")):
+                message = await self.telegram_client.ensure_media_payload(message)
             agent = self._agent_for_channel(message.channel_id)
             actions = agent.ingest_message(message)
             if self.on_actions is not None:

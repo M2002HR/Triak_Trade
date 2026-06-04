@@ -33,6 +33,24 @@ class FakeAgent:
         ]
 
 
+class TrackingTelegramClient(FakeTelegramClient):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.ensure_calls: list[int] = []
+
+    async def ensure_media_payload(self, message: RawTelegramMessage) -> RawTelegramMessage:
+        self.ensure_calls.append(message.message_id)
+        payload = dict(message.raw_payload)
+        payload["media_downloaded"] = True
+        payload["image_data_urls"] = [
+            {
+                "mime_type": "image/jpeg",
+                "data_url": "data:image/jpeg;base64,ZmFrZQ==",
+            }
+        ]
+        return message.model_copy(update={"raw_payload": payload})
+
+
 @pytest.mark.asyncio
 async def test_live_listener_routes_and_collects_actions() -> None:
     now = datetime.now(timezone.utc)
@@ -70,3 +88,39 @@ async def test_live_listener_routes_and_collects_actions() -> None:
     )
     await svc.start(["chan-a"])
     assert collected == [("chan-a", 1)]
+
+
+@pytest.mark.asyncio
+async def test_live_listener_only_hydrates_caption_media_messages() -> None:
+    now = datetime.now(timezone.utc)
+    msgs = [
+        RawTelegramMessage(
+            channel_id="chan-a",
+            channel_username="a",
+            message_id=10,
+            text="caption signal",
+            date=now,
+            edited_at=None,
+            reply_to_msg_id=None,
+            raw_payload={"has_media": True, "caption_present": True},
+        ),
+        RawTelegramMessage(
+            channel_id="chan-a",
+            channel_username="a",
+            message_id=11,
+            text=None,
+            date=now,
+            edited_at=None,
+            reply_to_msg_id=None,
+            raw_payload={"has_media": True, "caption_present": False},
+        ),
+    ]
+    client = TrackingTelegramClient(live_messages=msgs)
+    svc = TelegramLiveListenerService(
+        telegram_client=client,
+        agent_factory=lambda channel_id: FakeAgent(channel_id),
+    )
+
+    await svc.start(["chan-a"])
+
+    assert client.ensure_calls == [10]

@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     AI_CLASSIFIER_TEXT_PROVIDER: str = "groq"
     AI_CLASSIFIER_TEXT_MODEL: str = "openai/gpt-oss-120b"
     AI_CLASSIFIER_VISION_PROVIDER: str = "gemini"
-    AI_CLASSIFIER_VISION_MODEL: str = "gemini-2.5-flash-lite"
+    AI_CLASSIFIER_VISION_MODEL: str = "gemini-3.1-flash-lite"
     AI_GATEWAY_ENABLED: bool = False
     AI_GATEWAY_BASE_URL: str = "http://127.0.0.1:8090"
     AI_GATEWAY_TIMEOUT_SECONDS: int = 30

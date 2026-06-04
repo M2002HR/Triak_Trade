@@ -50,6 +50,21 @@ class FailingLogClient:
         raise TelegramLogChannelError("simulated log channel failure")
 
 
+class TrackingTelegramClient(FakeTelegramClient):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.ensure_calls: list[int] = []
+
+    async def ensure_media_payload(self, message: RawTelegramMessage) -> RawTelegramMessage:
+        self.ensure_calls.append(message.message_id)
+        payload = dict(message.raw_payload)
+        payload["image_data_urls"] = [
+            {"mime_type": "image/jpeg", "data_url": "data:image/jpeg;base64,ZmFrZQ=="}
+        ]
+        payload["media_downloaded"] = True
+        return message.model_copy(update={"raw_payload": payload})
+
+
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
     values: dict[str, object] = {
         "REAL_BACKTEST_ENABLED": True,
@@ -321,6 +336,54 @@ def test_real_backtest_runner_emits_message_progress(tmp_path: Path) -> None:
     assert message_event.trace is not None
     assert message_event.trace.message_link == "https://t.me/Tofan_Trade/1"
     assert message_event.trace.classification in {"new_signal", None}
+
+
+def test_real_backtest_runner_hydrates_caption_media_on_demand_only(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="caption signal",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+        raw_payload={"has_media": True, "caption_present": True},
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text=None,
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+        raw_payload={"has_media": True, "caption_present": False},
+    )
+    telegram = TrackingTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path, AI_GATEWAY_ENABLED=False),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(),
+    )
+
+    runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=10,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        )
+    )
+
+    assert telegram.ensure_calls == [1]
 
 
 def test_real_backtest_runner_sends_per_message_log_trace(tmp_path: Path) -> None:

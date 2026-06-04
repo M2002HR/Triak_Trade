@@ -337,6 +337,12 @@ class RealBacktestRunner:
 
         counts = {
             "total_messages": len(messages),
+            "caption_media_candidates": sum(
+                1
+                for message in messages
+                if bool(message.raw_payload.get("has_media"))
+                and bool(message.raw_payload.get("caption_present"))
+            ),
             "classified_messages": 0,
             "parsed_signals": 0,
             "valid_signals": 0,
@@ -348,7 +354,11 @@ class RealBacktestRunner:
             progress_callback,
             phase="fetch_history",
             status="completed",
-            summary=f"Fetched {len(messages)} Telegram messages.",
+            summary=(
+                f"Fetched {len(messages)} Telegram messages. "
+                f"Caption-media candidates for on-demand download: "
+                f"{counts['caption_media_candidates']}."
+            ),
             counts=counts,
         )
 
@@ -1037,6 +1047,12 @@ class RealBacktestRunner:
         context.seed_message_catalog(sorted_messages)
 
         for message in sorted_messages:
+            message = await self._prepare_message_for_classification(
+                message=message,
+                progress_callback=progress_callback,
+                counts=counts,
+                warnings=warnings,
+            )
             trace = self._make_trace(message)
             traces_by_message_id[message.message_id] = trace
             self._set_trace_stage(
@@ -1196,6 +1212,56 @@ class RealBacktestRunner:
                 )
             )
         return events, traces_by_message_id, signal_trace_map, symbol_trace_map, counts
+
+    async def _prepare_message_for_classification(
+        self,
+        *,
+        message: RawTelegramMessage,
+        progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
+        counts: dict[str, int],
+        warnings: list[str],
+    ) -> RawTelegramMessage:
+        payload = message.raw_payload
+        needs_caption_media = (
+            bool(payload.get("has_media")) and bool(payload.get("caption_present"))
+        )
+        if not needs_caption_media:
+            return message
+
+        self._emit_run_progress(
+            progress_callback,
+            phase="classify_messages",
+            status="running",
+            summary=(
+                f"On-demand media download for caption message {message.message_id} "
+                "started."
+            ),
+            counts=counts,
+        )
+        try:
+            hydrated = await self.telegram_client.ensure_media_payload(message)
+        except Exception as exc:
+            self._append_warning(
+                warnings,
+                (
+                    f"On-demand media download failed for message {message.message_id}; "
+                    f"continuing without image context ({type(exc).__name__})."
+                ),
+            )
+            return message
+
+        hydrated_payload = hydrated.raw_payload
+        if hydrated_payload.get("media_downloaded") is True:
+            self._emit_run_progress(
+                progress_callback,
+                phase="classify_messages",
+                status="running",
+                summary=(
+                    f"On-demand media download completed for message {message.message_id}."
+                ),
+                counts=counts,
+            )
+        return hydrated
 
     def _make_trace(self, message: RawTelegramMessage) -> RealBacktestMessageTrace:
         stages = [

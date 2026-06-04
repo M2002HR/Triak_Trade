@@ -148,7 +148,7 @@ def test_gateway_client_routes_caption_images_to_gemini_multimodal() -> None:
     )
     client.classify_message(context)
     payload = str(observed["json"])
-    assert "gemini-2.5-flash-lite" in payload
+    assert "gemini-3.1-flash-lite" in payload
     assert "image_url" in payload
 
 

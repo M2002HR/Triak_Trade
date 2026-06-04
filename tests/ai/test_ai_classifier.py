@@ -187,6 +187,7 @@ def test_ai_classifier_uses_gemini_route_for_caption_with_image() -> None:
     result = classifier.classify(raw, _context())
     assert "ai_route_provider=gemini" in result.debug_notes
     assert "ai_route_multimodal=True" in result.debug_notes
+    assert "ai_route_model=gemini-3.1-flash-lite" in result.debug_notes
 
 
 def test_ai_classifier_repairs_fields_from_following_messages() -> None:

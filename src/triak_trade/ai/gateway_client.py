@@ -48,7 +48,7 @@ class AjilGatewayClient:
     text_provider: str = "groq"
     text_model: str = "openai/gpt-oss-120b"
     vision_provider: str = "gemini"
-    vision_model: str = "gemini-2.5-flash-lite"
+    vision_model: str = "gemini-3.1-flash-lite"
     trust_env: bool = False
     transport: httpx.BaseTransport | None = None
 
