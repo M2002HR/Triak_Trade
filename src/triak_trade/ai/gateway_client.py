@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,13 @@ class AIGatewayResponseError(AIGatewayError):
     """Gateway response malformed/invalid."""
 
 
+@dataclass(frozen=True, slots=True)
+class AIGatewayRoute:
+    provider: str
+    model: str
+    multimodal: bool
+
+
 @dataclass(slots=True)
 class AjilGatewayClient:
     base_url: str
@@ -37,8 +45,26 @@ class AjilGatewayClient:
     auth_token: str = ""
     default_model: str = ""
     provider_priority: tuple[str, ...] = ()
+    text_provider: str = "groq"
+    text_model: str = "openai/gpt-oss-120b"
+    vision_provider: str = "gemini"
+    vision_model: str = "gemini-2.5-flash-lite"
     trust_env: bool = False
     transport: httpx.BaseTransport | None = None
+
+    def plan_for_context(self, context: AIMessageContext) -> AIGatewayRoute:
+        has_images = bool(context.message_images)
+        if context.message_has_media or context.message_is_caption or has_images:
+            return AIGatewayRoute(
+                provider=self.vision_provider,
+                model=self.vision_model,
+                multimodal=has_images,
+            )
+        return AIGatewayRoute(
+            provider=self.text_provider,
+            model=self.text_model,
+            multimodal=False,
+        )
 
     def classify_message(self, context: AIMessageContext) -> AIClassificationResult:
         payload = self._build_payload(context)
@@ -73,23 +99,34 @@ class AjilGatewayClient:
         prompt = build_telegram_signal_prompt(context)
         schema = AIClassificationResult.model_json_schema()
         context_payload = context.model_dump(mode="json")
+        route = self.plan_for_context(context)
+        user_payload = json.dumps(
+            {
+                "task": (
+                    "Classify this Telegram channel message and return "
+                    "only valid JSON."
+                ),
+                "context": context_payload,
+                "required_output_schema": schema,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        user_content: str | list[dict[str, Any]]
+        if route.multimodal and context.message_images:
+            content_parts: list[dict[str, Any]] = [{"type": "text", "text": user_payload}]
+            for image in context.message_images:
+                data_url = image.get("data_url")
+                if isinstance(data_url, str) and data_url.startswith("data:image/"):
+                    content_parts.append(
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    )
+            user_content = content_parts
+        else:
+            user_content = user_payload
         messages = [
             {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "task": (
-                            "Classify this Telegram channel message and return "
-                            "only valid JSON."
-                        ),
-                        "context": context_payload,
-                        "required_output_schema": schema,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            },
+            {"role": "user", "content": user_content},
         ]
         payload: dict[str, Any] = {
             "messages": messages,
@@ -98,23 +135,22 @@ class AjilGatewayClient:
         }
         if self.provider_priority:
             router_options: dict[str, Any] = {
-                "providers": list(self.provider_priority),
+                "providers": [route.provider],
                 "strategy": "fallback_chain",
                 "mode": "quality_first",
-                "max_attempts": max(2, len(self.provider_priority) * 2),
+                "max_attempts": 2,
                 "timeout_sec": max(5.0, float(self.timeout_seconds)),
             }
-            if self.default_model.strip():
-                router_options["model_preferences"] = [
-                    {
-                        "provider": self.provider_priority[0],
-                        "model": self.default_model.strip(),
-                        "priority": 0,
-                    }
-                ]
+            router_options["model_preferences"] = [
+                {
+                    "provider": route.provider,
+                    "model": route.model,
+                    "priority": 0,
+                }
+            ]
             payload["x_router"] = router_options
-        elif self.default_model.strip():
-            payload["model"] = self.default_model.strip()
+        else:
+            payload["model"] = route.model
         return payload
 
     def _build_headers(self) -> dict[str, str]:
@@ -362,9 +398,23 @@ class AjilGatewayClient:
     @staticmethod
     def _normalize_take_profit_list(raw: Any) -> list[Any]:
         if isinstance(raw, list):
-            return [item for item in raw if item is not None]
+            normalized: list[Any] = []
+            for item in raw:
+                if item is None:
+                    continue
+                if isinstance(item, str):
+                    matches = re.findall(r"-?\d+(?:\.\d+)?", item.replace(",", " "))
+                    if matches:
+                        normalized.extend(matches)
+                        continue
+                normalized.append(item)
+            return normalized
         if raw is None:
             return []
+        if isinstance(raw, str):
+            matches = re.findall(r"-?\d+(?:\.\d+)?", raw.replace(",", " "))
+            if matches:
+                return matches
         return [raw]
 
     @staticmethod

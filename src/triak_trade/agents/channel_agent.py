@@ -5,11 +5,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from triak_trade.agents.classifier import MessageClassifier, RegexMessageClassifier
+from triak_trade.agents.classifier import (
+    ClassifiedMessage,
+    MessageClassifier,
+    RegexMessageClassifier,
+)
 from triak_trade.agents.clock import Clock, SystemClock
 from triak_trade.agents.context import ChannelContext
 from triak_trade.config.settings import Settings
-from triak_trade.domain.enums import ProposedActionType, SignalStatus
+from triak_trade.domain.enums import ProposedActionType, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_action_id, make_signal_id
 from triak_trade.domain.models import ParsedSignal, ProposedAction, RawTelegramMessage, SignalState
 from triak_trade.parsing.validator import ParsedSignalValidator
@@ -42,7 +46,9 @@ class ChannelAgent:
         classified = self.classifier.classify(raw_message, self.context)
         parsed = classified.parsed_signal
 
-        if classified.is_potential_new_signal:
+        merge_candidate_id = self._resolve_related_signal_id(raw_message, classified, parsed)
+
+        if merge_candidate_id is None and classified.is_potential_new_signal:
             signal_id = make_signal_id(raw_message.channel_id, raw_message.message_id)
             state = SignalState(
                 signal_id=signal_id,
@@ -72,26 +78,28 @@ class ChannelAgent:
             )
             return actions
 
-        related_signal_id = classified.related_signal_id
-        if related_signal_id is not None and self.context.get_signal(related_signal_id) is not None:
-            signal = self.context.get_signal(related_signal_id)
+        if (
+            merge_candidate_id is not None
+            and self.context.get_signal(merge_candidate_id) is not None
+        ):
+            signal = self.context.get_signal(merge_candidate_id)
             assert signal is not None
             if not self.context.is_within_update_window(signal, self.clock.now()):
                 return actions
-            self.context.attach_message(related_signal_id, raw_message)
-            self.context.merge_signal(related_signal_id, parsed, raw_message.date)
+            self.context.attach_message(merge_candidate_id, raw_message)
+            self.context.merge_signal(merge_candidate_id, parsed, raw_message.date)
             self.debug_events.append(
                 {
                     "channel_id": raw_message.channel_id,
                     "message_id": raw_message.message_id,
-                    "signal_id": related_signal_id,
+                    "signal_id": merge_candidate_id,
                     "status": signal.status.value,
                     "reason": classified.relation_reason or "related",
                     "confidence": str(parsed.confidence),
                 }
             )
             if signal.status is not SignalStatus.PENDING_CONSOLIDATION:
-                followup = self._build_followup_action(signal_id=related_signal_id, parsed=parsed)
+                followup = self._build_followup_action(signal_id=merge_candidate_id, parsed=parsed)
                 if followup is not None:
                     actions.append(followup)
             return actions
@@ -109,6 +117,57 @@ class ChannelAgent:
             actions.append(request)
 
         return actions
+
+    def _resolve_related_signal_id(
+        self,
+        raw_message: RawTelegramMessage,
+        classified: ClassifiedMessage,
+        parsed: ParsedSignal,
+    ) -> str | None:
+        related_signal_id = getattr(classified, "related_signal_id", None)
+        if isinstance(related_signal_id, str):
+            return related_signal_id
+
+        reply_signal = self.context.find_signal_by_message_reply(raw_message.reply_to_msg_id)
+        if reply_signal is not None:
+            return reply_signal.signal_id
+
+        if parsed.symbol is not None:
+            same_symbol = self.context.find_signals_by_symbol(parsed.symbol)
+            if len(same_symbol) == 1:
+                return same_symbol[0].signal_id
+
+        if parsed.action in {
+            SignalAction.OPEN,
+            SignalAction.UPDATE_SL,
+            SignalAction.UPDATE_TP,
+            SignalAction.UPDATE_LEVERAGE,
+            SignalAction.CANCEL,
+            SignalAction.CLOSE,
+        } or self._looks_like_fragment(raw_message.text):
+            pending_candidates = self.context.find_recent_pending_signals(
+                before_message_id=raw_message.message_id,
+                limit_messages=3,
+            )
+            if len(pending_candidates) == 1:
+                candidate = pending_candidates[0]
+                candidate_symbol = (
+                    candidate.current_signal.symbol
+                    if candidate.current_signal is not None
+                    else None
+                )
+                if parsed.symbol is None or parsed.symbol == candidate_symbol:
+                    return candidate.signal_id
+
+        return None
+
+    @staticmethod
+    def _looks_like_fragment(text: str | None) -> bool:
+        lowered = (text or "").lower()
+        return any(
+            keyword in lowered
+            for keyword in ("tp", "target", "sl", "stop", "leverage", "entry", "breakeven", "be")
+        )
 
     def tick(self, now: datetime | None = None) -> list[ProposedAction]:
         current = now or self.clock.now()

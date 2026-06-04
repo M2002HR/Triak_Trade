@@ -770,6 +770,10 @@ class RealBacktestRunner:
                     for item in self.settings.AI_GATEWAY_PROVIDER_PRIORITY.split(",")
                     if item.strip()
                 ),
+                text_provider=self.settings.AI_CLASSIFIER_TEXT_PROVIDER,
+                text_model=self.settings.AI_CLASSIFIER_TEXT_MODEL,
+                vision_provider=self.settings.AI_CLASSIFIER_VISION_PROVIDER,
+                vision_model=self.settings.AI_CLASSIFIER_VISION_MODEL,
                 trust_env=self.settings.AI_GATEWAY_TRUST_ENV,
             )
             classifier: MessageClassifier = AIMessageClassifier(
@@ -796,6 +800,10 @@ class RealBacktestRunner:
                     for item in self.settings.AI_GATEWAY_PROVIDER_PRIORITY.split(",")
                     if item.strip()
                 ),
+                text_provider=self.settings.AI_CLASSIFIER_TEXT_PROVIDER,
+                text_model=self.settings.AI_CLASSIFIER_TEXT_MODEL,
+                vision_provider=self.settings.AI_CLASSIFIER_VISION_PROVIDER,
+                vision_model=self.settings.AI_CLASSIFIER_VISION_MODEL,
                 trust_env=self.settings.AI_GATEWAY_TRUST_ENV,
             )
             return _ClassificationSelection(
@@ -967,6 +975,7 @@ class RealBacktestRunner:
         signal_trace_map: dict[str, int] = {}
         symbol_trace_map: dict[str, list[int]] = {}
         sorted_messages = sorted(messages, key=lambda item: item.date)
+        context.seed_message_catalog(sorted_messages)
 
         for message in sorted_messages:
             trace = self._make_trace(message)

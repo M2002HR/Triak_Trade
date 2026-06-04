@@ -136,6 +136,10 @@ def _build_ai_gateway_client(
             for item in settings.AI_GATEWAY_PROVIDER_PRIORITY.split(",")
             if item.strip()
         ),
+        text_provider=settings.AI_CLASSIFIER_TEXT_PROVIDER,
+        text_model=settings.AI_CLASSIFIER_TEXT_MODEL,
+        vision_provider=settings.AI_CLASSIFIER_VISION_PROVIDER,
+        vision_model=settings.AI_CLASSIFIER_VISION_MODEL,
         trust_env=settings.AI_GATEWAY_TRUST_ENV,
         transport=transport,
     )

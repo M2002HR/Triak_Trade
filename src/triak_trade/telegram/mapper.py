@@ -46,7 +46,14 @@ def telethon_message_to_raw(message: Any, *, channel: str | None = None) -> RawT
     chat = getattr(message, "chat", None)
     username = getattr(chat, "username", None) if chat is not None else None
 
-    payload = {
+    photo = getattr(message, "photo", None)
+    document = getattr(message, "document", None)
+    media = getattr(message, "media", None)
+    grouped_id = getattr(message, "grouped_id", None)
+    mime_type = getattr(document, "mime_type", None)
+    has_media = bool(photo is not None or document is not None or media is not None)
+    media_kind = "photo" if photo is not None else "document" if document is not None else None
+    payload: dict[str, Any] = {
         "id": getattr(message, "id", None),
         "chat_id": getattr(message, "chat_id", None),
         "date": _safe_dt(getattr(message, "date", None)).isoformat(),
@@ -58,6 +65,13 @@ def telethon_message_to_raw(message: Any, *, channel: str | None = None) -> RawT
         "reply_to_msg_id": _extract_reply_to(message),
         "views": getattr(message, "views", None),
         "forwards": getattr(message, "forwards", None),
+        "grouped_id": grouped_id,
+        "has_media": has_media,
+        "media_kind": media_kind,
+        "has_photo": photo is not None,
+        "mime_type": mime_type,
+        "caption_present": bool(text and has_media),
+        "image_data_urls": [],
     }
 
     return RawTelegramMessage(

@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     SIGNAL_CONSOLIDATION_SECONDS: int = 180
     SIGNAL_MAX_UPDATE_WINDOW_HOURS: int = 48
     CHANNEL_AGENT_CONTEXT_MESSAGE_LIMIT: int = 50
+    AI_CLASSIFIER_FORWARD_CONTEXT_LIMIT: int = 3
+    AI_CLASSIFIER_TEXT_PROVIDER: str = "groq"
+    AI_CLASSIFIER_TEXT_MODEL: str = "openai/gpt-oss-120b"
+    AI_CLASSIFIER_VISION_PROVIDER: str = "gemini"
+    AI_CLASSIFIER_VISION_MODEL: str = "gemini-2.5-flash-lite"
     AI_GATEWAY_ENABLED: bool = False
     AI_GATEWAY_BASE_URL: str = "http://127.0.0.1:8090"
     AI_GATEWAY_TIMEOUT_SECONDS: int = 30
@@ -139,6 +144,9 @@ class Settings(BaseSettings):
     AI_CLASSIFIER_STORE_PROMPT_TEXT: bool = False
     AI_CLASSIFIER_STORE_RESPONSE_TEXT: bool = False
     AI_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
+    TELEGRAM_MEDIA_DOWNLOAD_ENABLED: bool = True
+    TELEGRAM_MEDIA_MAX_IMAGES: int = 1
+    TELEGRAM_MEDIA_MAX_BYTES: int = 1_500_000
     BACKTEST_DEFAULT_INITIAL_BALANCE: Decimal = Decimal("1000")
     BACKTEST_DEFAULT_RISK_PER_TRADE_PCT: Decimal = Decimal("1")
     BACKTEST_DEFAULT_INTERVAL: str = "1m"

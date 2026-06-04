@@ -124,6 +124,44 @@ def test_related_messages_attached_in_consolidation() -> None:
     assert actions[0].action_type is ProposedActionType.CREATE_ORDER
 
 
+def test_split_signal_across_three_consecutive_messages_merges_without_reply() -> None:
+    agent, clock, settings = _agent()
+    agent.ingest_message(
+        _raw(
+            clock=clock,
+            channel_id="chan-a",
+            message_id=1,
+            text="BTCUSDT LONG Entry: 68000 - 68200",
+        )
+    )
+    clock.advance(seconds=15)
+    agent.ingest_message(
+        _raw(
+            clock=clock,
+            channel_id="chan-a",
+            message_id=2,
+            text="TP: 69000 / 70000",
+        )
+    )
+    clock.advance(seconds=15)
+    agent.ingest_message(
+        _raw(
+            clock=clock,
+            channel_id="chan-a",
+            message_id=3,
+            text="SL: 67400",
+        )
+    )
+
+    snap = agent.get_context_snapshot()
+    signal_state = next(iter(snap["signals"].values()))
+    assert set(signal_state["related_message_ids"]) == {1, 2, 3}
+
+    clock.advance(seconds=settings.SIGNAL_CONSOLIDATION_SECONDS)
+    actions = agent.tick(clock.now())
+    assert actions[0].action_type is ProposedActionType.CREATE_ORDER
+
+
 def test_irrelevant_ad_and_profit_report_ignored() -> None:
     agent, clock, _ = _agent()
     ad_actions = agent.ingest_message(

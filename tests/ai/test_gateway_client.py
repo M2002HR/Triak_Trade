@@ -22,6 +22,11 @@ def context() -> AIMessageContext:
         message_id=1,
         message_text="BTCUSDT LONG",
         message_date="2026-01-01T00:00:00Z",
+        message_has_media=False,
+        message_is_caption=False,
+        message_images=[],
+        reply_chain_messages=[],
+        following_messages=[],
         recent_messages=[],
         active_signals=[],
         parser_version="ai-v1",
@@ -88,6 +93,63 @@ def test_gateway_client_sends_payload(context: AIMessageContext) -> None:
     assert "messages" in str(observed["json"])
     assert "response_format" in str(observed["json"])
     assert "x_router" in str(observed["json"])
+
+
+def test_gateway_client_routes_text_requests_to_groq_model(context: AIMessageContext) -> None:
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["json"] = request.read().decode()
+        return httpx.Response(200, json=_ok_payload())
+
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(handler),
+    )
+    client.classify_message(context)
+    payload = str(observed["json"])
+    assert "openai/gpt-oss-120b" in payload
+    assert "\"model\":\"openai/gpt-oss-120b\"" in payload
+
+
+def test_gateway_client_routes_caption_images_to_gemini_multimodal() -> None:
+    observed: dict[str, object] = {}
+    context = AIMessageContext(
+        channel_id="c1",
+        channel_username="u1",
+        message_id=2,
+        message_text="caption text",
+        message_date="2026-01-01T00:00:00Z",
+        message_has_media=True,
+        message_is_caption=True,
+        message_images=[
+            {
+                "mime_type": "image/jpeg",
+                "data_url": "data:image/jpeg;base64,ZmFrZQ==",
+            }
+        ],
+        reply_chain_messages=[],
+        following_messages=[],
+        recent_messages=[],
+        active_signals=[],
+        parser_version="ai-v1",
+        notes=[],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["json"] = request.read().decode()
+        return httpx.Response(200, json=_ok_payload())
+
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(handler),
+    )
+    client.classify_message(context)
+    payload = str(observed["json"])
+    assert "gemini-2.5-flash-lite" in payload
+    assert "image_url" in payload
 
 
 def test_gateway_client_timeout(context: AIMessageContext) -> None:
@@ -221,6 +283,18 @@ def test_gateway_client_normalizes_textual_confidence_and_nullable_fields(
     result = client.classify_message(context)
     assert result.classification == "ADVERTISEMENT"
     assert str(result.confidence) == "0.85"
+
+
+def test_gateway_client_splits_take_profit_string(context: AIMessageContext) -> None:
+    payload = _ok_payload()
+    payload["take_profits"] = "69000 / 70000 / 71500"
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+    result = client.classify_message(context)
+    assert [str(item) for item in result.take_profits] == ["69000", "70000", "71500"]
 
 
 @pytest.mark.skipif(

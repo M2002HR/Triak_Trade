@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -15,6 +16,11 @@ class AIMessageContext(BaseModel):
     message_id: int
     message_text: str | None
     message_date: datetime
+    message_has_media: bool = False
+    message_is_caption: bool = False
+    message_images: list[dict[str, Any]] = Field(default_factory=list)
+    reply_chain_messages: list[dict[str, Any]] = Field(default_factory=list)
+    following_messages: list[dict[str, Any]] = Field(default_factory=list)
     recent_messages: list[dict[str, Any]] = Field(default_factory=list)
     active_signals: list[dict[str, Any]] = Field(default_factory=list)
     parser_version: str
@@ -58,3 +64,21 @@ class AIClassificationResult(BaseModel):
         if value < Decimal("0") or value > Decimal("1"):
             raise ValueError("confidence must be between 0 and 1")
         return value
+
+    @field_validator("take_profits", mode="before")
+    @classmethod
+    def normalize_take_profits(cls, value: Any) -> list[Any]:
+        def extract(raw: Any) -> list[Any]:
+            if raw is None:
+                return []
+            if isinstance(raw, list):
+                merged: list[Any] = []
+                for item in raw:
+                    merged.extend(extract(item))
+                return merged
+            if isinstance(raw, str):
+                matches = re.findall(r"-?\d+(?:\.\d+)?", raw.replace(",", " "))
+                return matches or [raw]
+            return [raw]
+
+        return extract(value)

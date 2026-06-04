@@ -69,6 +69,7 @@ def test_ai_classifier_maps_new_signal_open() -> None:
     result = classifier.classify(_raw("x"), _context())
     assert result.parsed_signal.action is SignalAction.OPEN
     assert "classifier=ai" in result.debug_notes
+    assert "ai_route_provider=groq" in result.debug_notes
 
 
 def test_ai_classifier_maps_cancel() -> None:
@@ -161,3 +162,47 @@ def test_ai_classifier_constructible_for_channel_agent_contract() -> None:
         gateway_client=_client(_result_payload("NEW_SIGNAL", "open")),
     )
     assert classifier is not None
+
+
+def test_ai_classifier_uses_gemini_route_for_caption_with_image() -> None:
+    raw = _raw("caption signal")
+    raw = raw.model_copy(
+        update={
+            "raw_payload": {
+                "has_media": True,
+                "caption_present": True,
+                "image_data_urls": [
+                    {
+                        "mime_type": "image/jpeg",
+                        "data_url": "data:image/jpeg;base64,ZmFrZQ==",
+                    }
+                ],
+            }
+        }
+    )
+    classifier = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(_result_payload("NEW_SIGNAL", "open")),
+    )
+    result = classifier.classify(raw, _context())
+    assert "ai_route_provider=gemini" in result.debug_notes
+    assert "ai_route_multimodal=True" in result.debug_notes
+
+
+def test_ai_classifier_repairs_fields_from_following_messages() -> None:
+    payload = _result_payload("NEW_SIGNAL", "open")
+    payload["stop_loss"] = None
+    payload["take_profits"] = []
+    classifier = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(payload),
+    )
+    first = _raw("BTCUSDT LONG Entry: 68000 - 68200")
+    second = _raw("Targets: 69000 / 70000 / 71500").model_copy(update={"message_id": 2})
+    third = _raw("Stoploss: 67400").model_copy(update={"message_id": 3})
+    context = _context()
+    context.seed_message_catalog([first, second, third])
+    context.add_recent_message(first)
+    result = classifier.classify(first, context)
+    assert [str(item) for item in result.parsed_signal.take_profits] == ["69000", "70000", "71500"]
+    assert str(result.parsed_signal.stop_loss) == "67400"

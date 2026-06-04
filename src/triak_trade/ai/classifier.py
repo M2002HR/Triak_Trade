@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 from triak_trade.agents.classifier import (
@@ -31,33 +32,8 @@ class AIMessageClassifier(MessageClassifier):
         self.validator = ParsedSignalValidator()
 
     def classify(self, message: RawTelegramMessage, context: ChannelContext) -> ClassifiedMessage:
-        ai_context = AIMessageContext(
-            channel_id=message.channel_id,
-            channel_username=message.channel_username,
-            message_id=message.message_id,
-            message_text=message.text,
-            message_date=message.date,
-            recent_messages=[
-                {
-                    "message_id": m.message_id,
-                    "text": m.text,
-                    "date": m.date.isoformat(),
-                    "reply_to": m.reply_to_msg_id,
-                }
-                for m in context.recent_messages
-            ],
-            active_signals=[
-                {
-                    "signal_id": signal.signal_id,
-                    "status": signal.status.value,
-                    "symbol": signal.current_signal.symbol if signal.current_signal else None,
-                    "updated_at": signal.updated_at.isoformat(),
-                }
-                for signal in context.active_signals.values()
-            ],
-            parser_version="ai-v1",
-            notes=["ai-classifier"],
-        )
+        ai_context = self._build_context(message, context)
+        route = self.gateway_client.plan_for_context(ai_context)
 
         try:
             result = self.gateway_client.classify_message(ai_context)
@@ -70,7 +46,10 @@ class AIMessageClassifier(MessageClassifier):
                 return classified
             return self._safe_unknown(message, f"ai-failed:{exc.__class__.__name__}")
 
-        parsed = self._result_to_parsed_signal(result, message)
+        parsed = self._repair_with_context(
+            self._result_to_parsed_signal(result, message),
+            ai_context,
+        )
         valid, errors = self.validator.validate_for_proposal(
             parsed,
             max_leverage=self.settings.MAX_LEVERAGE,
@@ -103,6 +82,11 @@ class AIMessageClassifier(MessageClassifier):
             debug_notes=[
                 "classifier=ai",
                 f"ai_gateway_path={self.gateway_client.classify_path}",
+                f"ai_route_provider={route.provider}",
+                f"ai_route_model={route.model}",
+                f"ai_route_multimodal={route.multimodal}",
+                f"reply_chain_count={len(ai_context.reply_chain_messages)}",
+                f"following_message_count={len(ai_context.following_messages)}",
                 f"classification={result.classification}",
                 f"confidence={result.confidence}",
                 f"validation_ok={valid}",
@@ -168,6 +152,173 @@ class AIMessageClassifier(MessageClassifier):
             confidence=Decimal("0.10"),
             debug_notes=["classifier=ai", note],
         )
+
+    def _repair_with_context(
+        self,
+        parsed: ParsedSignal,
+        context: AIMessageContext,
+    ) -> ParsedSignal:
+        text_blocks = [
+            block
+            for block in [
+                context.message_text,
+                *[item.get("text") for item in context.reply_chain_messages],
+                *[item.get("text") for item in context.following_messages],
+            ]
+            if isinstance(block, str) and block.strip()
+        ]
+
+        extracted_take_profits = self._extract_take_profits(text_blocks)
+        extracted_stop_loss = self._extract_stop_loss(text_blocks)
+        extracted_leverage = self._extract_leverage(text_blocks)
+
+        take_profits = parsed.take_profits
+        if len(extracted_take_profits) > len(take_profits):
+            take_profits = extracted_take_profits
+
+        stop_loss = parsed.stop_loss
+        if stop_loss is None and extracted_stop_loss is not None:
+            stop_loss = extracted_stop_loss
+
+        leverage = parsed.leverage
+        if leverage is None and extracted_leverage is not None:
+            leverage = extracted_leverage
+
+        if (
+            take_profits == parsed.take_profits
+            and stop_loss == parsed.stop_loss
+            and leverage == parsed.leverage
+        ):
+            return parsed
+
+        return parsed.model_copy(
+            update={
+                "take_profits": take_profits,
+                "stop_loss": stop_loss,
+                "leverage": leverage,
+            }
+        )
+
+    @staticmethod
+    def _extract_take_profits(text_blocks: list[str]) -> list[Decimal]:
+        numbers: list[str] = []
+        for text in text_blocks:
+            lowered = text.lower()
+            if not any(keyword in lowered for keyword in ("tp", "target", "targets")):
+                continue
+            matches = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", " "))
+            numbers.extend(matches)
+        deduped = list(dict.fromkeys(numbers))
+        return [Decimal(item) for item in deduped]
+
+    @staticmethod
+    def _extract_stop_loss(text_blocks: list[str]) -> Decimal | None:
+        for text in text_blocks:
+            lowered = text.lower()
+            if not any(keyword in lowered for keyword in ("sl", "stop", "stoploss")):
+                continue
+            matches = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", " "))
+            if matches:
+                return Decimal(matches[-1])
+        return None
+
+    @staticmethod
+    def _extract_leverage(text_blocks: list[str]) -> int | None:
+        for text in text_blocks:
+            lowered = text.lower()
+            if "lev" not in lowered and "x" not in lowered:
+                continue
+            match = re.search(r"(\d{1,3})\s*x", lowered) or re.search(
+                r"(?:lev|leverage)\D*(\d{1,3})",
+                lowered,
+            )
+            if match:
+                return int(match.group(1))
+        return None
+
+    def _build_context(
+        self,
+        message: RawTelegramMessage,
+        context: ChannelContext,
+    ) -> AIMessageContext:
+        reply_chain = [
+            self._serialize_message_context(item)
+            for item in context.get_reply_chain(
+                message,
+                max_depth=self.settings.AI_CLASSIFIER_FORWARD_CONTEXT_LIMIT,
+            )
+        ]
+        following_messages = [
+            self._serialize_message_context(item)
+            for item in context.get_following_messages(
+                message,
+                limit=self.settings.AI_CLASSIFIER_FORWARD_CONTEXT_LIMIT,
+            )
+        ]
+        recent_messages = [
+            self._serialize_message_context(item)
+            for item in context.recent_messages
+        ]
+        images = self._extract_images(message)
+        raw_payload = message.raw_payload
+        return AIMessageContext(
+            channel_id=message.channel_id,
+            channel_username=message.channel_username,
+            message_id=message.message_id,
+            message_text=message.text,
+            message_date=message.date,
+            message_has_media=bool(raw_payload.get("has_media")),
+            message_is_caption=bool(raw_payload.get("caption_present")),
+            message_images=images,
+            reply_chain_messages=reply_chain,
+            following_messages=following_messages,
+            recent_messages=recent_messages,
+            active_signals=[
+                {
+                    "signal_id": signal.signal_id,
+                    "status": signal.status.value,
+                    "symbol": signal.current_signal.symbol if signal.current_signal else None,
+                    "updated_at": signal.updated_at.isoformat(),
+                    "related_message_ids": list(signal.related_message_ids),
+                }
+                for signal in context.active_signals.values()
+            ],
+            parser_version="ai-v2",
+            notes=["ai-classifier", "reply-aware", "forward-context-aware"],
+        )
+
+    @staticmethod
+    def _serialize_message_context(message: RawTelegramMessage) -> dict[str, object]:
+        payload = message.raw_payload
+        return {
+            "message_id": message.message_id,
+            "text": message.text,
+            "date": message.date.isoformat(),
+            "reply_to": message.reply_to_msg_id,
+            "has_media": bool(payload.get("has_media")),
+            "caption_present": bool(payload.get("caption_present")),
+            "grouped_id": payload.get("grouped_id"),
+        }
+
+    @staticmethod
+    def _extract_images(message: RawTelegramMessage) -> list[dict[str, object]]:
+        raw_images = message.raw_payload.get("image_data_urls")
+        if not isinstance(raw_images, list):
+            return []
+        images: list[dict[str, object]] = []
+        for item in raw_images:
+            if not isinstance(item, dict):
+                continue
+            data_url = item.get("data_url")
+            mime_type = item.get("mime_type")
+            if isinstance(data_url, str) and data_url.startswith("data:image/"):
+                images.append(
+                    {
+                        "mime_type": mime_type if isinstance(mime_type, str) else "image/jpeg",
+                        "data_url": data_url,
+                    }
+                )
+        return images
 
     @staticmethod
     def _map_action(result: AIClassificationResult) -> SignalAction:

@@ -22,4 +22,7 @@ def test_prompt_contract_contains_required_rules() -> None:
     assert "Do not invent missing SL/TP/entry values" in prompt
     assert "profit reports" in prompt
     assert "AMBIGUOUS" in prompt
+    assert "reply-chain context" in prompt
+    assert "next 3 following messages" in prompt
+    assert "includes image context" in prompt
     assert "Tofan_Trade" in prompt

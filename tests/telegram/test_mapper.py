@@ -50,6 +50,10 @@ def test_mapper_handles_caption_and_empty_text() -> None:
         text=None,
         message=None,
         caption="pic caption",
+        photo=object(),
+        document=None,
+        media=object(),
+        grouped_id=999,
         date=datetime.now(timezone.utc),
         edit_date=None,
         reply_to=None,
@@ -57,6 +61,9 @@ def test_mapper_handles_caption_and_empty_text() -> None:
     )
     raw = telethon_message_to_raw(msg)
     assert raw.text == "pic caption"
+    assert raw.raw_payload["has_media"] is True
+    assert raw.raw_payload["caption_present"] is True
+    assert raw.raw_payload["grouped_id"] == 999
 
     msg2 = SimpleNamespace(
         id=4,
@@ -64,6 +71,10 @@ def test_mapper_handles_caption_and_empty_text() -> None:
         text=None,
         message=None,
         caption=None,
+        photo=None,
+        document=None,
+        media=None,
+        grouped_id=None,
         date=datetime.now(timezone.utc),
         edit_date=None,
         reply_to=None,

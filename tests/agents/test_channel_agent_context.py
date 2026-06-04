@@ -70,3 +70,55 @@ def test_context_reply_mapping_and_update_window() -> None:
 
     assert ctx.is_within_update_window(state, now + timedelta(hours=24)) is True
     assert ctx.is_within_update_window(state, now + timedelta(hours=49)) is False
+
+
+def test_context_reply_chain_and_following_messages() -> None:
+    now = datetime.now(timezone.utc)
+    ctx = ChannelContext(channel_id="c1", max_message_limit=10, max_update_window_hours=48)
+    messages = [
+        RawTelegramMessage(
+            channel_id="c1",
+            channel_username=None,
+            message_id=1,
+            text="BTCUSDT LONG",
+            date=now,
+            edited_at=None,
+            reply_to_msg_id=None,
+        ),
+        RawTelegramMessage(
+            channel_id="c1",
+            channel_username=None,
+            message_id=2,
+            text="TP1 69000",
+            date=now,
+            edited_at=None,
+            reply_to_msg_id=1,
+        ),
+        RawTelegramMessage(
+            channel_id="c1",
+            channel_username=None,
+            message_id=3,
+            text="SL 67400",
+            date=now,
+            edited_at=None,
+            reply_to_msg_id=2,
+        ),
+        RawTelegramMessage(
+            channel_id="c1",
+            channel_username=None,
+            message_id=4,
+            text="noise",
+            date=now,
+            edited_at=None,
+            reply_to_msg_id=None,
+        ),
+    ]
+    ctx.seed_message_catalog(messages)
+    for message in messages:
+        ctx.add_recent_message(message)
+
+    reply_chain = ctx.get_reply_chain(messages[2], max_depth=3)
+    assert [item.message_id for item in reply_chain] == [2, 1]
+
+    following = ctx.get_following_messages(messages[0], limit=3)
+    assert [item.message_id for item in following] == [2, 3, 4]
