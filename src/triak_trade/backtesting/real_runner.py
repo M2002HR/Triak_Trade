@@ -115,8 +115,8 @@ class RealBacktestProgressEvent(BaseModel):
     summary: str
     current_message_id: int | None = None
     counts: dict[str, int] = Field(default_factory=dict)
-    live_metrics: dict[str, str] = Field(default_factory=dict)
-    live_signals: list[dict[str, Any]] = Field(default_factory=list)
+    live_metrics: dict[str, str] | None = None
+    live_signals: list[dict[str, Any]] | None = None
     trace: RealBacktestMessageTrace | None = None
 
 
@@ -2234,8 +2234,8 @@ class RealBacktestRunner:
                 status=status,
                 summary=summary,
                 counts=counts or {},
-                live_metrics=live_metrics or {},
-                live_signals=live_signals or [],
+                live_metrics=live_metrics,
+                live_signals=live_signals,
             )
         )
 
@@ -2261,8 +2261,8 @@ class RealBacktestRunner:
                 summary=summary,
                 current_message_id=trace.message_id,
                 counts=counts,
-                live_metrics=live_metrics or {},
-                live_signals=live_signals or [],
+                live_metrics=live_metrics,
+                live_signals=live_signals,
                 trace=trace.model_copy(deep=True),
             )
         )

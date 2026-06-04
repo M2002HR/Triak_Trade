@@ -372,19 +372,21 @@ class DashboardBacktestCoordinator:
         for key, value in event.counts.items():
             if hasattr(run, key):
                 setattr(run, key, value)
-        for key in ("live_open_positions", "live_closed_trades", "live_wins", "live_losses"):
-            if key in event.live_metrics:
-                setattr(run, key, int(event.live_metrics[key]))
-        for key in (
-            "live_realized_pnl",
-            "live_unrealized_pnl",
-            "live_total_pnl",
-            "live_realized_balance",
-            "live_current_balance",
-        ):
-            if key in event.live_metrics:
-                setattr(run, key, event.live_metrics[key])
-        run.signals = list(event.live_signals)
+        if event.live_metrics is not None:
+            for key in ("live_open_positions", "live_closed_trades", "live_wins", "live_losses"):
+                if key in event.live_metrics:
+                    setattr(run, key, int(event.live_metrics[key]))
+            for key in (
+                "live_realized_pnl",
+                "live_unrealized_pnl",
+                "live_total_pnl",
+                "live_realized_balance",
+                "live_current_balance",
+            ):
+                if key in event.live_metrics:
+                    setattr(run, key, event.live_metrics[key])
+        if event.live_signals is not None:
+            run.signals = list(event.live_signals)
         run.events.append(
             DashboardBacktestEvent(
                 at=event.timestamp,

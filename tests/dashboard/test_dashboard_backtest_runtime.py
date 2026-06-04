@@ -364,6 +364,119 @@ def test_dashboard_backtest_coordinator_notifies_on_updates(tmp_path: Path) -> N
     assert any(item["run"]["run_id"] == run.run_id for item in notifications)  # type: ignore[index]
 
 
+def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_snapshot(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        store=store,
+        runner_factory=FakeRunner,
+    )
+    run = store.create(
+        DashboardBacktestRun(
+            run_id="run_preserve_signals",
+            channel_input="https://t.me/Tofan_Trade",
+            channel_resolved="https://t.me/Tofan_Trade",
+            from_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            to_date=datetime(2026, 6, 5, tzinfo=timezone.utc),
+            interval="1m",
+            max_messages=100,
+            initial_balance=Decimal("100"),
+            risk_per_trade_pct=Decimal("3"),
+            use_ai=False,
+            send_log_channel=False,
+            log_per_message=False,
+            status="running",
+            created_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        )
+    )
+    now = datetime(2026, 6, 4, tzinfo=timezone.utc)
+    trace = RealBacktestMessageTrace(
+        message_id=77,
+        channel_id=run.channel_resolved,
+        channel_username="Tofan_Trade",
+        message_link="https://t.me/Tofan_Trade/77",
+        message_date=now,
+        full_text="BTCUSDT LONG",
+        preview_text="BTCUSDT LONG",
+        classification="new_signal",
+        parsed_action="open",
+        symbol="BTCUSDT",
+        side="long",
+        confidence="0.90",
+        signal_id="sig_77",
+        final_status="simulation_tracking",
+        result_summary="Signal is being simulated.",
+        current_stage="simulated",
+        last_updated_at=now,
+        stages=[
+            RealBacktestMessageStage(
+                key="received",
+                label="Message Received",
+                status="completed",
+                detail="Message pulled from Telegram history.",
+                started_at=now,
+                finished_at=now,
+            )
+        ],
+    )
+    coordinator._handle_progress(
+        run.run_id,
+        RealBacktestProgressEvent(
+            event_type="message",
+            timestamp=now,
+            phase="simulate",
+            status="running",
+            summary="Live simulation state updated for message 77.",
+            current_message_id=77,
+            counts={"total_messages": 1},
+            live_metrics={"live_open_positions": "1"},
+            live_signals=[
+                {
+                    "signal_id": "sig_77",
+                    "symbol": "BTCUSDT",
+                    "side": "long",
+                    "status": "open",
+                    "status_group": "active",
+                    "entry_time": now.isoformat(),
+                    "entry_time_tehran": "2026-06-04T03:30:00+03:30",
+                    "exit_time": None,
+                    "exit_time_tehran": None,
+                    "entry_price": "68010",
+                    "stop_loss": "67400",
+                    "take_profits": ["69000", "70000"],
+                    "open_quantity": "1",
+                    "mark_price": "68100",
+                    "realized_pnl": "0",
+                    "unrealized_pnl": "2.5",
+                    "total_pnl": "2.5",
+                    "targets_hit": 0,
+                    "lifecycle": ["created"],
+                }
+            ],
+            trace=trace,
+        ),
+    )
+    coordinator._handle_progress(
+        run.run_id,
+        RealBacktestProgressEvent(
+            event_type="run",
+            timestamp=now,
+            phase="fetch_market_data",
+            status="running",
+            summary="Fetching market candles for 1 symbols.",
+            counts={"total_messages": 1},
+        ),
+    )
+
+    loaded = store.read(run.run_id)
+    assert loaded is not None
+    assert loaded.signals
+    assert loaded.signals[0]["signal_id"] == "sig_77"
+
+
 def test_dashboard_backtest_coordinator_recovers_incomplete_runs_on_startup(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = DashboardBacktestStore(settings)
