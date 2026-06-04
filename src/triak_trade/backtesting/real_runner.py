@@ -265,6 +265,7 @@ class RealBacktestRunner:
     ) -> RealBacktestResult:
         readiness = self.readiness()
         from_date, to_date = request.resolve_range()
+        warnings: list[str] = []
         self._emit_run_progress(
             progress_callback,
             phase="starting",
@@ -288,9 +289,14 @@ class RealBacktestRunner:
             summary="Fetching Telegram message history.",
         )
         if request.send_log_channel:
-            await self._send_log(
+            await self._try_send_log(
                 f"Real backtest started\nchannel={request.channel}\ninterval={request.interval}\n"
-                f"range={from_date.isoformat()} -> {to_date.isoformat()}"
+                f"range={from_date.isoformat()} -> {to_date.isoformat()}",
+                warnings=warnings,
+                warning_message=(
+                    "Telegram log channel send failed at backtest start; "
+                    "continuing without Telegram run log delivery."
+                ),
             )
 
         try:
@@ -354,6 +360,7 @@ class RealBacktestRunner:
             messages=messages,
             progress_callback=progress_callback,
             counts=counts,
+            warnings=warnings,
         )
         open_events = [event for event in events if event.action is SignalAction.OPEN]
         valid_open_events = [
@@ -384,11 +391,11 @@ class RealBacktestRunner:
             any("ai-fallback=regex" in note for event in events for note in event.debug_notes)
             or isinstance(selection.classifier, RegexMessageClassifier)
         )
-        warnings: list[str] = []
         if selection.warning:
-            warnings.append(selection.warning)
+            self._append_warning(warnings, selection.warning)
         if request.use_ai and not ai_used and regex_fallback_used and not selection.warning:
-            warnings.append(
+            self._append_warning(
+                warnings,
                 "AI gateway unavailable or failed during classification; regex fallback used."
             )
         self._emit_run_progress(
@@ -403,11 +410,16 @@ class RealBacktestRunner:
         )
 
         if request.send_log_channel:
-            await self._send_log(
+            await self._try_send_log(
                 "Real backtest history fetched\n"
                 f"channel={request.channel}\n"
                 f"messages={len(messages)}\n"
-                f"symbols_detected={len(symbols)}"
+                f"symbols_detected={len(symbols)}",
+                warnings=warnings,
+                warning_message=(
+                    "Telegram log channel send failed after history fetch; "
+                    "continuing without Telegram run log delivery."
+                ),
             )
 
         if not messages:
@@ -536,9 +548,14 @@ class RealBacktestRunner:
                     )
 
         if request.send_log_channel:
-            await self._send_log(
+            await self._try_send_log(
                 f"Real backtest candles fetched\nchannel={request.channel}\n"
-                f"candles={len(candles)}\nreal_market_data_used={real_market_data_used}"
+                f"candles={len(candles)}\nreal_market_data_used={real_market_data_used}",
+                warnings=warnings,
+                warning_message=(
+                    "Telegram log channel send failed after market-data fetch; "
+                    "continuing without Telegram run log delivery."
+                ),
             )
         self._emit_run_progress(
             progress_callback,
@@ -638,7 +655,7 @@ class RealBacktestRunner:
                 counts=counts,
                 trace=trace,
             )
-            await self._maybe_send_message_log(request, trace)
+            await self._maybe_send_message_log(request, trace, warnings)
         result = RealBacktestResult(
             success=True,
             channel=request.channel,
@@ -703,11 +720,16 @@ class RealBacktestRunner:
         )
 
         if request.send_log_channel:
-            await self._send_log(
+            await self._try_send_log(
                 f"Real backtest complete\nchannel={request.channel}\n"
                 f"messages={result.total_messages}\nvalid_signals={result.valid_signals}\n"
                 f"trades={result.trades_simulated}\npnl={result.total_pnl}\n"
-                f"report={result.markdown_report_path}"
+                f"report={result.markdown_report_path}",
+                warnings=result.warnings,
+                warning_message=(
+                    "Telegram log channel send failed at backtest completion; "
+                    "continuing without Telegram run log delivery."
+                ),
             )
         return result
 
@@ -764,17 +786,44 @@ class RealBacktestRunner:
             return
         await self.log_client.send_text(text, real=True)
 
+    async def _try_send_log(
+        self,
+        text: str,
+        *,
+        warnings: list[str] | None,
+        warning_message: str,
+    ) -> bool:
+        try:
+            await self._send_log(text)
+        except Exception as exc:
+            if warnings is not None:
+                self._append_warning(warnings, f"{warning_message} ({type(exc).__name__})")
+            return False
+        return True
+
     async def _maybe_send_message_log(
         self,
         request: RealBacktestRunRequest,
         trace: RealBacktestMessageTrace,
+        warnings: list[str],
     ) -> None:
         if not (request.send_log_channel and request.log_per_message):
             return
-        try:
-            await self._send_log(self._format_trace_for_telegram(trace))
-        except Exception:
+        sent = await self._try_send_log(
+            self._format_trace_for_telegram(trace),
+            warnings=warnings,
+            warning_message=(
+                "Telegram per-message trace send failed; "
+                "continuing without per-message Telegram delivery."
+            ),
+        )
+        if not sent:
             trace.debug_notes.append("telegram_message_log_failed")
+
+    @staticmethod
+    def _append_warning(warnings: list[str], message: str) -> None:
+        if message not in warnings:
+            warnings.append(message)
 
     def _write_failure(
         self,
@@ -859,6 +908,7 @@ class RealBacktestRunner:
         messages: list[RawTelegramMessage],
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
+        warnings: list[str],
     ) -> tuple[
         list[BacktestEvent],
         dict[int, RealBacktestMessageTrace],
@@ -1005,24 +1055,24 @@ class RealBacktestRunner:
                         status="completed",
                         detail=trace.result_summary,
                     )
-                    await self._maybe_send_message_log(request, trace)
+                    await self._maybe_send_message_log(request, trace, warnings)
             elif parsed.action is SignalAction.IGNORE:
                 counts["ignored_messages"] += 1
                 trace.final_status = "ignored"
                 trace.result_summary = "Message was ignored by the parser."
                 self._mark_non_signal_trace(trace, "Ignored message; no trading path.")
-                await self._maybe_send_message_log(request, trace)
+                await self._maybe_send_message_log(request, trace, warnings)
             elif parsed.action is SignalAction.UNKNOWN:
                 counts["ambiguous_messages"] += 1
                 trace.final_status = "ambiguous"
                 trace.result_summary = "Message remained ambiguous after deterministic parsing."
                 self._mark_non_signal_trace(trace, "Ambiguous message; admin/AI review needed.")
-                await self._maybe_send_message_log(request, trace)
+                await self._maybe_send_message_log(request, trace, warnings)
             else:
                 trace.final_status = "follow_up"
                 trace.result_summary = f"Detected follow-up action: {parsed.action.value}"
                 self._mark_non_signal_trace(trace, trace.result_summary)
-                await self._maybe_send_message_log(request, trace)
+                await self._maybe_send_message_log(request, trace, warnings)
 
             counts["classified_messages"] += 1
             self._emit_message_progress(

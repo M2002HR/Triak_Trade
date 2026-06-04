@@ -9,6 +9,7 @@ from triak_trade.backtesting.report_store import BacktestReportStore
 from triak_trade.config.settings import Settings
 from triak_trade.domain.enums import CandleSource
 from triak_trade.domain.models import Candle, RawTelegramMessage
+from triak_trade.observability.errors import TelegramLogChannelError
 from triak_trade.telegram.client import FakeTelegramClient
 
 
@@ -38,6 +39,15 @@ class FakeLogClient:
     async def send_text(self, text: str, *, real: bool = False) -> object:
         self.texts.append(text)
         return {"sent": True, "real": real}
+
+
+class FailingLogClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def send_text(self, text: str, *, real: bool = False) -> object:
+        self.calls += 1
+        raise TelegramLogChannelError("simulated log channel failure")
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -265,6 +275,46 @@ def test_real_backtest_runner_sends_per_message_log_trace(tmp_path: Path) -> Non
     assert result.success is True
     assert any("Backtest Message Trace" in text for text in log_client.texts)
     assert any("Message Link" in text for text in log_client.texts)
+
+
+def test_real_backtest_runner_survives_log_channel_failures(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)})
+    log_client = FailingLogClient()
+    runner = RealBacktestRunner(
+        settings=_settings(
+            tmp_path,
+            AI_GATEWAY_ENABLED=False,
+            REAL_BACKTEST_SEND_TO_LOG_CHANNEL=True,
+        ),
+        telegram_client=telegram,
+        market_data_provider=provider,
+        log_client=log_client,
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        )
+    )
+
+    assert result.success is True
+    assert log_client.calls > 0
+    assert any("Telegram log channel send failed" in warning for warning in result.warnings)
+    assert not any("simulated log channel failure" == error for error in result.errors)
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:
