@@ -502,6 +502,45 @@ def test_real_backtest_runner_anchors_market_data_to_start_message_time(
     assert "market_data_start_tehran=2026-06-01T20:13:56+03:30" in debug_notes
 
 
+def test_real_backtest_runner_records_stage_durations_in_trace(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=FakeTelegramClient(history_by_channel={}),
+        market_data_provider=FakeMarketDataProvider(),
+    )
+    trace = runner._make_trace(_message(now, "BTCUSDT LONG MARKET SL: 67400 TP: 69000"))
+    runner._set_trace_stage(
+        trace,
+        "received",
+        status="completed",
+        detail="Message pulled from Telegram history.",
+    )
+    runner._set_trace_stage(
+        trace,
+        "preprocess",
+        status="active",
+        detail="Preparing message payload for classification.",
+    )
+    runner._set_trace_stage(
+        trace,
+        "preprocess",
+        status="completed",
+        detail="Message payload prepared for classification.",
+    )
+
+    preprocess = next(stage for stage in trace.stages if stage.key == "preprocess")
+    assert preprocess.started_at is not None
+    assert preprocess.finished_at is not None
+    assert preprocess.duration_ms is not None
+    assert trace.processing_duration_ms is not None
+    formatted = runner._format_trace_for_telegram(trace)
+    assert "Processing Duration" in formatted
+    assert "duration=" in formatted
+
+
 def test_real_backtest_runner_skips_empty_messages_without_classifying_them(
     tmp_path: Path,
 ) -> None:

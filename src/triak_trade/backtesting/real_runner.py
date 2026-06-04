@@ -60,6 +60,7 @@ class RealBacktestMessageStage(BaseModel):
     detail: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    duration_ms: int | None = None
 
 
 class RealBacktestMessageTrace(BaseModel):
@@ -80,6 +81,7 @@ class RealBacktestMessageTrace(BaseModel):
     result_summary: str | None = None
     current_stage: str = "received"
     last_updated_at: datetime
+    processing_duration_ms: int | None = None
     debug_notes: list[str] = Field(default_factory=list)
     stages: list[RealBacktestMessageStage] = Field(default_factory=list)
 
@@ -87,6 +89,22 @@ class RealBacktestMessageTrace(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         self._stage_index = {stage.key: index for index, stage in enumerate(self.stages)}
+
+    def refresh_processing_duration(self, now: datetime) -> None:
+        started_at = next((stage.started_at for stage in self.stages if stage.started_at), None)
+        if started_at is None:
+            self.processing_duration_ms = None
+            return
+        active_stage = next((stage for stage in self.stages if stage.status == "active"), None)
+        if active_stage is not None:
+            end_at = now
+        else:
+            finished_stages = [stage.finished_at for stage in self.stages if stage.finished_at]
+            end_at = max(finished_stages) if finished_stages else now
+        self.processing_duration_ms = max(
+            0,
+            int((end_at - started_at).total_seconds() * 1000),
+        )
 
 
 class RealBacktestProgressEvent(BaseModel):
@@ -1249,12 +1267,6 @@ class RealBacktestRunner:
         context.seed_message_catalog(sorted_messages)
 
         for message in sorted_messages:
-            message = await self._prepare_message_for_classification(
-                message=message,
-                progress_callback=progress_callback,
-                counts=counts,
-                warnings=warnings,
-            )
             trace = self._make_trace(message)
             traces_by_message_id[message.message_id] = trace
             self._set_trace_stage(
@@ -1263,6 +1275,27 @@ class RealBacktestRunner:
                 status="completed",
                 detail="Message pulled from Telegram history.",
             )
+            self._set_trace_stage(
+                trace,
+                "preprocess",
+                status="active",
+                detail="Preparing message payload for classification.",
+            )
+            message = await self._prepare_message_for_classification(
+                message=message,
+                trace=trace,
+                progress_callback=progress_callback,
+                counts=counts,
+                warnings=warnings,
+            )
+            preprocess_stage = trace.stages[trace._stage_index["preprocess"]]
+            if preprocess_stage.status != "completed":
+                self._set_trace_stage(
+                    trace,
+                    "preprocess",
+                    status="completed",
+                    detail="Message payload prepared for classification.",
+                )
             self._set_trace_stage(
                 trace,
                 "classified",
@@ -2023,6 +2056,7 @@ class RealBacktestRunner:
         self,
         *,
         message: RawTelegramMessage,
+        trace: RealBacktestMessageTrace,
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         warnings: list[str],
@@ -2044,12 +2078,30 @@ class RealBacktestRunner:
             ),
             counts=counts,
         )
+        self._set_trace_stage(
+            trace,
+            "preprocess",
+            status="active",
+            detail=(
+                f"On-demand media download for caption message {message.message_id} "
+                "started."
+            ),
+        )
         try:
             hydrated = await self.telegram_client.ensure_media_payload(message)
         except Exception as exc:
             self._append_warning(
                 warnings,
                 (
+                    f"On-demand media download failed for message {message.message_id}; "
+                    f"continuing without image context ({type(exc).__name__})."
+                ),
+            )
+            self._set_trace_stage(
+                trace,
+                "preprocess",
+                status="completed",
+                detail=(
                     f"On-demand media download failed for message {message.message_id}; "
                     f"continuing without image context ({type(exc).__name__})."
                 ),
@@ -2067,11 +2119,27 @@ class RealBacktestRunner:
                 ),
                 counts=counts,
             )
+            self._set_trace_stage(
+                trace,
+                "preprocess",
+                status="completed",
+                detail=(
+                    f"On-demand media download completed for message {message.message_id}."
+                ),
+            )
+        else:
+            self._set_trace_stage(
+                trace,
+                "preprocess",
+                status="completed",
+                detail=f"Message {message.message_id} was ready without media download.",
+            )
         return hydrated
 
     def _make_trace(self, message: RawTelegramMessage) -> RealBacktestMessageTrace:
         stages = [
             RealBacktestMessageStage(key="received", label="Message Received"),
+            RealBacktestMessageStage(key="preprocess", label="Preprocess"),
             RealBacktestMessageStage(key="classified", label="Classification"),
             RealBacktestMessageStage(key="validated", label="Signal Validation"),
             RealBacktestMessageStage(key="market_data", label="Market Data"),
@@ -2108,11 +2176,21 @@ class RealBacktestRunner:
             if stage.started_at is None:
                 stage.started_at = now
             stage.finished_at = now
+            stage.duration_ms = max(
+                0,
+                int((stage.finished_at - stage.started_at).total_seconds() * 1000),
+            )
+        elif status == "active" and stage.started_at is not None:
+            stage.duration_ms = max(
+                0,
+                int((now - stage.started_at).total_seconds() * 1000),
+            )
         stage.status = status
         stage.detail = detail
         if advance_current:
             trace.current_stage = key
         trace.last_updated_at = now
+        trace.refresh_processing_duration(now)
 
     def _mark_non_signal_trace(self, trace: RealBacktestMessageTrace, detail: str) -> None:
         self._set_trace_stage(
@@ -2244,6 +2322,10 @@ class RealBacktestRunner:
             f"🪙 <b>Symbol</b>: {self._tg(trace.symbol or 'none')}",
             f"📈 <b>Confidence</b>: {self._tg(trace.confidence or 'n/a')}",
             f"🏁 <b>Final Status</b>: {self._tg(trace.final_status)}",
+            (
+                "⏱ <b>Processing Duration</b>: "
+                f"{self._tg(self._format_duration(trace.processing_duration_ms))}"
+            ),
             "",
             "🧱 <b>Stages</b>:",
         ]
@@ -2259,6 +2341,9 @@ class RealBacktestRunner:
                 f"{stage_emoji} <b>{self._tg(stage.label)}</b>: "
                 f"{self._tg(stage.detail or stage.status)}"
             )
+            lines.append(
+                f"   ↳ duration={self._tg(self._format_duration(stage.duration_ms))}"
+            )
         if trace.preview_text:
             lines.extend(["", f"📝 <b>Preview</b>: {self._tg(trace.preview_text)}"])
         if trace.result_summary:
@@ -2271,3 +2356,12 @@ class RealBacktestRunner:
     @staticmethod
     def _tg(value: object) -> str:
         return escape(str(value), quote=False)
+
+    @staticmethod
+    def _format_duration(duration_ms: int | None) -> str:
+        if duration_ms is None:
+            return "n/a"
+        if duration_ms < 1000:
+            return f"{duration_ms} ms"
+        seconds = duration_ms / 1000
+        return f"{seconds:.2f} s"

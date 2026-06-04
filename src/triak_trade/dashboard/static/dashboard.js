@@ -568,6 +568,10 @@ document.documentElement.dataset.dashboardReady = "true";
               <small>${escapeHtml(stage.status)}</small>
             </div>
             <p>${escapeHtml(stage.detail || "No detail yet.")}</p>
+            <div class="stage-node-foot">
+              <span>${escapeHtml(formatDuration(stage.duration_ms))}</span>
+              <span>${stage.started_at ? escapeHtml(formatDate(stage.started_at)) : "pending"}</span>
+            </div>
           </article>
         `;
       })
@@ -576,6 +580,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.modalSummary.innerHTML = `
       <div class="summary-row"><strong>Final Status</strong><span>${escapeHtml(trace.final_status)}</span></div>
       <div class="summary-row"><strong>Current Stage</strong><span>${escapeHtml(trace.current_stage)}</span></div>
+      <div class="summary-row"><strong>Processing Duration</strong><span>${escapeHtml(formatDuration(trace.processing_duration_ms))}</span></div>
       <div class="summary-row"><strong>Result</strong><span>${escapeHtml(trace.result_summary || "No final summary yet.")}</span></div>
       ${trace.signal_id ? `<div class="summary-row"><strong>Signal ID</strong><span>${escapeHtml(trace.signal_id)}</span></div>` : ""}
     `;
@@ -729,6 +734,20 @@ document.documentElement.dataset.dashboardReady = "true";
         <span>${escapeHtml(String(value))}</span>
       </div>
     `;
+  }
+
+  function formatDuration(durationMs) {
+    if (durationMs === null || durationMs === undefined) {
+      return "n/a";
+    }
+    const value = Number(durationMs);
+    if (!Number.isFinite(value)) {
+      return "n/a";
+    }
+    if (value < 1000) {
+      return `${value} ms`;
+    }
+    return `${(value / 1000).toFixed(2)} s`;
   }
 
   function buildLifecycleMarkup(signal) {
