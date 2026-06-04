@@ -96,16 +96,25 @@ class AjilGatewayClient:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        if self.default_model.strip():
-            payload["model"] = self.default_model.strip()
         if self.provider_priority:
-            payload["x_router"] = {
+            router_options: dict[str, Any] = {
                 "providers": list(self.provider_priority),
                 "strategy": "fallback_chain",
                 "mode": "quality_first",
                 "max_attempts": max(2, len(self.provider_priority) * 2),
                 "timeout_sec": max(5.0, float(self.timeout_seconds)),
             }
+            if self.default_model.strip():
+                router_options["model_preferences"] = [
+                    {
+                        "provider": self.provider_priority[0],
+                        "model": self.default_model.strip(),
+                        "priority": 0,
+                    }
+                ]
+            payload["x_router"] = router_options
+        elif self.default_model.strip():
+            payload["model"] = self.default_model.strip()
         return payload
 
     def _build_headers(self) -> dict[str, str]:
@@ -119,6 +128,13 @@ class AjilGatewayClient:
                 return AIClassificationResult.model_validate(data)
             except Exception:
                 pass
+
+            if "classification" in data:
+                try:
+                    normalized_direct = self._normalize_result_payload(data)
+                    return AIClassificationResult.model_validate(normalized_direct)
+                except Exception:
+                    pass
 
             content = self._extract_completion_content(data)
             if content is None:
@@ -247,7 +263,10 @@ class AjilGatewayClient:
             "leverage": leverage,
             "related_signal_id": payload.get("related_signal_id"),
             "relation_reason": payload.get("relation_reason"),
-            "confidence": payload.get("confidence") or self._default_confidence(classification),
+            "confidence": self._normalize_confidence(
+                payload.get("confidence"),
+                classification,
+            ),
             "reasoning_summary": str(
                 payload.get("reasoning_summary")
                 or payload.get("summary")
@@ -283,6 +302,8 @@ class AjilGatewayClient:
 
     @staticmethod
     def _normalize_action(raw: Any, classification: str) -> str:
+        if classification in {"AMBIGUOUS", "UNKNOWN"}:
+            return "unknown"
         value = str(raw or "").strip().lower()
         if value:
             return value
@@ -354,6 +375,23 @@ class AjilGatewayClient:
             return []
         value = str(raw).strip()
         return [value] if value else []
+
+    @staticmethod
+    def _normalize_confidence(raw: Any, classification: str) -> str:
+        if raw is None:
+            return AjilGatewayClient._default_confidence(classification)
+        if isinstance(raw, (int, float)):
+            return str(raw)
+        value = str(raw).strip().lower()
+        mapping = {
+            "very high": "0.95",
+            "high": "0.85",
+            "medium": "0.60",
+            "moderate": "0.60",
+            "low": "0.30",
+            "very low": "0.10",
+        }
+        return mapping.get(value, value or AjilGatewayClient._default_confidence(classification))
 
     @staticmethod
     def _default_confidence(classification: str) -> str:

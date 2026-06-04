@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import httpx
 
+from triak_trade.agents.classifier import RegexMessageClassifier
 from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
@@ -102,6 +103,18 @@ def test_ai_classifier_maps_ambiguous_to_unknown() -> None:
     assert result.parsed_signal.action is SignalAction.UNKNOWN
 
 
+def test_ai_classifier_downgrades_inconsistent_new_signal_to_unknown() -> None:
+    payload = _result_payload("NEW_SIGNAL", "ignore")
+    payload["symbol"] = None
+    payload["confidence"] = "0.10"
+    classifier = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(payload),
+    )
+    result = classifier.classify(_raw("x"), _context())
+    assert result.parsed_signal.action is SignalAction.UNKNOWN
+
+
 def test_ai_classifier_decimal_fields_are_decimal() -> None:
     classifier = AIMessageClassifier(
         settings=Settings(),
@@ -119,7 +132,11 @@ def test_ai_classifier_fallback_to_regex_on_failure() -> None:
         transport=httpx.MockTransport(lambda _: httpx.Response(500, json={"error": "x"})),
     )
     settings = Settings(AI_CLASSIFIER_USE_REGEX_FALLBACK=True)
-    classifier = AIMessageClassifier(settings=settings, gateway_client=failing)
+    classifier = AIMessageClassifier(
+        settings=settings,
+        gateway_client=failing,
+        regex_fallback=RegexMessageClassifier(),
+    )
     result = classifier.classify(_raw("cancel BTC signal"), _context())
     assert result.parsed_signal.action in {SignalAction.CANCEL, SignalAction.UNKNOWN}
     assert any("fallback" in note for note in result.debug_notes)

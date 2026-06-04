@@ -128,7 +128,7 @@ def test_gateway_client_schema_invalid(context: AIMessageContext) -> None:
         base_url="http://mocked.local",
         timeout_seconds=10,
         transport=httpx.MockTransport(
-            lambda _: httpx.Response(200, json={"classification": "NEW_SIGNAL"})
+            lambda _: httpx.Response(200, json={"classification": {"not": "valid"}})
         ),
     )
     with pytest.raises(AIGatewayResponseError):
@@ -178,6 +178,49 @@ def test_gateway_client_normalizes_alternate_ai_schema(context: AIMessageContext
     assert result.action == "open"
     assert result.symbol == "BTCUSDT"
     assert str(result.entry_low) == "68000"
+
+
+def test_gateway_client_normalizes_textual_confidence_and_nullable_fields(
+    context: AIMessageContext,
+) -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": """```json
+                    {
+                      "classification": "ADVERTISEMENT",
+                      "action": "ignore",
+                      "market": null,
+                      "symbol": null,
+                      "side": null,
+                      "entry_type": null,
+                      "entry_low": null,
+                      "entry_high": null,
+                      "stop_loss": null,
+                      "take_profits": [],
+                      "leverage": null,
+                      "related_signal_id": null,
+                      "relation_reason": null,
+                      "confidence": "high",
+                      "reasoning_summary": "promo message",
+                      "risk_notes": [],
+                      "requires_admin_confirmation": false,
+                      "raw_provider_metadata": {}
+                    }
+                    ```"""
+                }
+            }
+        ]
+    }
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+    result = client.classify_message(context)
+    assert result.classification == "ADVERTISEMENT"
+    assert str(result.confidence) == "0.85"
 
 
 @pytest.mark.skipif(

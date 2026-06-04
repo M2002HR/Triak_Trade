@@ -7,7 +7,6 @@ from decimal import Decimal
 from triak_trade.agents.classifier import (
     ClassifiedMessage,
     MessageClassifier,
-    RegexMessageClassifier,
 )
 from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.gateway_client import AIGatewayError, AjilGatewayClient
@@ -28,7 +27,7 @@ class AIMessageClassifier(MessageClassifier):
     ) -> None:
         self.settings = settings
         self.gateway_client = gateway_client
-        self.regex_fallback = regex_fallback or RegexMessageClassifier()
+        self.regex_fallback = regex_fallback
         self.validator = ParsedSignalValidator()
 
     def classify(self, message: RawTelegramMessage, context: ChannelContext) -> ClassifiedMessage:
@@ -63,7 +62,7 @@ class AIMessageClassifier(MessageClassifier):
         try:
             result = self.gateway_client.classify_message(ai_context)
         except AIGatewayError as exc:
-            if self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK:
+            if self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK and self.regex_fallback is not None:
                 classified = self.regex_fallback.classify(message, context)
                 classified.debug_notes.append("classifier=regex")
                 classified.debug_notes.append("ai-fallback=regex")
@@ -172,6 +171,10 @@ class AIMessageClassifier(MessageClassifier):
 
     @staticmethod
     def _map_action(result: AIClassificationResult) -> SignalAction:
+        action_raw = result.action.lower().strip()
+        if result.classification == "NEW_SIGNAL" and action_raw == "ignore":
+            return SignalAction.UNKNOWN
+
         by_classification = {
             "NEW_SIGNAL": SignalAction.OPEN,
             "CANCEL": SignalAction.CANCEL,
@@ -186,7 +189,6 @@ class AIMessageClassifier(MessageClassifier):
         if result.classification in by_classification:
             return by_classification[result.classification]
 
-        action_raw = result.action.lower()
         by_action = {
             "open": SignalAction.OPEN,
             "cancel": SignalAction.CANCEL,

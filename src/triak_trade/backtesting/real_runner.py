@@ -282,6 +282,14 @@ class RealBacktestRunner:
             )
 
         selection = self._select_classifier(request.use_ai)
+        if request.use_ai and not selection.ai_configured:
+            return self._write_failure(
+                channel=request.channel,
+                from_date=from_date,
+                to_date=to_date,
+                interval=request.interval,
+                errors=["AI gateway is required for this backtest run but is not enabled."],
+            )
         self._emit_run_progress(
             progress_callback,
             phase="fetch_history",
@@ -767,13 +775,38 @@ class RealBacktestRunner:
             classifier: MessageClassifier = AIMessageClassifier(
                 settings=self.settings,
                 gateway_client=client,
-                regex_fallback=RegexMessageClassifier(),
+                regex_fallback=None,
             )
             return _ClassificationSelection(
                 classifier=classifier,
                 ai_requested=True,
                 ai_configured=True,
                 warning=None,
+            )
+        if use_ai:
+            client = AjilGatewayClient(
+                base_url=self.settings.AI_GATEWAY_BASE_URL,
+                timeout_seconds=self.settings.AI_GATEWAY_TIMEOUT_SECONDS,
+                classify_path=self.settings.AI_GATEWAY_CLASSIFY_PATH,
+                auth_header_name=self.settings.AI_GATEWAY_AUTH_HEADER_NAME,
+                auth_token=self.settings.AI_GATEWAY_AUTH_TOKEN.get_secret_value(),
+                default_model=self.settings.AI_GATEWAY_DEFAULT_MODEL,
+                provider_priority=tuple(
+                    item.strip()
+                    for item in self.settings.AI_GATEWAY_PROVIDER_PRIORITY.split(",")
+                    if item.strip()
+                ),
+                trust_env=self.settings.AI_GATEWAY_TRUST_ENV,
+            )
+            return _ClassificationSelection(
+                classifier=AIMessageClassifier(
+                    settings=self.settings,
+                    gateway_client=client,
+                    regex_fallback=None,
+                ),
+                ai_requested=True,
+                ai_configured=False,
+                warning="AI gateway is required but not enabled.",
             )
         return _ClassificationSelection(
             classifier=RegexMessageClassifier(),
@@ -823,7 +856,7 @@ class RealBacktestRunner:
             ),
         )
         if not sent:
-            trace.debug_notes.append("telegram_message_log_failed")
+            return
 
     @staticmethod
     def _append_warning(warnings: list[str], message: str) -> None:

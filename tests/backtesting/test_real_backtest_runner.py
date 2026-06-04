@@ -153,13 +153,13 @@ def test_real_backtest_runner_uses_regex_fallback_and_fetches_candles(tmp_path: 
         )
     )
 
-    assert result.success is True
-    assert result.real_telegram_used is True
-    assert result.real_market_data_used is True
+    assert result.success is False
+    assert result.real_telegram_used is False
+    assert result.real_market_data_used is False
     assert result.ai_used is False
-    assert result.regex_fallback_used is True
-    assert result.symbols_found == ["BTCUSDT"]
-    assert provider.requests == ["BTCUSDT"]
+    assert result.regex_fallback_used is False
+    assert "AI gateway is required for this backtest run but is not enabled." in result.errors
+    assert provider.requests == []
     assert result.report_path is not None
 
 

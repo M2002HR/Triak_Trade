@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     RUN_AI_GATEWAY_INTEGRATION_TESTS: int = 0
     AI_CLASSIFIER_ENABLED: bool = False
     AI_CLASSIFIER_MIN_CONFIDENCE: Decimal = Decimal("0.70")
-    AI_CLASSIFIER_USE_REGEX_FALLBACK: bool = True
+    AI_CLASSIFIER_USE_REGEX_FALLBACK: bool = False
     AI_CLASSIFIER_STORE_PROMPT_TEXT: bool = False
     AI_CLASSIFIER_STORE_RESPONSE_TEXT: bool = False
     AI_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     BACKTEST_MAX_MESSAGES: int = 5000
     BACKTEST_MAX_CANDLES: int = 200000
     BACKTEST_USE_AI_CLASSIFIER: bool = False
-    BACKTEST_USE_REGEX_FALLBACK: bool = True
+    BACKTEST_USE_REGEX_FALLBACK: bool = False
     BACKTEST_DEFAULT_CHANNEL: str = "https://t.me/Tofan_Trade"
     RUN_BACKTEST_INTEGRATION_TESTS: int = 0
     REAL_BACKTEST_ENABLED: bool = False
@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     REAL_BACKTEST_MAX_CANDLES: int = 100000
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
     REAL_BACKTEST_USE_AI: bool = True
-    REAL_BACKTEST_USE_REGEX_FALLBACK: bool = True
+    REAL_BACKTEST_USE_REGEX_FALLBACK: bool = False
     REAL_BACKTEST_SEND_TO_ADMIN_BOT: bool = True
     REAL_BACKTEST_SEND_TO_LOG_CHANNEL: bool = True
     REAL_BACKTEST_LOG_PER_MESSAGE: bool = False
