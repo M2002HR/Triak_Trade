@@ -390,12 +390,14 @@ class RealBacktestRunner:
             summary="Classifying and validating channel messages one by one.",
             counts=counts,
         )
+        prefetched_candles_by_symbol: dict[str, list[Any]] = {}
         (
             events,
             traces_by_message_id,
             signal_trace_map,
             symbol_trace_map,
             counts,
+            prefetched_candles_by_symbol,
         ) = await self._build_events_with_traces(
             request=request,
             classifier=selection.classifier,
@@ -403,6 +405,7 @@ class RealBacktestRunner:
             progress_callback=progress_callback,
             counts=counts,
             warnings=warnings,
+            prefetched_candles_by_symbol=prefetched_candles_by_symbol,
         )
         open_events = [event for event in events if event.action is SignalAction.OPEN]
         valid_open_events = [
@@ -547,6 +550,31 @@ class RealBacktestRunner:
             counts=counts,
         )
         for symbol in symbols:
+            prefetched = prefetched_candles_by_symbol.get(symbol)
+            if prefetched is not None:
+                real_market_data_used = real_market_data_used or bool(prefetched)
+                candles.extend(prefetched)
+                for message_id in symbol_trace_map.get(symbol, []):
+                    message_trace = traces_by_message_id[message_id]
+                    if message_trace.current_stage == "simulated":
+                        self._set_trace_stage(
+                            message_trace,
+                            "simulated",
+                            status="active",
+                            detail=(
+                                "Simulation tracking remains active; waiting for final replay "
+                                "with future updates and candle resolution."
+                            ),
+                        )
+                    self._emit_message_progress(
+                        progress_callback,
+                        phase="fetch_market_data",
+                        summary=f"Reusing prefetched candles for message {message_id}.",
+                        counts=counts,
+                        trace=message_trace,
+                    )
+                continue
+
             candidate_symbols = symbol_candidates_by_primary.get(symbol, [symbol])
             fetched: list[Any] = []
             selected_symbol = symbol
@@ -1122,12 +1150,14 @@ class RealBacktestRunner:
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         warnings: list[str],
+        prefetched_candles_by_symbol: dict[str, list[Any]],
     ) -> tuple[
         list[BacktestEvent],
         dict[int, RealBacktestMessageTrace],
         dict[str, int],
         dict[str, list[int]],
         dict[str, int],
+        dict[str, list[Any]],
     ]:
         context = ChannelContext(
             channel_id=request.channel,
@@ -1228,27 +1258,77 @@ class RealBacktestRunner:
                 market_symbol = normalize_market_symbol(parsed.symbol) if parsed.symbol else None
                 if valid_for_backtest and market_symbol is not None:
                     counts["valid_signals"] += 1
-                    trace.final_status = "validated_signal"
-                    trace.result_summary = (
-                        "Signal validated. Waiting for market-data phase after "
-                        "message classification completes."
-                    )
                     self._set_trace_stage(
                         trace,
                         "validated",
                         status="completed",
                         detail="Signal is structurally valid for backtesting.",
                     )
-                    self._set_trace_stage(
-                        trace,
-                        "market_data",
-                        status="pending",
-                        detail=f"Waiting for {market_symbol} candle data.",
-                        advance_current=False,
-                    )
-                    symbol_trace_map.setdefault(market_symbol, []).append(message.message_id)
-                    if signal_id is not None:
-                        signal_trace_map[signal_id] = message.message_id
+                    prefetched_candles = prefetched_candles_by_symbol.get(market_symbol)
+                    if prefetched_candles is None:
+                        prefetched_candles = await self._prefetch_market_data_for_trace(
+                            request=request,
+                            trace=trace,
+                            market_symbol=market_symbol,
+                            progress_callback=progress_callback,
+                            counts=counts,
+                            warnings=warnings,
+                        )
+                        if prefetched_candles is not None:
+                            prefetched_candles_by_symbol[market_symbol] = prefetched_candles
+
+                    if prefetched_candles is not None:
+                        trace.final_status = "simulation_tracking"
+                        trace.result_summary = (
+                            "Signal validated, candle data loaded, and simulation tracking "
+                            "started. Future updates and candle replay will finalize it."
+                        )
+                        self._set_trace_stage(
+                            trace,
+                            "market_data",
+                            status="completed",
+                            detail=(
+                                f"Fetched {len(prefetched_candles)} candles for {market_symbol}."
+                            ),
+                        )
+                        self._set_trace_stage(
+                            trace,
+                            "simulated",
+                            status="active",
+                            detail=(
+                                "Simulation tracking started; future channel updates and "
+                                "candle resolution will determine the final trade outcome."
+                            ),
+                        )
+                        symbol_trace_map.setdefault(market_symbol, []).append(message.message_id)
+                        if signal_id is not None:
+                            signal_trace_map[signal_id] = message.message_id
+                    else:
+                        counts["invalid_signals"] += 1
+                        trace.final_status = "market_data_unavailable"
+                        trace.result_summary = (
+                            f"No candle data returned for {market_symbol}. "
+                            "Simulation cannot start for this signal."
+                        )
+                        self._set_trace_stage(
+                            trace,
+                            "market_data",
+                            status="failed",
+                            detail=trace.result_summary,
+                        )
+                        self._set_trace_stage(
+                            trace,
+                            "simulated",
+                            status="skipped",
+                            detail="Simulation skipped because market data was unavailable.",
+                        )
+                        self._set_trace_stage(
+                            trace,
+                            "finalized",
+                            status="completed",
+                            detail=trace.result_summary,
+                        )
+                        await self._maybe_send_message_log(request, trace, warnings)
                 else:
                     counts["invalid_signals"] += 1
                     trace.final_status = "invalid_signal"
@@ -1314,7 +1394,78 @@ class RealBacktestRunner:
                     debug_notes=list(classified.debug_notes),
                 )
             )
-        return events, traces_by_message_id, signal_trace_map, symbol_trace_map, counts
+        return (
+            events,
+            traces_by_message_id,
+            signal_trace_map,
+            symbol_trace_map,
+            counts,
+            prefetched_candles_by_symbol,
+        )
+
+    async def _prefetch_market_data_for_trace(
+        self,
+        *,
+        request: RealBacktestRunRequest,
+        trace: RealBacktestMessageTrace,
+        market_symbol: str,
+        progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
+        counts: dict[str, int],
+        warnings: list[str],
+    ) -> list[Any] | None:
+        candidate_symbols = market_symbol_candidates(market_symbol) or [market_symbol]
+        self._set_trace_stage(
+            trace,
+            "market_data",
+            status="active",
+            detail=f"Fetching candle data for {market_symbol} immediately.",
+        )
+        self._emit_message_progress(
+            progress_callback,
+            phase="classify_messages",
+            summary=f"Loading market data for message {trace.message_id}.",
+            counts=counts,
+            trace=trace,
+        )
+        last_error_type: str | None = None
+        attempted: list[str] = []
+        for candidate_symbol in candidate_symbols:
+            attempted.append(candidate_symbol)
+            try:
+                fetched = await self.market_data_provider.get_klines(
+                    candidate_symbol,
+                    request.interval,
+                    request.resolve_range()[0],
+                    request.resolve_range()[1],
+                )
+            except Exception as exc:
+                last_error_type = type(exc).__name__
+                continue
+            if fetched:
+                if candidate_symbol != market_symbol:
+                    trace.debug_notes.append(f"market_symbol_selected={candidate_symbol}")
+                return fetched
+
+        if last_error_type is not None:
+            self._append_warning(
+                warnings,
+                (
+                    f"Immediate candle fetch failed for {market_symbol}; "
+                    f"simulation could not start ({last_error_type})."
+                ),
+            )
+        else:
+            self._append_warning(
+                warnings,
+                (
+                    f"Immediate candle fetch returned no data for {market_symbol}; "
+                    "simulation could not start for this signal."
+                ),
+            )
+        trace.debug_notes.append(
+            "market_data_attempted=" + ",".join(attempted)
+        )
+        return None
 
     async def _prepare_message_for_classification(
         self,

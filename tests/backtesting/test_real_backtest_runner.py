@@ -131,6 +131,30 @@ def _candles(now: datetime) -> list[Candle]:
     return candles
 
 
+def _sapien_candles(now: datetime) -> list[Candle]:
+    candles: list[Candle] = []
+    for index, open_price, high_price, low_price, close_price in (
+        (0, "0.09710", "0.09790", "0.09680", "0.09770"),
+        (1, "0.09770", "0.09820", "0.09740", "0.09810"),
+    ):
+        open_time = now + timedelta(minutes=index)
+        candles.append(
+            Candle(
+                symbol="SAPIENUSDT",
+                interval="1m",
+                open_time=open_time,
+                close_time=open_time + timedelta(minutes=1),
+                open=Decimal(open_price),
+                high=Decimal(high_price),
+                low=Decimal(low_price),
+                close=Decimal(close_price),
+                volume=Decimal("12"),
+                source=CandleSource.TOOBIT,
+            )
+        )
+    return candles
+
+
 def test_real_backtest_runner_blocks_when_disabled(tmp_path: Path) -> None:
     settings = _settings(tmp_path, REAL_BACKTEST_ENABLED=False)
     runner = RealBacktestRunner(
@@ -352,7 +376,7 @@ def test_real_backtest_runner_emits_message_progress(tmp_path: Path) -> None:
     assert message_event.trace.classification in {"new_signal", None}
 
 
-def test_real_backtest_runner_keeps_validated_stage_current_until_market_data_phase(
+def test_real_backtest_runner_starts_simulation_tracking_immediately_for_valid_signal(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
@@ -364,7 +388,7 @@ def test_real_backtest_runner_keeps_validated_stage_current_until_market_data_ph
     runner = RealBacktestRunner(
         settings=_settings(tmp_path),
         telegram_client=telegram,
-        market_data_provider=FakeMarketDataProvider(),
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)}),
     )
     progress_events = []
 
@@ -390,12 +414,17 @@ def test_real_backtest_runner_keeps_validated_stage_current_until_market_data_ph
     assert classified
     latest_classify_trace = classified[-1].trace
     assert latest_classify_trace is not None
-    assert latest_classify_trace.final_status == "validated_signal"
-    assert latest_classify_trace.current_stage == "validated"
+    assert latest_classify_trace.final_status == "simulation_tracking"
+    assert latest_classify_trace.current_stage == "simulated"
     market_stage = next(
         stage for stage in latest_classify_trace.stages if stage.key == "market_data"
     )
-    assert market_stage.status == "pending"
+    simulated_stage = next(
+        stage for stage in latest_classify_trace.stages if stage.key == "simulated"
+    )
+    assert market_stage.status == "completed"
+    assert simulated_stage.status == "active"
+    assert "Simulation tracking started" in (simulated_stage.detail or "")
 
 
 def test_real_backtest_runner_hydrates_caption_media_on_demand_only(tmp_path: Path) -> None:
@@ -601,6 +630,75 @@ def test_real_backtest_runner_sends_failure_log_for_no_valid_signal_case(tmp_pat
 
     assert result.success is False
     assert any("Real backtest finished without valid signals" in text for text in log_client.texts)
+
+
+def test_real_backtest_runner_simulates_noisy_market_signal_immediately(tmp_path: Path) -> None:
+    now = datetime(2026, 5, 28, 20, 24, 54, tzinfo=timezone.utc)
+    message = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=5880,
+        text=(
+            "**سیگنال فیوچرز طوفان ترید ****🌪****\n\n"
+            " SAPIEN/USD ****🌪****\n\n"
+            "****🌪****LONG ****🌪****🌪****\n\n"
+            "****🌪**** LEVERAGE: Cross 25x ****🌪****\n\n"
+            "****⚙️**** Entry نقطه ورود ****⬇️****\n"
+            "MARKET ****🕸****\n\n"
+            "Targets : تارگت ها ****🔼****🔽****\n\n"  # noqa: RUF001
+            "****1️⃣****   ****🌪****0.09775\n\n"
+            "****2️⃣****   ****🌪****0.09800\n\n"
+            "****3️⃣****   ****🌪****0.09850\n\n"
+            "****4️⃣****  ****🌪**** 0.09950\n\n"
+            "****➕**** ****⭐️**** ****🌪**** 0.10003\n\n"  # noqa: RUF001
+            "****➕**** ****⭐️**** ****🌪**** 0.10200\n\n"  # noqa: RUF001
+            "****⚙️**** STOPLOSS  حد ضرر ****⬇️****\n"
+            "0.09480 ****⚠️****\n\n"
+            "**\n"
+            "🌪 [Trade on Toobit](https://t.me/Tofan_Trade/220) 🌪\n"
+            "[مدیریت سرمایه رعایت شود ](https://t.me/Tofan_Trade/166)👑"
+        ),
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(candles_by_symbol={"SAPIENUSDT": _sapien_candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    assert result.valid_signals == 1
+    assert result.trades_simulated == 1
+    assert "SAPIENUSDT" in provider.requests
+    latest_trace = next(
+        event.trace
+        for event in reversed(progress_events)
+        if event.trace is not None and event.trace.message_id == 5880
+    )
+    assert latest_trace is not None
+    assert latest_trace.symbol == "SAPIENUSD"
+    assert latest_trace.current_stage == "finalized"
+    assert latest_trace.final_status in {"tp_hit", "tp_hit_same_candle", "open_until_end"}
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:
