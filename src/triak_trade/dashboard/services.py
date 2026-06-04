@@ -234,6 +234,26 @@ class DashboardService:
     def list_backtest_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         return [run.model_dump(mode="json") for run in self.backtests.list_runs(limit=limit)]
 
+    def stop_backtest_run(self, run_id: str) -> dict[str, Any] | None:
+        run, stopped, reason = self.backtests.stop_run(run_id)
+        if run is None:
+            return None
+        return {
+            "stopped": stopped,
+            "reason": reason,
+            "run": run.model_dump(mode="json"),
+        }
+
+    def rerun_backtest_run(self, run_id: str) -> dict[str, Any] | None:
+        run = self.backtests.rerun_run(run_id)
+        if run is None:
+            return None
+        return {
+            "started": True,
+            "rerun_of": run_id,
+            "run": run.model_dump(mode="json"),
+        }
+
     def run_fixture_backtest_from_form(self, form: dict[str, str]) -> dict[str, Any]:
         if form.get("real_mode") == "on":
             readiness = self.real_runner.readiness()

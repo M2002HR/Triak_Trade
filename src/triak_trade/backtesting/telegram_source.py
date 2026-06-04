@@ -31,9 +31,13 @@ class BacktestTelegramSource:
         limit: int,
         start_message_id: int | None = None,
     ) -> tuple[list[RawTelegramMessage], TelegramHistoryFetchResult]:
+        # A Telegram message link is an explicit processing anchor. In that mode
+        # the UI date range still bounds reporting/market replay, but it must not
+        # hide the anchor message or messages after it.
+        effective_start = None if start_message_id is not None else start
         messages = await self.telegram_client.fetch_history(
             channel,
-            start=start,
+            start=effective_start,
             end=end,
             limit=limit,
             min_message_id=start_message_id,

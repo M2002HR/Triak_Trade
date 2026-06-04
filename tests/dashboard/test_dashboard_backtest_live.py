@@ -186,6 +186,7 @@ def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> No
     assert "Per-Message Trace" in response.text
     assert "Open Run Feed" in response.text
     assert "Open History" in response.text
+    assert 'id="run-action-bar"' in response.text
     assert 'data-message-filter="signals"' in response.text
     assert 'id="message-modal" class="modal-shell" hidden' in response.text
     assert 'id="panel-modal" class="modal-shell" hidden' in response.text
@@ -337,3 +338,74 @@ def test_backtest_start_api_rejects_missing_dates(tmp_path: Path, monkeypatch) -
     )
     assert response.status_code == 400
     assert response.json()["detail"] == "from_date and to_date are required"
+
+
+def test_backtest_rerun_api_starts_new_run_from_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    start = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "channel": "@Tofan_Trade",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "start_message_link": "https://t.me/Tofan_Trade/5880",
+            "interval": "1m",
+            "max_messages": 1000,
+            "use_ai": False,
+            "send_log_channel": True,
+            "log_per_message": True,
+        },
+    )
+    assert start.status_code == 202
+    original_run_id = start.json()["run"]["run_id"]
+
+    rerun = client.post(
+        f"/api/backtests/runs/{original_run_id}/rerun",
+        headers=_headers(),
+    )
+
+    assert rerun.status_code == 202
+    body = rerun.json()
+    assert body["started"] is True
+    assert body["rerun_of"] == original_run_id
+    assert body["run"]["run_id"] != original_run_id
+    assert body["run"]["start_message_id"] == 5880
+    assert body["run"]["start_message_link"] == "https://t.me/Tofan_Trade/5880"
+
+
+def test_backtest_stop_api_rejects_completed_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    start = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "channel": "@Tofan_Trade",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "interval": "1m",
+            "max_messages": 1000,
+            "use_ai": False,
+            "send_log_channel": True,
+            "log_per_message": True,
+        },
+    )
+    assert start.status_code == 202
+    run_id = start.json()["run"]["run_id"]
+    for _ in range(50):
+        loaded = client.get(f"/api/backtests/runs/{run_id}", headers=_headers()).json()
+        if loaded["status"] == "completed":
+            break
+        time.sleep(0.02)
+
+    stop = client.post(f"/api/backtests/runs/{run_id}/stop", headers=_headers())
+
+    assert stop.status_code == 409
+    assert stop.json()["stopped"] is False
+    assert "run_not_stoppable_status_completed" == stop.json()["reason"]

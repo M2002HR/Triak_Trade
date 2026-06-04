@@ -43,6 +43,7 @@ document.documentElement.dataset.dashboardReady = "true";
     runTitle: document.getElementById("run-title"),
     runSubtitle: document.getElementById("run-subtitle"),
     runPhasePill: document.getElementById("run-phase-pill"),
+    runActionBar: document.getElementById("run-action-bar"),
     metrics: document.getElementById("backtest-metrics"),
     currentPhaseLabel: document.getElementById("current-phase-label"),
     currentPhaseSummary: document.getElementById("current-phase-summary"),
@@ -123,6 +124,20 @@ document.documentElement.dataset.dashboardReady = "true";
       if (panelTarget) {
         const kind = panelTarget.getAttribute("data-open-panel-modal") || "feed";
         openPanelModal(kind);
+        return;
+      }
+      const stopTarget = event.target instanceof Element ? event.target.closest("[data-stop-run-id]") : null;
+      if (stopTarget) {
+        event.preventDefault();
+        event.stopPropagation();
+        stopRun(stopTarget.getAttribute("data-stop-run-id") || "");
+        return;
+      }
+      const rerunTarget = event.target instanceof Element ? event.target.closest("[data-rerun-run-id]") : null;
+      if (rerunTarget) {
+        event.preventDefault();
+        event.stopPropagation();
+        rerunRun(rerunTarget.getAttribute("data-rerun-run-id") || "");
         return;
       }
       const target = event.target instanceof Element ? event.target.closest("[data-run-id]") : null;
@@ -287,7 +302,7 @@ document.documentElement.dataset.dashboardReady = "true";
       state.activeRun = run;
       upsertRun(run);
       renderRun(run);
-      if (run.status !== "running" && run.status !== "queued" && state.pollTimer) {
+      if (!isActiveStatus(run.status) && state.pollTimer) {
         window.clearInterval(state.pollTimer);
         state.pollTimer = null;
       }
@@ -357,7 +372,7 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   function renderCurrentRunHeader(run) {
-    nodes.activeRunHeadline.textContent = run.status === "running" ? "Streaming" : run.current_phase_label;
+    nodes.activeRunHeadline.textContent = isActiveStatus(run.status) ? "Streaming" : run.current_phase_label;
     nodes.runTitle.textContent = `${run.channel_resolved} • ${run.interval}`;
     const startMessageSuffix = run.start_message_id
       ? ` • from message ${run.start_message_id}`
@@ -365,6 +380,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.runSubtitle.textContent = `${formatDate(run.from_date)} → ${formatDate(run.to_date)}${startMessageSuffix}`;
     nodes.runPhasePill.textContent = run.current_phase_label;
     nodes.runPhasePill.className = `phase-pill phase-${run.status}`;
+    renderRunActions(run);
     nodes.currentPhaseLabel.textContent = run.current_phase_label;
     nodes.currentPhaseSummary.textContent = run.current_phase_summary || "No summary yet.";
     const currentTrace = run.messages?.find((item) => item.message_id === run.current_message_id);
@@ -487,6 +503,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.runSubtitle.textContent = "Start a run to stream message-by-message progress.";
     nodes.runPhasePill.textContent = "Queued";
     nodes.runPhasePill.className = "phase-pill phase-queued";
+    nodes.runActionBar.innerHTML = "";
     nodes.metrics.innerHTML = "";
     nodes.currentPhaseLabel.textContent = "Queued";
     nodes.currentPhaseSummary.textContent = "Waiting to start.";
@@ -557,6 +574,81 @@ document.documentElement.dataset.dashboardReady = "true";
     state.recentRuns = runs
       .sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
       .slice(0, 8);
+  }
+
+  function renderRunActions(run) {
+    if (!nodes.runActionBar) {
+      return;
+    }
+    const stopButton = isActiveStatus(run.status)
+      ? `<button type="button" class="danger compact-action" data-stop-run-id="${escapeHtml(run.run_id)}">Stop Run</button>`
+      : "";
+    nodes.runActionBar.innerHTML = `
+      <button type="button" class="ghost-button compact-action" data-rerun-run-id="${escapeHtml(run.run_id)}">Run Again</button>
+      ${stopButton}
+    `;
+  }
+
+  async function stopRun(runId) {
+    if (!runId) {
+      return;
+    }
+    setFormStatus("Requesting backtest stop...", "working");
+    try {
+      const response = await fetch(`/api/backtests/runs/${encodeURIComponent(runId)}/stop`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (data.run) {
+        upsertRun(data.run);
+        if (state.activeRunId === data.run.run_id) {
+          state.activeRun = data.run;
+          renderRun(data.run);
+        }
+      }
+      if (!response.ok) {
+        setFormStatus(`Stop rejected: ${data.reason || data.detail || "run is not stoppable"}`, "warning");
+        return;
+      }
+      state.activeRunId = data.run.run_id;
+      state.activeRun = data.run;
+      renderRun(data.run);
+      setFormStatus("Stop requested. Waiting for the next safe checkpoint.", "success");
+      if (!state.wsReady) {
+        startPolling();
+      }
+    } catch (error) {
+      setFormStatus(`Stop failed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+    }
+  }
+
+  async function rerunRun(runId) {
+    if (!runId) {
+      return;
+    }
+    setFormStatus("Starting rerun from saved backtest parameters...", "working");
+    try {
+      const response = await fetch(`/api/backtests/runs/${encodeURIComponent(runId)}/rerun`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setFormStatus(`Rerun failed: ${data.detail || "run not found"}`, "error");
+        return;
+      }
+      state.activeRunId = data.run.run_id;
+      state.activeRun = data.run;
+      upsertRun(data.run);
+      closePanelModal();
+      closeModal();
+      renderRun(data.run);
+      setFormStatus("Rerun started with the previous run parameters.", "success");
+      if (!state.wsReady) {
+        startPolling();
+      }
+    } catch (error) {
+      setFormStatus(`Rerun failed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+    }
   }
 
   function connectWebSocket() {
@@ -693,6 +785,10 @@ document.documentElement.dataset.dashboardReady = "true";
     }
   }
 
+  function isActiveStatus(status) {
+    return status === "queued" || status === "running" || status === "cancelling";
+  }
+
   function buildEventFeedMarkup(events, expanded) {
     if (!events.length) {
       return '<div class="empty-state-box">No activity yet.</div>';
@@ -726,11 +822,21 @@ document.documentElement.dataset.dashboardReady = "true";
       <div class="recent-runs ${expanded ? "panel-modal-list" : ""}">
         ${runs
           .map((run) => `
-            <button type="button" class="recent-run-card ${state.activeRunId === run.run_id ? "active" : ""}" data-run-id="${escapeHtml(run.run_id)}">
-              <strong>${escapeHtml(run.channel_input || run.channel_resolved)}</strong>
-              <span>${escapeHtml(run.current_phase_label || run.current_phase || run.status)}</span>
-              <small>${formatDate(run.created_at)}</small>
-            </button>
+            <article class="recent-run-card ${state.activeRunId === run.run_id ? "active" : ""}">
+              <button type="button" class="recent-run-select" data-run-id="${escapeHtml(run.run_id)}">
+                <strong>${escapeHtml(run.channel_input || run.channel_resolved)}</strong>
+                <span>${escapeHtml(run.current_phase_label || run.current_phase || run.status)}</span>
+                <small>${formatDate(run.created_at)}</small>
+              </button>
+              <div class="recent-run-actions">
+                ${
+                  isActiveStatus(run.status)
+                    ? `<button type="button" class="danger compact-action" data-stop-run-id="${escapeHtml(run.run_id)}">Stop</button>`
+                    : ""
+                }
+                <button type="button" class="ghost-button compact-action" data-rerun-run-id="${escapeHtml(run.run_id)}">Rerun</button>
+              </div>
+            </article>
           `)
           .join("")}
       </div>

@@ -380,6 +380,7 @@ pre {
 .status-badge.warn,
 .phase-pill.phase-queued,
 .phase-pill.phase-running,
+.phase-pill.phase-cancelling,
 .phase-pill.phase-awaiting_market_data,
 .mini-badge.state-ambiguous,
 .mini-badge.state-no_trade {
@@ -396,6 +397,7 @@ pre {
 }
 
 .phase-pill.phase-ignored,
+.phase-pill.phase-cancelled,
 .mini-badge.state-ignored,
 .mini-badge.stage-finalized {
   color: #475467;
@@ -449,6 +451,21 @@ pre {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.run-action-bar,
+.recent-run-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.compact-action {
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
 .message-stream,
 .event-feed,
 .recent-runs {
@@ -493,6 +510,20 @@ pre {
   border-radius: 18px;
   padding: 16px;
   box-shadow: none;
+}
+
+.recent-run-select {
+  width: 100%;
+  display: grid;
+  gap: 7px;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.recent-run-actions {
+  margin: 14px 0 0;
 }
 
 .message-card.active,

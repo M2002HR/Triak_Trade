@@ -153,6 +153,23 @@ def build_router(
         status_code = 202 if result.get("started") else 409
         return JSONResponse(result, status_code=status_code)
 
+    @router.post("/api/backtests/runs/{run_id}/stop")
+    async def stop_backtest_run(request: Request, run_id: str) -> JSONResponse:
+        auth.require_api(request)
+        result = service.stop_backtest_run(run_id)
+        if result is None:
+            return JSONResponse({"detail": "run_not_found"}, status_code=404)
+        status_code = 202 if result.get("stopped") else 409
+        return JSONResponse(result, status_code=status_code)
+
+    @router.post("/api/backtests/runs/{run_id}/rerun")
+    async def rerun_backtest_run(request: Request, run_id: str) -> JSONResponse:
+        auth.require_api(request)
+        result = service.rerun_backtest_run(run_id)
+        if result is None:
+            return JSONResponse({"detail": "run_not_found"}, status_code=404)
+        return JSONResponse(result, status_code=202)
+
     @router.websocket("/ws/backtests")
     async def backtest_websocket(websocket: WebSocket) -> None:
         if not auth.is_authenticated_websocket(websocket):

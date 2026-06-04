@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -174,6 +175,42 @@ class FakeRunner:
             report_path="runtime/reports/backtests/report.json",
             markdown_report_path="runtime/reports/backtests/report.md",
         )
+
+
+class CancellableRunner(FakeRunner):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def run_sync(
+        self,
+        request: RealBacktestRunRequest,
+        progress_callback=None,
+    ) -> RealBacktestResult:
+        now = datetime(2026, 6, 4, tzinfo=timezone.utc)
+        if progress_callback is not None:
+            progress_callback(
+                RealBacktestProgressEvent(
+                    event_type="run",
+                    timestamp=now,
+                    phase="fetch_history",
+                    status="running",
+                    summary="Fetching Telegram history.",
+                    counts={"total_messages": 0},
+                )
+            )
+        self.entered.set()
+        self.release.wait(timeout=2)
+        if progress_callback is not None:
+            progress_callback(
+                RealBacktestProgressEvent(
+                    event_type="run",
+                    timestamp=now,
+                    phase="classify_messages",
+                    status="running",
+                    summary="This checkpoint should observe cancellation.",
+                )
+            )
+        return super().run_sync(request, progress_callback)
 
 
 def test_normalize_channel_reference_accepts_usernames() -> None:
@@ -363,3 +400,79 @@ def test_dashboard_backtest_coordinator_persists_start_message_metadata(tmp_path
     assert loaded is not None
     assert loaded.start_message_link == "https://t.me/Tofan_Trade/5880"
     assert loaded.start_message_id == 5880
+
+
+def test_dashboard_backtest_coordinator_stops_running_run(tmp_path: Path) -> None:
+    CancellableRunner.entered.clear()
+    CancellableRunner.release.clear()
+    settings = _settings(tmp_path)
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        runner_factory=CancellableRunner,
+    )
+    run = coordinator.start_run(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        ),
+        channel_input="@Tofan_Trade",
+    )
+
+    assert CancellableRunner.entered.wait(timeout=2)
+    stopped_run, stopped, reason = coordinator.stop_run(run.run_id)
+    assert stopped_run is not None
+    assert stopped is True
+    assert reason == "stop_requested"
+    assert stopped_run.status == "cancelling"
+
+    CancellableRunner.release.set()
+    loaded = None
+    for _ in range(50):
+        loaded = coordinator.get_run(run.run_id)
+        if loaded is not None and loaded.status == "cancelled":
+            break
+        time.sleep(0.02)
+
+    assert loaded is not None
+    assert loaded.status == "cancelled"
+    assert loaded.current_phase == "cancelled"
+
+
+def test_dashboard_backtest_coordinator_reruns_saved_parameters(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        runner_factory=FakeRunner,
+    )
+    original = coordinator.start_run(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            start_message_link="https://t.me/Tofan_Trade/5880",
+            start_message_id=5880,
+            interval="1m",
+            max_messages=25,
+            use_ai=True,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        ),
+        channel_input="https://t.me/Tofan_Trade/5880",
+    )
+    rerun = coordinator.rerun_run(original.run_id)
+
+    assert rerun is not None
+    assert rerun.run_id != original.run_id
+    assert rerun.channel_input == original.channel_input
+    assert rerun.start_message_link == "https://t.me/Tofan_Trade/5880"
+    assert rerun.start_message_id == 5880
+    assert rerun.max_messages == 25
+    assert rerun.use_ai is True

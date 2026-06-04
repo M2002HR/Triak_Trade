@@ -75,6 +75,10 @@ class DashboardBacktestRun(BaseModel):
     events: list[DashboardBacktestEvent] = Field(default_factory=list)
 
 
+class DashboardBacktestCancelledError(RuntimeError):
+    """Raised inside the progress callback to stop a running backtest safely."""
+
+
 class DashboardBacktestStore:
     def __init__(self, settings: Settings) -> None:
         self.root = Path(settings.DASHBOARD_RUNTIME_DIR) / "backtests"
@@ -163,6 +167,7 @@ class DashboardBacktestCoordinator:
         self.runner_factory = runner_factory or (lambda: RealBacktestRunner(settings=settings))
         self.notifier = notifier
         self._threads: dict[str, threading.Thread] = {}
+        self._cancel_requested: set[str] = set()
         self._lock = threading.Lock()
         self._recover_incomplete_runs()
 
@@ -205,6 +210,57 @@ class DashboardBacktestCoordinator:
         self._notify(run)
         return run
 
+    def stop_run(self, run_id: str) -> tuple[DashboardBacktestRun | None, bool, str]:
+        run = self.store.read(run_id)
+        if run is None:
+            return None, False, "run_not_found"
+        if run.status == "cancelled":
+            return run, False, "run_already_cancelled"
+        if run.status not in {"queued", "running", "cancelling"}:
+            return run, False, f"run_not_stoppable_status_{run.status}"
+
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            self._cancel_requested.add(run_id)
+        run.status = "cancelling"
+        run.current_phase = "cancelling"
+        run.current_phase_label = _phase_label("cancelling")
+        run.current_phase_summary = (
+            "Stop requested. The worker will stop at the next safe checkpoint."
+        )
+        run.events.append(
+            DashboardBacktestEvent(
+                at=now,
+                phase="cancelling",
+                status="running",
+                summary=run.current_phase_summary,
+                current_message_id=run.current_message_id,
+            )
+        )
+        self.store.write(run)
+        self._notify(run)
+        return run, True, "stop_requested"
+
+    def rerun_run(self, run_id: str) -> DashboardBacktestRun | None:
+        previous = self.store.read(run_id)
+        if previous is None:
+            return None
+        request = RealBacktestRunRequest(
+            channel=previous.channel_resolved,
+            from_date=previous.from_date,
+            to_date=previous.to_date,
+            hours=None,
+            start_message_link=previous.start_message_link,
+            start_message_id=previous.start_message_id,
+            interval=previous.interval,
+            max_messages=previous.max_messages,
+            use_ai=previous.use_ai,
+            send_telegram_summary=False,
+            send_log_channel=previous.send_log_channel,
+            log_per_message=previous.log_per_message,
+        )
+        return self.start_run(request, channel_input=previous.channel_input)
+
     def get_run(self, run_id: str) -> DashboardBacktestRun | None:
         return self.store.read(run_id)
 
@@ -215,6 +271,9 @@ class DashboardBacktestCoordinator:
         runner = self.runner_factory()
         run = self.store.read(run_id)
         if run is None:
+            return
+        if self._is_cancel_requested(run_id):
+            self._mark_cancelled(run_id)
             return
         run.status = "running"
         run.started_at = datetime.now(timezone.utc)
@@ -227,7 +286,11 @@ class DashboardBacktestCoordinator:
                 request,
                 progress_callback=lambda event: self._handle_progress(run_id, event),
             )
+        except DashboardBacktestCancelledError:
+            self._mark_cancelled(run_id)
+            return
         except Exception as exc:
+            self._clear_cancel_request(run_id)
             failed = self.store.read(run_id)
             if failed is None:
                 return
@@ -252,6 +315,7 @@ class DashboardBacktestCoordinator:
         completed = self.store.read(run_id)
         if completed is None:
             return
+        self._clear_cancel_request(run_id)
         completed.status = "completed" if result.success else "failed"
         completed.finished_at = datetime.now(timezone.utc)
         completed.current_phase = "complete" if result.success else "failed"
@@ -286,6 +350,8 @@ class DashboardBacktestCoordinator:
         self._notify(completed)
 
     def _handle_progress(self, run_id: str, event: RealBacktestProgressEvent) -> None:
+        if self._is_cancel_requested(run_id):
+            raise DashboardBacktestCancelledError()
         run = self.store.read(run_id)
         if run is None:
             return
@@ -331,6 +397,37 @@ class DashboardBacktestCoordinator:
             return
         self.notifier({"type": "backtest_run", "run": run.model_dump(mode="json")})
 
+    def _is_cancel_requested(self, run_id: str) -> bool:
+        with self._lock:
+            return run_id in self._cancel_requested
+
+    def _clear_cancel_request(self, run_id: str) -> None:
+        with self._lock:
+            self._cancel_requested.discard(run_id)
+
+    def _mark_cancelled(self, run_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        self._clear_cancel_request(run_id)
+        run = self.store.read(run_id)
+        if run is None:
+            return
+        run.status = "cancelled"
+        run.finished_at = now
+        run.current_phase = "cancelled"
+        run.current_phase_label = _phase_label("cancelled")
+        run.current_phase_summary = "Backtest run was stopped by the dashboard operator."
+        run.events.append(
+            DashboardBacktestEvent(
+                at=now,
+                phase="cancelled",
+                status="cancelled",
+                summary=run.current_phase_summary,
+                current_message_id=run.current_message_id,
+            )
+        )
+        self.store.write(run)
+        self._notify(run)
+
     def _recover_incomplete_runs(self) -> None:
         now = datetime.now(timezone.utc)
         for run in self.store.list_runs(limit=200):
@@ -365,6 +462,8 @@ def _phase_label(phase: str) -> str:
         "fetch_market_data": "Fetching Market Data",
         "simulate": "Simulating Trades",
         "report": "Writing Report",
+        "cancelling": "Stopping",
+        "cancelled": "Stopped",
         "complete": "Completed",
         "failed": "Failed",
     }
