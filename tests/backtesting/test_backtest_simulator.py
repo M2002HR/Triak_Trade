@@ -262,6 +262,33 @@ def test_simulator_expires_open_signal_after_configured_hours() -> None:
     assert trades[0].exit_price == Decimal("101.25")
 
 
+def test_simulator_rejects_stale_market_entry_candle() -> None:
+    parsed = _parsed(SignalAction.OPEN)
+    parsed.entry_type = EntryType.MARKET
+    parsed.entry_low = None
+    parsed.entry_high = None
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 16, 43, 56, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    stale_candle = _candle((24 + 6) * 60, "105", "99", o="100", c="101")
+
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=[stale_candle],
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert trades[0].status == "not_filled"
+    assert trades[0].entry_time is None
+
+
 def test_simulator_ignores_followup_after_expiry_window() -> None:
     open_event = BacktestEvent(
         timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),

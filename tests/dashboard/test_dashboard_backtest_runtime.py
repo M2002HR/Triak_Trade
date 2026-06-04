@@ -135,6 +135,29 @@ class FakeRunner:
                         "live_unrealized_pnl": "2.5",
                         "live_total_pnl": "2.5",
                     },
+                    live_signals=[
+                        {
+                            "signal_id": "sig_77",
+                            "symbol": "BTCUSDT",
+                            "side": "long",
+                            "status": "open",
+                            "status_group": "active",
+                            "entry_time": now.isoformat(),
+                            "entry_time_tehran": "2026-06-04T03:30:00+03:30",
+                            "exit_time": None,
+                            "exit_time_tehran": None,
+                            "entry_price": "68010",
+                            "stop_loss": "67400",
+                            "take_profits": ["69000", "70000"],
+                            "open_quantity": "1",
+                            "mark_price": "68100",
+                            "realized_pnl": "0",
+                            "unrealized_pnl": "2.5",
+                            "total_pnl": "2.5",
+                            "targets_hit": 0,
+                            "lifecycle": ["created"],
+                        }
+                    ],
                     trace=trace,
                 )
             )
@@ -295,6 +318,10 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     assert loaded.messages[0].message_id == 77
     assert loaded.messages[0].classification == "new_signal"
     assert loaded.live_total_pnl == "25"
+    assert loaded.signals
+    assert loaded.signals[0]["signal_id"] == "sig_77"
+    assert loaded.signals[0]["symbol"] == "BTCUSDT"
+    assert loaded.signals[0]["status_group"] == "active"
     assert loaded.report_path == "runtime/reports/backtests/report.json"
 
 

@@ -113,6 +113,19 @@
       <button type="button" class="button secondary-open-button" data-open-panel-modal="history">Open History</button>
     </section>
 
+    <section class="panel signal-state-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Signals</p>
+          <h2>Active & Inactive</h2>
+        </div>
+      </div>
+      <div id="signal-state-preview" class="modal-preview-blurb empty-state-box">
+        No simulated signal state yet.
+      </div>
+      <button type="button" class="button secondary-open-button" data-open-panel-modal="signals">Open Signals</button>
+    </section>
+
     {% if result %}
       <section class="panel legacy-result-panel">
         {% if result.blocked %}

@@ -13,6 +13,7 @@ document.documentElement.dataset.dashboardReady = "true";
     activeRun: bootstrap.recent_runs?.[0] || null,
     recentRuns: bootstrap.recent_runs || [],
     selectedMessageId: null,
+    selectedSignalId: null,
     modalOpen: false,
     panelModalOpen: false,
     activePanelModal: null,
@@ -54,6 +55,7 @@ document.documentElement.dataset.dashboardReady = "true";
     messageStream: document.getElementById("message-stream"),
     eventFeed: document.getElementById("event-feed"),
     recentRuns: document.getElementById("recent-runs"),
+    signalStatePreview: document.getElementById("signal-state-preview"),
     modal: document.getElementById("message-modal"),
     modalTitle: document.getElementById("message-modal-title"),
     modalStatus: document.getElementById("message-modal-status"),
@@ -140,6 +142,13 @@ document.documentElement.dataset.dashboardReady = "true";
         rerunRun(rerunTarget.getAttribute("data-rerun-run-id") || "");
         return;
       }
+      const signalTarget = event.target instanceof Element ? event.target.closest("[data-signal-id]") : null;
+      if (signalTarget) {
+        event.preventDefault();
+        event.stopPropagation();
+        openSignalModal(signalTarget.getAttribute("data-signal-id") || "");
+        return;
+      }
       const target = event.target instanceof Element ? event.target.closest("[data-run-id]") : null;
       if (!target) {
         return;
@@ -183,6 +192,9 @@ document.documentElement.dataset.dashboardReady = "true";
     if (kind === "history") {
       nodes.panelModalTitle.textContent = "Recent Backtests";
       nodes.panelModalBody.innerHTML = buildRecentRunsMarkup(state.recentRuns, true);
+    } else if (kind === "signals") {
+      nodes.panelModalTitle.textContent = "Active & Inactive Signals";
+      nodes.panelModalBody.innerHTML = buildSignalsMarkup(state.activeRun?.signals || [], true);
     } else {
       nodes.panelModalTitle.textContent = "Run Feed";
       nodes.panelModalBody.innerHTML = buildEventFeedMarkup(state.activeRun?.events || [], true);
@@ -196,6 +208,7 @@ document.documentElement.dataset.dashboardReady = "true";
     }
     state.panelModalOpen = false;
     state.activePanelModal = null;
+    state.selectedSignalId = null;
     nodes.panelModal.hidden = true;
     syncBodyModalState();
   }
@@ -362,11 +375,19 @@ document.documentElement.dataset.dashboardReady = "true";
     renderMetrics(run);
     renderEventFeed(run.events || []);
     renderMessages(run.messages || []);
+    renderSignals(run.signals || []);
     renderRecentRuns(state.recentRuns);
     if (state.modalOpen && state.selectedMessageId) {
       const trace = run.messages?.find((item) => item.message_id === state.selectedMessageId);
       if (trace) {
         openModal(trace);
+      }
+    }
+    if (state.panelModalOpen && state.activePanelModal === "signal-detail" && state.selectedSignalId) {
+      const signal = run.signals?.find((item) => item.signal_id === state.selectedSignalId);
+      if (signal) {
+        nodes.panelModalTitle.textContent = `${signal.symbol || "Signal"} Lifecycle`;
+        nodes.panelModalBody.innerHTML = buildSignalDetailMarkup(signal);
       }
     }
   }
@@ -509,6 +530,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.currentPhaseSummary.textContent = "Waiting to start.";
     nodes.currentMessageLabel.textContent = "None";
     nodes.currentMessageSummary.textContent = "No message is being processed yet.";
+    renderSignals([]);
   }
 
   function openModal(trace) {
@@ -561,6 +583,159 @@ document.documentElement.dataset.dashboardReady = "true";
     state.selectedMessageId = null;
     nodes.modal.hidden = true;
     syncBodyModalState();
+  }
+
+  function renderSignals(signals) {
+    const activeCount = signals.filter((signal) => signal.status_group === "active").length;
+    const inactiveCount = signals.length - activeCount;
+    if (!signals.length) {
+      nodes.signalStatePreview.textContent = "No simulated signal state yet.";
+      nodes.signalStatePreview.classList.add("empty-state-box");
+      if (state.panelModalOpen && state.activePanelModal === "signals") {
+        nodes.panelModalBody.innerHTML = buildSignalsMarkup(signals, true);
+      }
+      return;
+    }
+    nodes.signalStatePreview.classList.remove("empty-state-box");
+    nodes.signalStatePreview.innerHTML = `
+      <div class="preview-stack signal-preview-stack">
+        <div class="signal-count-row">
+          <span class="signal-state-chip active">${activeCount} active</span>
+          <span class="signal-state-chip inactive">${inactiveCount} inactive</span>
+        </div>
+        ${buildSignalsMarkup(signals.slice(0, 3), false)}
+      </div>
+    `;
+    if (state.panelModalOpen && state.activePanelModal === "signals") {
+      nodes.panelModalBody.innerHTML = buildSignalsMarkup(signals, true);
+    }
+  }
+
+  function buildSignalsMarkup(signals, expanded) {
+    if (!signals.length) {
+      return '<div class="empty-state-box">No simulated signal state yet.</div>';
+    }
+    return `
+      <div class="signal-list ${expanded ? "panel-modal-list" : ""}">
+        ${signals
+          .map((signal) => {
+            const active = signal.status_group === "active";
+            const pnlClass = pnlClassName(signal.total_pnl);
+            const entryTime = signal.entry_time_tehran || signal.entry_time;
+            const tpCount = Array.isArray(signal.take_profits) ? signal.take_profits.length : 0;
+            return `
+              <button type="button" class="signal-card ${active ? "active" : "inactive"}" data-signal-id="${escapeHtml(signal.signal_id)}">
+                <div class="signal-card-top">
+                  <div>
+                    <strong>${escapeHtml(signal.symbol || "unknown")}</strong>
+                    <span>${escapeHtml(signal.side || "unknown")} • ${escapeHtml(signal.status || "unknown")}</span>
+                  </div>
+                  <span class="signal-state-chip ${active ? "active" : "inactive"}">${active ? "active" : "inactive"}</span>
+                </div>
+                <div class="signal-config-line">
+                  <span>Entry ${escapeHtml(signal.entry_price || "n/a")}</span>
+                  <span>Mark ${escapeHtml(signal.mark_price || "n/a")}</span>
+                  <span>SL ${escapeHtml(signal.stop_loss || "n/a")}</span>
+                  <span>${tpCount} TP</span>
+                </div>
+                <div class="signal-card-bottom">
+                  <span>${formatTehranDate(entryTime)}</span>
+                  <strong class="${pnlClass}">PnL ${escapeHtml(String(signal.total_pnl ?? "0"))}</strong>
+                </div>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>
+    `;
+  }
+
+  function openSignalModal(signalId) {
+    const signal = state.activeRun?.signals?.find((item) => item.signal_id === signalId);
+    if (!signal) {
+      return;
+    }
+    state.panelModalOpen = true;
+    state.activePanelModal = "signal-detail";
+    state.selectedSignalId = signalId;
+    nodes.panelModal.hidden = false;
+    nodes.panelModalTitle.textContent = `${signal.symbol || "Signal"} Lifecycle`;
+    nodes.panelModalBody.innerHTML = buildSignalDetailMarkup(signal);
+    syncBodyModalState();
+  }
+
+  function buildSignalDetailMarkup(signal) {
+    const takeProfits = Array.isArray(signal.take_profits) ? signal.take_profits : [];
+    return `
+      <div class="signal-detail-shell">
+        <div class="signal-detail-hero ${signal.status_group === "active" ? "active" : "inactive"}">
+          <div>
+            <p class="eyebrow">Signal State</p>
+            <h3>${escapeHtml(signal.symbol || "unknown")} ${escapeHtml(signal.side || "")}</h3>
+            <p>${escapeHtml(signal.signal_id || "unknown")}</p>
+          </div>
+          <span class="signal-state-chip ${signal.status_group === "active" ? "active" : "inactive"}">
+            ${escapeHtml(signal.status || "unknown")}
+          </span>
+        </div>
+        <div class="signal-detail-grid">
+          ${detailMetric("Entry Time", formatTehranDate(signal.entry_time_tehran || signal.entry_time))}
+          ${detailMetric("Exit Time", signal.exit_time_tehran || signal.exit_time ? formatTehranDate(signal.exit_time_tehran || signal.exit_time) : "open")}
+          ${detailMetric("Entry Price", signal.entry_price || "n/a")}
+          ${detailMetric("Mark Price", signal.mark_price || "n/a")}
+          ${detailMetric("Stop Loss", signal.stop_loss || "n/a")}
+          ${detailMetric("Open Quantity", signal.open_quantity || "0")}
+          ${detailMetric("Targets Hit", signal.targets_hit ?? "0")}
+          ${detailMetric("Total PnL", signal.total_pnl ?? "0", pnlClassName(signal.total_pnl))}
+          ${detailMetric("Realized PnL", signal.realized_pnl ?? "0", pnlClassName(signal.realized_pnl))}
+          ${detailMetric("Unrealized PnL", signal.unrealized_pnl ?? "0", pnlClassName(signal.unrealized_pnl))}
+        </div>
+        <section class="signal-detail-section">
+          <h3>Take Profits</h3>
+          <div class="target-pill-row">
+            ${
+              takeProfits.length
+                ? takeProfits.map((target, index) => `<span class="target-pill">TP${index + 1}: ${escapeHtml(target)}</span>`).join("")
+                : '<span class="target-pill muted">No configured targets.</span>'
+            }
+          </div>
+        </section>
+        <section class="signal-detail-section">
+          <h3>Lifecycle</h3>
+          ${buildLifecycleMarkup(signal)}
+        </section>
+      </div>
+    `;
+  }
+
+  function detailMetric(label, value, extraClass = "") {
+    return `
+      <div class="signal-detail-metric ${extraClass}">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(String(value))}</span>
+      </div>
+    `;
+  }
+
+  function buildLifecycleMarkup(signal) {
+    const lifecycle = Array.isArray(signal.lifecycle) ? signal.lifecycle : [];
+    const started = [`created_at=${signal.entry_time_tehran || signal.entry_time}`];
+    const items = [...started, ...lifecycle];
+    if (!items.length) {
+      return '<div class="empty-state-box">No lifecycle events yet.</div>';
+    }
+    return `
+      <div class="signal-lifecycle">
+        ${items
+          .map((item, index) => `
+            <article class="lifecycle-item ${index === items.length - 1 ? "current" : ""}">
+              <span>${index + 1}</span>
+              <p>${escapeHtml(String(item))}</p>
+            </article>
+          `)
+          .join("")}
+      </div>
+    `;
   }
 
   function upsertRun(run) {
@@ -757,6 +932,36 @@ document.documentElement.dataset.dashboardReady = "true";
       minute: "2-digit",
       second: "2-digit",
     }).format(date);
+  }
+
+  function formatTehranDate(value) {
+    if (!value) {
+      return "n/a";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Tehran",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(date);
+  }
+
+  function pnlClassName(value) {
+    const numeric = Number(value || 0);
+    if (numeric > 0) {
+      return "pnl-positive";
+    }
+    if (numeric < 0) {
+      return "pnl-negative";
+    }
+    return "pnl-flat";
   }
 
   function escapeHtml(value) {

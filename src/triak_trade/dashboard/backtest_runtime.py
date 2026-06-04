@@ -67,6 +67,7 @@ class DashboardBacktestRun(BaseModel):
     live_realized_pnl: str = "0"
     live_unrealized_pnl: str = "0"
     live_total_pnl: str = "0"
+    signals: list[dict[str, Any]] = Field(default_factory=list)
     report_path: str | None = None
     markdown_report_path: str | None = None
     errors: list[str] = Field(default_factory=list)
@@ -368,6 +369,8 @@ class DashboardBacktestCoordinator:
         for key in ("live_realized_pnl", "live_unrealized_pnl", "live_total_pnl"):
             if key in event.live_metrics:
                 setattr(run, key, event.live_metrics[key])
+        if event.live_signals:
+            run.signals = event.live_signals
         run.events.append(
             DashboardBacktestEvent(
                 at=event.timestamp,

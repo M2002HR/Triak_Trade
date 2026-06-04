@@ -38,8 +38,12 @@ class _OpenPosition:
 class SimulationSignalState:
     signal_id: str
     symbol: str
+    side: TradeSide
     status: str
     open_quantity: Decimal
+    entry_price: Decimal | None
+    stop_loss: Decimal | None
+    take_profits: list[Decimal]
     realized_pnl: Decimal
     unrealized_pnl: Decimal
     mark_price: Decimal
@@ -47,6 +51,7 @@ class SimulationSignalState:
     exit_time: datetime | None
     exit_price: Decimal | None
     targets_hit: int
+    notes: list[str]
 
 
 @dataclass(frozen=True)
@@ -317,6 +322,8 @@ class BacktestSimulator:
         if next_candle is None:
             return None, None
         if entry_type is EntryType.MARKET:
+            if not self._market_entry_candle_is_aligned(signal_time, next_candle):
+                return None, None
             return next_candle.open, next_candle.open_time
         if entry_low is not None and entry_high is not None:
             midpoint = (entry_low + entry_high) / Decimal("2")
@@ -334,6 +341,14 @@ class BacktestSimulator:
                     return entry_low, candle.open_time
             return None, None
         return next_candle.open, next_candle.open_time
+
+    @staticmethod
+    def _market_entry_candle_is_aligned(signal_time: datetime, candle: Candle) -> bool:
+        candle_duration = candle.close_time - candle.open_time
+        if candle_duration <= timedelta(0):
+            candle_duration = timedelta(minutes=1)
+        max_delay = max(candle_duration * 2, timedelta(minutes=2))
+        return candle.open_time - signal_time <= max_delay
 
     def _first_candle_open_after(
         self,
@@ -577,8 +592,12 @@ class BacktestSimulator:
             signal_states[signal_id] = SimulationSignalState(
                 signal_id=signal_id,
                 symbol=trade.symbol,
+                side=trade.side,
                 status=trade.status,
                 open_quantity=Decimal("0"),
+                entry_price=trade.entry_price,
+                stop_loss=None,
+                take_profits=[],
                 realized_pnl=trade.pnl,
                 unrealized_pnl=Decimal("0"),
                 mark_price=mark_price,
@@ -586,6 +605,7 @@ class BacktestSimulator:
                 exit_time=trade.exit_time,
                 exit_price=trade.exit_price,
                 targets_hit=0,
+                notes=list(trade.notes),
             )
 
         for signal_id, position in open_positions.items():
@@ -595,8 +615,12 @@ class BacktestSimulator:
             signal_states[signal_id] = SimulationSignalState(
                 signal_id=signal_id,
                 symbol=position.symbol,
+                side=position.side,
                 status="open",
                 open_quantity=position.remaining_quantity,
+                entry_price=position.entry_price,
+                stop_loss=position.stop_loss,
+                take_profits=list(position.take_profits),
                 realized_pnl=position.realized_pnl,
                 unrealized_pnl=unrealized,
                 mark_price=mark_price,
@@ -604,6 +628,7 @@ class BacktestSimulator:
                 exit_time=position.exit_time,
                 exit_price=position.exit_price,
                 targets_hit=position.targets_hit,
+                notes=list(position.notes),
             )
 
         wins = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl > 0)

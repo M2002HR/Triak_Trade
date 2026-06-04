@@ -17,6 +17,7 @@ class FakeMarketDataProvider:
     def __init__(self, candles_by_symbol: dict[str, list[Candle]] | None = None) -> None:
         self.candles_by_symbol = candles_by_symbol or {}
         self.requests: list[str] = []
+        self.request_ranges: list[tuple[str, str, datetime, datetime]] = []
 
     async def get_klines(
         self,
@@ -26,6 +27,7 @@ class FakeMarketDataProvider:
         end_time: datetime,
     ) -> list[Candle]:
         self.requests.append(symbol)
+        self.request_ranges.append((symbol, interval, start_time, end_time))
         return list(self.candles_by_symbol.get(symbol, []))
 
     async def get_latest_price(self, symbol: str) -> Decimal:
@@ -426,6 +428,54 @@ def test_real_backtest_runner_starts_simulation_tracking_immediately_for_valid_s
     assert market_stage.status == "completed"
     assert simulated_stage.status == "active"
     assert "Simulation tracking started" in (simulated_stage.detail or "")
+
+
+def test_real_backtest_runner_anchors_market_data_to_start_message_time(
+    tmp_path: Path,
+) -> None:
+    signal_time = datetime(2026, 6, 1, 16, 43, 56, tzinfo=timezone.utc)
+    request_start = signal_time + timedelta(days=2)
+    request_end = request_start + timedelta(hours=24)
+    message = _message(
+        signal_time,
+        "BTCUSDT LONG MARKET SL: 67400 TP: 69000 / 70000 Leverage: 2x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(signal_time)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events = []
+
+    runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=request_start,
+            to_date=request_end,
+            start_message_link="https://t.me/Tofan_Trade/1",
+            start_message_id=1,
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert provider.request_ranges
+    _symbol, _interval, market_start, market_end = provider.request_ranges[0]
+    assert market_start == signal_time
+    assert market_start < request_start
+    assert market_end >= request_end
+    traces = [event.trace for event in progress_events if event.trace is not None]
+    assert traces
+    debug_notes = "\n".join(traces[-1].debug_notes)
+    assert "market_data_start_utc=2026-06-01T16:43:56+00:00" in debug_notes
+    assert "market_data_start_tehran=2026-06-01T20:13:56+03:30" in debug_notes
 
 
 def test_real_backtest_runner_hydrates_caption_media_on_demand_only(tmp_path: Path) -> None:

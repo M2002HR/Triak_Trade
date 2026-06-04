@@ -38,6 +38,7 @@ from triak_trade.backtesting.symbol_mapper import (
 )
 from triak_trade.backtesting.telegram_source import BacktestTelegramSource
 from triak_trade.config.settings import Settings
+from triak_trade.core.time import TEHRAN_TZ
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import RawTelegramMessage, SignalState
@@ -95,6 +96,7 @@ class RealBacktestProgressEvent(BaseModel):
     current_message_id: int | None = None
     counts: dict[str, int] = Field(default_factory=dict)
     live_metrics: dict[str, str] = Field(default_factory=dict)
+    live_signals: list[dict[str, Any]] = Field(default_factory=list)
     trace: RealBacktestMessageTrace | None = None
 
 
@@ -1469,7 +1471,7 @@ class RealBacktestRunner:
                     move_stop_to_entry=detect_move_stop_to_entry(message.text),
                 )
             )
-            live_metrics = self._update_live_simulation_state(
+            live_metrics, live_signals = self._update_live_simulation_state(
                 request=request,
                 events=events,
                 traces_by_message_id=traces_by_message_id,
@@ -1486,6 +1488,7 @@ class RealBacktestRunner:
                 summary=f"Message {message.message_id} advanced live simulation state.",
                 counts=counts,
                 live_metrics=live_metrics,
+                live_signals=live_signals,
             )
         return (
             events,
@@ -1522,14 +1525,20 @@ class RealBacktestRunner:
         )
         last_error_type: str | None = None
         attempted: list[str] = []
+        range_start, range_end = self._market_data_range_for_trace(request, trace)
+        trace.debug_notes.append(f"market_data_start_utc={range_start.isoformat()}")
+        trace.debug_notes.append(
+            f"market_data_start_tehran={range_start.astimezone(TEHRAN_TZ).isoformat()}"
+        )
+        trace.debug_notes.append(f"market_data_end_utc={range_end.isoformat()}")
         for candidate_symbol in candidate_symbols:
             attempted.append(candidate_symbol)
             try:
                 fetched = await self.market_data_provider.get_klines(
                     candidate_symbol,
                     request.interval,
-                    request.resolve_range()[0],
-                    request.resolve_range()[1],
+                    range_start,
+                    range_end,
                 )
             except Exception as exc:
                 last_error_type = type(exc).__name__
@@ -1560,6 +1569,26 @@ class RealBacktestRunner:
         )
         return None, market_symbol
 
+    def _market_data_range_for_trace(
+        self,
+        request: RealBacktestRunRequest,
+        trace: RealBacktestMessageTrace,
+    ) -> tuple[datetime, datetime]:
+        requested_start, requested_end = request.resolve_range()
+        signal_time = self._to_utc(trace.message_date)
+        start = signal_time if signal_time < requested_start else requested_start
+        minimum_end = signal_time + timedelta(
+            hours=max(1, self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS)
+        )
+        end = max(requested_end, minimum_end)
+        return start, end
+
+    @staticmethod
+    def _to_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
     def _update_live_simulation_state(
         self,
         *,
@@ -1571,14 +1600,14 @@ class RealBacktestRunner:
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         current_message_id: int,
-    ) -> dict[str, str]:
+    ) -> tuple[dict[str, str], list[dict[str, Any]]]:
         available_candles = [
             candle
             for candle_group in prefetched_candles_by_symbol.values()
             for candle in candle_group
         ]
         if not events or not available_candles or not signal_trace_map:
-            return self._empty_live_metrics()
+            return self._empty_live_metrics(), []
 
         simulator = BacktestEngine(classifier=RegexMessageClassifier()).simulator
         _trades, _balance, snapshots = simulator.simulate_with_snapshots(
@@ -1590,9 +1619,10 @@ class RealBacktestRunner:
             active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
         )
         if not snapshots:
-            return self._empty_live_metrics()
+            return self._empty_live_metrics(), []
         snapshot = snapshots[-1]
         metrics = self._live_metrics_from_snapshot(snapshot)
+        live_signals = self._live_signals_from_snapshot(snapshot)
         self._apply_snapshot_to_traces(
             snapshot=snapshot,
             traces_by_message_id=traces_by_message_id,
@@ -1601,8 +1631,9 @@ class RealBacktestRunner:
             counts=counts,
             current_message_id=current_message_id,
             live_metrics=metrics,
+            live_signals=live_signals,
         )
-        return metrics
+        return metrics, live_signals
 
     def _apply_snapshot_to_traces(
         self,
@@ -1614,6 +1645,7 @@ class RealBacktestRunner:
         counts: dict[str, int],
         current_message_id: int,
         live_metrics: dict[str, str],
+        live_signals: list[dict[str, Any]],
     ) -> None:
         for signal_id, message_id in signal_trace_map.items():
             trace = traces_by_message_id.get(message_id)
@@ -1659,6 +1691,7 @@ class RealBacktestRunner:
                 counts=counts,
                 trace=trace,
                 live_metrics=live_metrics,
+                live_signals=live_signals,
             )
 
     @staticmethod
@@ -1672,6 +1705,50 @@ class RealBacktestRunner:
             "live_unrealized_pnl": str(snapshot.unrealized_pnl),
             "live_total_pnl": str(snapshot.total_pnl),
         }
+
+    @staticmethod
+    def _live_signals_from_snapshot(snapshot: SimulationSnapshot) -> list[dict[str, Any]]:
+        signals: list[dict[str, Any]] = []
+        for state in snapshot.signal_states.values():
+            lifecycle: list[str] = []
+            if state.targets_hit:
+                lifecycle.append(f"targets_hit={state.targets_hit}")
+            lifecycle.extend(state.notes)
+            if state.exit_time is not None:
+                lifecycle.append(f"exit_time={state.exit_time.isoformat()}")
+            signals.append(
+                {
+                    "signal_id": state.signal_id,
+                    "symbol": state.symbol,
+                    "side": state.side.value,
+                    "status": state.status,
+                    "status_group": "active" if state.status == "open" else "inactive",
+                    "entry_time": state.entry_time.isoformat(),
+                    "entry_time_tehran": state.entry_time.astimezone(TEHRAN_TZ).isoformat(),
+                    "exit_time": state.exit_time.isoformat() if state.exit_time else None,
+                    "exit_time_tehran": (
+                        state.exit_time.astimezone(TEHRAN_TZ).isoformat()
+                        if state.exit_time
+                        else None
+                    ),
+                    "entry_price": (
+                        str(state.entry_price) if state.entry_price is not None else None
+                    ),
+                    "stop_loss": str(state.stop_loss) if state.stop_loss is not None else None,
+                    "take_profits": [str(item) for item in state.take_profits],
+                    "open_quantity": str(state.open_quantity),
+                    "mark_price": str(state.mark_price),
+                    "realized_pnl": str(state.realized_pnl),
+                    "unrealized_pnl": str(state.unrealized_pnl),
+                    "total_pnl": str(state.realized_pnl + state.unrealized_pnl),
+                    "targets_hit": state.targets_hit,
+                    "lifecycle": lifecycle,
+                }
+            )
+        return sorted(
+            signals,
+            key=lambda item: (item["status_group"] != "active", str(item["entry_time"])),
+        )
 
     @staticmethod
     def _empty_live_metrics() -> dict[str, str]:
@@ -1810,6 +1887,7 @@ class RealBacktestRunner:
         summary: str,
         counts: dict[str, int] | None = None,
         live_metrics: dict[str, str] | None = None,
+        live_signals: list[dict[str, Any]] | None = None,
     ) -> None:
         if progress_callback is None:
             return
@@ -1822,6 +1900,7 @@ class RealBacktestRunner:
                 summary=summary,
                 counts=counts or {},
                 live_metrics=live_metrics or {},
+                live_signals=live_signals or [],
             )
         )
 
@@ -1834,6 +1913,7 @@ class RealBacktestRunner:
         counts: dict[str, int],
         trace: RealBacktestMessageTrace,
         live_metrics: dict[str, str] | None = None,
+        live_signals: list[dict[str, Any]] | None = None,
     ) -> None:
         if progress_callback is None:
             return
@@ -1847,6 +1927,7 @@ class RealBacktestRunner:
                 current_message_id=trace.message_id,
                 counts=counts,
                 live_metrics=live_metrics or {},
+                live_signals=live_signals or [],
                 trace=trace.model_copy(deep=True),
             )
         )

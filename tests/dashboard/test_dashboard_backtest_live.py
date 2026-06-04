@@ -120,6 +120,29 @@ class FakeRunner:
                         "parsed_signals": 1,
                         "valid_signals": 1,
                     },
+                    live_signals=[
+                        {
+                            "signal_id": "sig_501",
+                            "symbol": "BTCUSDT",
+                            "side": "long",
+                            "status": "open",
+                            "status_group": "active",
+                            "entry_time": now.isoformat(),
+                            "entry_time_tehran": "2026-06-04T03:30:00+03:30",
+                            "exit_time": None,
+                            "exit_time_tehran": None,
+                            "entry_price": "68010",
+                            "stop_loss": "67400",
+                            "take_profits": ["69000", "70000"],
+                            "open_quantity": "1",
+                            "mark_price": "68100",
+                            "realized_pnl": "0",
+                            "unrealized_pnl": "2.5",
+                            "total_pnl": "2.5",
+                            "targets_hit": 0,
+                            "lifecycle": ["created"],
+                        }
+                    ],
                     trace=trace,
                 )
             )
@@ -186,6 +209,9 @@ def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> No
     assert "Per-Message Trace" in response.text
     assert "Open Run Feed" in response.text
     assert "Open History" in response.text
+    assert "Active & Inactive" in response.text
+    assert 'id="signal-state-preview"' in response.text
+    assert 'data-open-panel-modal="signals"' in response.text
     assert 'id="run-action-bar"' in response.text
     assert 'data-message-filter="signals"' in response.text
     assert 'id="message-modal" class="modal-shell" hidden' in response.text
@@ -227,6 +253,8 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
     assert loaded["channel_resolved"] == "https://t.me/Tofan_Trade"
     assert loaded["messages"][0]["message_id"] == 501
     assert loaded["messages"][0]["classification"] == "new_signal"
+    assert loaded["signals"][0]["signal_id"] == "sig_501"
+    assert loaded["signals"][0]["status_group"] == "active"
     assert loaded["report_path"] == "runtime/reports/backtests/report.json"
 
 
