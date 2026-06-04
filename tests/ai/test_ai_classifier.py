@@ -67,6 +67,7 @@ def test_ai_classifier_maps_new_signal_open() -> None:
     )
     result = classifier.classify(_raw("x"), _context())
     assert result.parsed_signal.action is SignalAction.OPEN
+    assert "classifier=ai" in result.debug_notes
 
 
 def test_ai_classifier_maps_cancel() -> None:
@@ -122,6 +123,7 @@ def test_ai_classifier_fallback_to_regex_on_failure() -> None:
     result = classifier.classify(_raw("cancel BTC signal"), _context())
     assert result.parsed_signal.action in {SignalAction.CANCEL, SignalAction.UNKNOWN}
     assert any("fallback" in note for note in result.debug_notes)
+    assert "classifier=regex" in result.debug_notes
 
 
 def test_ai_classifier_no_fallback_returns_safe_unknown() -> None:

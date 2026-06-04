@@ -380,7 +380,7 @@ class RealBacktestRunner:
         ambiguous_messages = counts["ambiguous_messages"]
         invalid_signals = counts["invalid_signals"]
         ai_used = any(
-            any(note.startswith("classification=") for note in event.debug_notes)
+            "classifier=ai" in event.debug_notes
             for event in events
         )
         regex_fallback_used = (
@@ -754,6 +754,15 @@ class RealBacktestRunner:
                 base_url=self.settings.AI_GATEWAY_BASE_URL,
                 timeout_seconds=self.settings.AI_GATEWAY_TIMEOUT_SECONDS,
                 classify_path=self.settings.AI_GATEWAY_CLASSIFY_PATH,
+                auth_header_name=self.settings.AI_GATEWAY_AUTH_HEADER_NAME,
+                auth_token=self.settings.AI_GATEWAY_AUTH_TOKEN.get_secret_value(),
+                default_model=self.settings.AI_GATEWAY_DEFAULT_MODEL,
+                provider_priority=tuple(
+                    item.strip()
+                    for item in self.settings.AI_GATEWAY_PROVIDER_PRIORITY.split(",")
+                    if item.strip()
+                ),
+                trust_env=self.settings.AI_GATEWAY_TRUST_ENV,
             )
             classifier: MessageClassifier = AIMessageClassifier(
                 settings=self.settings,

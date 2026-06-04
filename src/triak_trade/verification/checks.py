@@ -209,8 +209,20 @@ def ai_dry_run_check(settings: Settings) -> VerificationCheckResult:
 
     def handler(request: httpx.Request) -> httpx.Response:
         request_json = json.loads(request.content.decode("utf-8"))
-        context = request_json.get("context", {})
-        text = str(context.get("message_text", "")).lower()
+        text = ""
+        messages = request_json.get("messages")
+        if isinstance(messages, list) and len(messages) > 1 and isinstance(messages[1], dict):
+            content = messages[1].get("content")
+            if isinstance(content, str):
+                try:
+                    content_payload = json.loads(content)
+                except ValueError:
+                    text = content.lower()
+                else:
+                    context_payload = content_payload.get("context", {})
+                    if isinstance(context_payload, dict):
+                        message_text = context_payload.get("message_text", "")
+                        text = str(message_text).lower()
         body = {
             "classification": "NEW_SIGNAL",
             "action": "open",

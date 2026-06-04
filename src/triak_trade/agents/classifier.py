@@ -42,7 +42,7 @@ class RegexMessageClassifier:
 
         relation_reason: str | None = None
         related_signal_id: str | None = None
-        debug_notes: list[str] = []
+        debug_notes: list[str] = ["classifier=regex"]
 
         by_reply = context.find_signal_by_message_reply(message.reply_to_msg_id)
         if by_reply is not None:

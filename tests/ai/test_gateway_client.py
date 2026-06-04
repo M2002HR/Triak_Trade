@@ -57,19 +57,37 @@ def test_gateway_client_sends_payload(context: AIMessageContext) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         observed["path"] = request.url.path
+        observed["auth"] = request.headers.get("x-api-token")
         observed["json"] = request.read().decode()
-        return httpx.Response(200, json=_ok_payload())
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": httpx.Response(200, json=_ok_payload()).text,
+                        }
+                    }
+                ]
+            },
+        )
 
     client = AjilGatewayClient(
         base_url="http://mocked.local",
         timeout_seconds=10,
-        classify_path="/v1/classify/telegram-signal",
+        classify_path="/v1/chat/completions",
+        auth_token="test-token",
+        default_model="gemini-2.5-flash",
+        provider_priority=("gemini", "groq"),
         transport=httpx.MockTransport(handler),
     )
     result = client.classify_message(context)
     assert result.classification == "NEW_SIGNAL"
-    assert observed["path"] == "/v1/classify/telegram-signal"
-    assert "prompt" in str(observed["json"])
+    assert observed["path"] == "/v1/chat/completions"
+    assert observed["auth"] == "test-token"
+    assert "messages" in str(observed["json"])
+    assert "response_format" in str(observed["json"])
+    assert "x_router" in str(observed["json"])
 
 
 def test_gateway_client_timeout(context: AIMessageContext) -> None:
@@ -115,6 +133,51 @@ def test_gateway_client_schema_invalid(context: AIMessageContext) -> None:
     )
     with pytest.raises(AIGatewayResponseError):
         client.classify_message(context)
+
+
+def test_gateway_client_accepts_direct_schema_payload(context: AIMessageContext) -> None:
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=_ok_payload())),
+    )
+    result = client.classify_message(context)
+    assert result.symbol == "BTCUSDT"
+
+
+def test_gateway_client_normalizes_alternate_ai_schema(context: AIMessageContext) -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": """```json
+                    {
+                      "classification": "new signal",
+                      "reasoning_summary": "clear signal",
+                      "extracted_fields": {
+                        "symbol": "BTCUSDT",
+                        "direction": "LONG",
+                        "entry_price_min": 68000,
+                        "entry_price_max": 68200,
+                        "stop_loss": 67400,
+                        "take_profit": [69000, 70000]
+                      }
+                    }
+                    ```"""
+                }
+            }
+        ]
+    }
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+    result = client.classify_message(context)
+    assert result.classification == "NEW_SIGNAL"
+    assert result.action == "open"
+    assert result.symbol == "BTCUSDT"
+    assert str(result.entry_low) == "68000"
 
 
 @pytest.mark.skipif(

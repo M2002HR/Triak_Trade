@@ -73,6 +73,13 @@ def test_cli_ai_classify_dry_run_signal() -> None:
     assert '"parsed_action": "open"' in result.stdout
 
 
+def test_cli_ai_gateway_check() -> None:
+    result = runner.invoke(app, ['ai-gateway-check'])
+    assert result.exit_code == 0
+    assert '"enabled"' in result.stdout
+    assert '"auth_token_present"' in result.stdout
+
+
 def test_cli_ai_classify_dry_run_profit_and_ad() -> None:
     profit = runner.invoke(app, ["ai-classify-dry-run", "TP1 hit ✅ +120% profit"])
     assert profit.exit_code == 0

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -34,6 +34,13 @@ from triak_trade.agents.clock import FakeClock
 from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
+from triak_trade.ai.runtime import (
+    ai_gateway_logs,
+    ai_gateway_safe_config,
+    ai_gateway_status,
+    start_ai_gateway_process,
+    stop_ai_gateway_process,
+)
 from triak_trade.backtesting import (
     BacktestEngine,
     BacktestRequest,
@@ -109,6 +116,29 @@ def _build_real_backtest_runner(
     telegram_client: TelegramClientInterface | None = None,
 ) -> RealBacktestRunner:
     return RealBacktestRunner(settings=settings, telegram_client=telegram_client)
+
+
+def _build_ai_gateway_client(
+    settings: Settings,
+    *,
+    base_url: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> AjilGatewayClient:
+    return AjilGatewayClient(
+        base_url=base_url or settings.AI_GATEWAY_BASE_URL,
+        timeout_seconds=settings.AI_GATEWAY_TIMEOUT_SECONDS,
+        classify_path=settings.AI_GATEWAY_CLASSIFY_PATH,
+        auth_header_name=settings.AI_GATEWAY_AUTH_HEADER_NAME,
+        auth_token=settings.AI_GATEWAY_AUTH_TOKEN.get_secret_value(),
+        default_model=settings.AI_GATEWAY_DEFAULT_MODEL,
+        provider_priority=tuple(
+            item.strip()
+            for item in settings.AI_GATEWAY_PROVIDER_PRIORITY.split(",")
+            if item.strip()
+        ),
+        trust_env=settings.AI_GATEWAY_TRUST_ENV,
+        transport=transport,
+    )
 
 
 @app.command("version")
@@ -251,15 +281,11 @@ def ai_classify_dry_run_cmd(message: str, real_gateway: bool = typer.Option(Fals
     using_real_gateway = (
         real_gateway
         and settings.AI_GATEWAY_ENABLED
-        and os.getenv("RUN_AI_GATEWAY_INTEGRATION_TESTS") == "1"
+        and settings.RUN_AI_GATEWAY_INTEGRATION_TESTS == 1
     )
 
     if using_real_gateway:
-        client = AjilGatewayClient(
-            base_url=settings.AI_GATEWAY_BASE_URL,
-            timeout_seconds=settings.AI_GATEWAY_TIMEOUT_SECONDS,
-            classify_path=settings.AI_GATEWAY_CLASSIFY_PATH,
-        )
+        client = _build_ai_gateway_client(settings)
         mode = "real-gateway"
     else:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -323,16 +349,21 @@ def ai_classify_dry_run_cmd(message: str, real_gateway: bool = typer.Option(Fals
                 )
             return httpx.Response(200, json=body)
 
-        client = AjilGatewayClient(
+        client = _build_ai_gateway_client(
+            settings,
             base_url="http://mocked.local",
-            timeout_seconds=settings.AI_GATEWAY_TIMEOUT_SECONDS,
-            classify_path=settings.AI_GATEWAY_CLASSIFY_PATH,
             transport=httpx.MockTransport(handler),
         )
         mode = "mock-gateway"
 
     classifier = AIMessageClassifier(settings=settings, gateway_client=client)
-    classified = classifier.classify(raw, context)
+    httpx_logger = logging.getLogger("httpx")
+    previous_httpx_level = httpx_logger.level
+    httpx_logger.setLevel(logging.WARNING)
+    try:
+        classified = classifier.classify(raw, context)
+    finally:
+        httpx_logger.setLevel(previous_httpx_level)
     payload: dict[str, object] = {
         "mode": mode,
         "real_gateway_requested": real_gateway,
@@ -345,6 +376,58 @@ def ai_classify_dry_run_cmd(message: str, real_gateway: bool = typer.Option(Fals
         "debug_notes": classified.debug_notes,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("ai-gateway-check")
+def ai_gateway_check_cmd() -> None:
+    """Show non-secret AI gateway configuration status."""
+    settings = _load_settings()
+    typer.echo(dump_json(ai_gateway_safe_config(settings)))
+
+
+@app.command("ai-gateway-start")
+def ai_gateway_start_cmd() -> None:
+    """Start local Ajil gateway as a background process."""
+    settings = _load_settings()
+    try:
+        result = start_ai_gateway_process(settings)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(dump_json(result))
+
+
+@app.command("ai-gateway-status")
+def ai_gateway_status_cmd() -> None:
+    """Print non-secret AI gateway runtime status."""
+    settings = _load_settings()
+    typer.echo(dump_json(ai_gateway_status(settings)))
+
+
+@app.command("ai-gateway-stop")
+def ai_gateway_stop_cmd() -> None:
+    """Stop local Ajil gateway background process if present."""
+    settings = _load_settings()
+    typer.echo(dump_json(stop_ai_gateway_process(settings)))
+
+
+@app.command("ai-gateway-restart")
+def ai_gateway_restart_cmd() -> None:
+    """Restart local Ajil gateway background process."""
+    settings = _load_settings()
+    stopped = stop_ai_gateway_process(settings)
+    try:
+        started = start_ai_gateway_process(settings)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(dump_json({"stopped": stopped, "started": started}))
+
+
+@app.command("ai-gateway-logs")
+def ai_gateway_logs_cmd(lines: int = typer.Option(100, "--lines", min=1)) -> None:
+    """Tail redacted local Ajil gateway logs."""
+    settings = _load_settings()
+    for line in ai_gateway_logs(settings, lines=lines):
+        typer.echo(line)
 
 
 @app.command("telegram-check")
@@ -750,7 +833,19 @@ def real_backtest_run_cmd(
         send_telegram_summary=send_telegram_summary,
         send_log_channel=send_log_channel,
     )
-    result = runner.run_sync(request)
+    logger_overrides = {
+        "telethon": logging.ERROR,
+        "httpx": logging.WARNING,
+        "httpcore": logging.WARNING,
+    }
+    previous_levels = {name: logging.getLogger(name).level for name in logger_overrides}
+    for name, level in logger_overrides.items():
+        logging.getLogger(name).setLevel(level)
+    try:
+        result = runner.run_sync(request)
+    finally:
+        for name, level in previous_levels.items():
+            logging.getLogger(name).setLevel(level)
     typer.echo(
         json.dumps(
             {

@@ -65,6 +65,7 @@ class AIMessageClassifier(MessageClassifier):
         except AIGatewayError as exc:
             if self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK:
                 classified = self.regex_fallback.classify(message, context)
+                classified.debug_notes.append("classifier=regex")
                 classified.debug_notes.append("ai-fallback=regex")
                 classified.debug_notes.append(f"ai-error={exc.__class__.__name__}")
                 return classified
@@ -101,9 +102,12 @@ class AIMessageClassifier(MessageClassifier):
             relation_reason=result.relation_reason,
             confidence=result.confidence,
             debug_notes=[
+                "classifier=ai",
+                f"ai_gateway_path={self.gateway_client.classify_path}",
                 f"classification={result.classification}",
                 f"confidence={result.confidence}",
                 f"validation_ok={valid}",
+                f"reasoning_summary={result.reasoning_summary}",
                 *[f"validation_error={e}" for e in errors],
             ],
         )
@@ -163,7 +167,7 @@ class AIMessageClassifier(MessageClassifier):
             related_signal_id=None,
             relation_reason=None,
             confidence=Decimal("0.10"),
-            debug_notes=[note],
+            debug_notes=["classifier=ai", note],
         )
 
     @staticmethod

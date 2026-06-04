@@ -119,11 +119,19 @@ class Settings(BaseSettings):
     SIGNAL_MAX_UPDATE_WINDOW_HOURS: int = 48
     CHANNEL_AGENT_CONTEXT_MESSAGE_LIMIT: int = 50
     AI_GATEWAY_ENABLED: bool = False
-    AI_GATEWAY_BASE_URL: str = "http://localhost:8000"
+    AI_GATEWAY_BASE_URL: str = "http://127.0.0.1:8090"
     AI_GATEWAY_TIMEOUT_SECONDS: int = 30
     AI_GATEWAY_PROVIDER_PRIORITY: str = "gemini,groq"
     AI_GATEWAY_DEFAULT_MODEL: str = ""
-    AI_GATEWAY_CLASSIFY_PATH: str = "/v1/classify/telegram-signal"
+    AI_GATEWAY_CLASSIFY_PATH: str = "/v1/chat/completions"
+    AI_GATEWAY_AUTH_HEADER_NAME: str = "x-api-token"
+    AI_GATEWAY_AUTH_TOKEN: SecretStr = Field(default=SecretStr(""))
+    AI_GATEWAY_TRUST_ENV: bool = False
+    AI_GATEWAY_RUNTIME_DIR: str = "runtime/ai_gateway"
+    AI_GATEWAY_PID_FILE: str = "runtime/ai_gateway/ai_gateway.pid"
+    AI_GATEWAY_STATUS_FILE: str = "runtime/ai_gateway/status.json"
+    AI_GATEWAY_LOG_FILE: str = "runtime/ai_gateway/ai_gateway.log"
+    AI_GATEWAY_APP_DIR: str = "external/Ajil_Unified_AI_Gateway"
     RUN_AI_GATEWAY_INTEGRATION_TESTS: int = 0
     AI_CLASSIFIER_ENABLED: bool = False
     AI_CLASSIFIER_MIN_CONFIDENCE: Decimal = Decimal("0.70")
