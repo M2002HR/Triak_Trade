@@ -90,6 +90,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         "REAL_BACKTEST_REPORT_DIR": str(tmp_path),
         "BACKTEST_DEFAULT_FILL_POLICY": "conservative",
         "REAL_BACKTEST_SEND_TO_LOG_CHANNEL": False,
+        "TELEGRAM_LOG_CHANNEL_RETRY_DELAY_SECONDS": 0,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -592,7 +593,7 @@ def test_real_backtest_runner_warns_when_log_channel_send_is_skipped(tmp_path: P
 
     assert result.success is True
     assert log_client.calls > 0
-    assert any("(skipped)" in warning for warning in result.warnings)
+    assert any("skipped:guard disabled" in warning for warning in result.warnings)
 
 
 def test_real_backtest_runner_sends_failure_log_for_no_valid_signal_case(tmp_path: Path) -> None:

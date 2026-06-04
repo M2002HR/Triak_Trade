@@ -224,6 +224,7 @@ class RealBacktestRunner:
         self.log_client = log_client or TelegramLogChannelClient(settings=settings)
         self.validator = ParsedSignalValidator()
         self._log_lock = threading.Lock()
+        self._last_log_send_failure_reason: str | None = None
 
     def readiness(self) -> RealBacktestReadiness:
         issues: list[str] = []
@@ -1049,17 +1050,25 @@ class RealBacktestRunner:
         warnings: list[str] | None,
         warning_message: str,
     ) -> bool:
-        try:
-            result = await self._send_log(text)
-        except Exception as exc:
-            if warnings is not None:
-                self._append_warning(warnings, f"{warning_message} ({type(exc).__name__})")
-            return False
-        if self._send_result_skipped(result):
-            if warnings is not None:
-                self._append_warning(warnings, f"{warning_message} (skipped)")
-            return False
-        return True
+        self._last_log_send_failure_reason = None
+        attempts = max(1, self.settings.TELEGRAM_LOG_CHANNEL_SEND_RETRIES + 1)
+        delay_seconds = max(0, self.settings.TELEGRAM_LOG_CHANNEL_RETRY_DELAY_SECONDS)
+        for attempt in range(attempts):
+            try:
+                result = await self._send_log(text)
+            except Exception as exc:
+                self._last_log_send_failure_reason = type(exc).__name__
+            else:
+                if not self._send_result_skipped(result):
+                    self._last_log_send_failure_reason = None
+                    return True
+                self._last_log_send_failure_reason = self._send_result_skip_reason(result)
+            if attempt < attempts - 1 and delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+        reason = self._last_log_send_failure_reason or "unknown"
+        if warnings is not None:
+            self._append_warning(warnings, f"{warning_message} ({reason})")
+        return False
 
     @staticmethod
     def _send_result_skipped(result: object | None) -> bool:
@@ -1069,6 +1078,15 @@ class RealBacktestRunner:
             return bool(result.get("skipped"))
         skipped = getattr(result, "skipped", None)
         return bool(skipped)
+
+    @staticmethod
+    def _send_result_skip_reason(result: object | None) -> str:
+        if result is None:
+            return "skipped:none"
+        if isinstance(result, dict):
+            return f"skipped:{result.get('reason') or 'unknown'}"
+        reason = getattr(result, "reason", None)
+        return f"skipped:{reason or 'unknown'}"
 
     async def _maybe_send_message_log(
         self,
@@ -1094,7 +1112,8 @@ class RealBacktestRunner:
             ),
         )
         if not sent:
-            trace.debug_notes.append(failed_marker)
+            reason = self._last_log_send_failure_reason or "unknown"
+            trace.debug_notes.append(f"{failed_marker}:{reason}")
             return
         trace.debug_notes.append(sent_marker)
 
