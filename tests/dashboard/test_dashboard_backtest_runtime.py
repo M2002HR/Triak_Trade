@@ -15,6 +15,7 @@ from triak_trade.backtesting.real_runner import (
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.backtest_runtime import (
     DashboardBacktestCoordinator,
+    DashboardBacktestRun,
     DashboardBacktestStore,
     normalize_channel_reference,
 )
@@ -265,3 +266,39 @@ def test_dashboard_backtest_coordinator_notifies_on_updates(tmp_path: Path) -> N
 
     assert any(item.get("type") == "backtest_run" for item in notifications)
     assert any(item["run"]["run_id"] == run.run_id for item in notifications)  # type: ignore[index]
+
+
+def test_dashboard_backtest_coordinator_recovers_incomplete_runs_on_startup(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    orphan = DashboardBacktestRun(
+        run_id="backtest_orphaned",
+        channel_input="@Tofan_Trade",
+        channel_resolved="https://t.me/Tofan_Trade",
+        from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        interval="1m",
+        max_messages=100,
+        use_ai=False,
+        send_log_channel=True,
+        log_per_message=True,
+        status="running",
+        created_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        current_phase="classify_messages",
+        current_phase_label="Classifying Messages",
+        current_phase_summary="Reviewing message 5855.",
+    )
+    store.write(orphan)
+
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        store=store,
+        runner_factory=FakeRunner,
+    )
+    recovered = coordinator.get_run("backtest_orphaned")
+
+    assert recovered is not None
+    assert recovered.status == "failed"
+    assert recovered.current_phase == "failed"
+    assert "interrupted" in recovered.current_phase_summary.lower()
+    assert any("interrupted" in error.lower() for error in recovered.errors)

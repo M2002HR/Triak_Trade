@@ -352,6 +352,52 @@ def test_real_backtest_runner_emits_message_progress(tmp_path: Path) -> None:
     assert message_event.trace.classification in {"new_signal", None}
 
 
+def test_real_backtest_runner_keeps_validated_stage_current_until_market_data_phase(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(),
+    )
+    progress_events = []
+
+    runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    classified = [
+        event for event in progress_events
+        if event.trace is not None and event.phase == "classify_messages"
+    ]
+    assert classified
+    latest_classify_trace = classified[-1].trace
+    assert latest_classify_trace is not None
+    assert latest_classify_trace.final_status == "validated_signal"
+    assert latest_classify_trace.current_stage == "validated"
+    market_stage = next(
+        stage for stage in latest_classify_trace.stages if stage.key == "market_data"
+    )
+    assert market_stage.status == "pending"
+
+
 def test_real_backtest_runner_hydrates_caption_media_on_demand_only(tmp_path: Path) -> None:
     now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
     first = RawTelegramMessage(

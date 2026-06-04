@@ -137,6 +137,7 @@ class DashboardBacktestCoordinator:
         self.notifier = notifier
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._recover_incomplete_runs()
 
     def readiness(self) -> dict[str, Any]:
         return self.runner_factory().readiness().model_dump(mode="json")
@@ -287,6 +288,30 @@ class DashboardBacktestCoordinator:
         if self.notifier is None:
             return
         self.notifier({"type": "backtest_run", "run": run.model_dump(mode="json")})
+
+    def _recover_incomplete_runs(self) -> None:
+        now = datetime.now(timezone.utc)
+        for run in self.store.list_runs(limit=200):
+            if run.status not in {"queued", "running"}:
+                continue
+            run.status = "failed"
+            run.finished_at = now
+            run.current_phase = "failed"
+            run.current_phase_label = _phase_label("failed")
+            run.current_phase_summary = (
+                "Backtest worker was interrupted before completion. Start a new run."
+            )
+            run.errors.append("Background backtest worker was interrupted.")
+            run.events.append(
+                DashboardBacktestEvent(
+                    at=now,
+                    phase="failed",
+                    status="failed",
+                    summary=run.current_phase_summary,
+                    current_message_id=run.current_message_id,
+                )
+            )
+            self.store.write(run)
 
 
 def _phase_label(phase: str) -> str:

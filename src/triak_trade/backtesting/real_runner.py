@@ -552,6 +552,21 @@ class RealBacktestRunner:
             selected_symbol = symbol
             last_error_type: str | None = None
             no_data_candidates: list[str] = []
+            for message_id in symbol_trace_map.get(symbol, []):
+                message_trace = traces_by_message_id[message_id]
+                self._set_trace_stage(
+                    message_trace,
+                    "market_data",
+                    status="active",
+                    detail=f"Fetching candle data for {symbol}.",
+                )
+                self._emit_message_progress(
+                    progress_callback,
+                    phase="fetch_market_data",
+                    summary=f"Fetching market data for message {message_id}.",
+                    counts=counts,
+                    trace=message_trace,
+                )
             for candidate_symbol in candidate_symbols:
                 try:
                     fetched = await self.market_data_provider.get_klines(
@@ -733,6 +748,23 @@ class RealBacktestRunner:
             summary="Running simulation over the validated signal timeline.",
             counts=counts,
         )
+        for _signal_id, message_id in signal_trace_map.items():
+            simulation_trace = traces_by_message_id.get(message_id)
+            if simulation_trace is None:
+                continue
+            self._set_trace_stage(
+                simulation_trace,
+                "simulated",
+                status="active",
+                detail="Simulation queued; engine is replaying candles now.",
+            )
+            self._emit_message_progress(
+                progress_callback,
+                phase="simulate",
+                summary=f"Simulation started for message {message_id}.",
+                counts=counts,
+                trace=simulation_trace,
+            )
         report = engine.run_from_events(
             request=report_request,
             events=events,
@@ -1196,7 +1228,11 @@ class RealBacktestRunner:
                 market_symbol = normalize_market_symbol(parsed.symbol) if parsed.symbol else None
                 if valid_for_backtest and market_symbol is not None:
                     counts["valid_signals"] += 1
-                    trace.final_status = "awaiting_market_data"
+                    trace.final_status = "validated_signal"
+                    trace.result_summary = (
+                        "Signal validated. Waiting for market-data phase after "
+                        "message classification completes."
+                    )
                     self._set_trace_stage(
                         trace,
                         "validated",
@@ -1208,6 +1244,7 @@ class RealBacktestRunner:
                         "market_data",
                         status="pending",
                         detail=f"Waiting for {market_symbol} candle data.",
+                        advance_current=False,
                     )
                     symbol_trace_map.setdefault(market_symbol, []).append(message.message_id)
                     if signal_id is not None:
@@ -1357,6 +1394,7 @@ class RealBacktestRunner:
         *,
         status: Literal["pending", "active", "completed", "failed", "skipped"],
         detail: str,
+        advance_current: bool = True,
     ) -> None:
         index = trace._stage_index[key]
         stage = trace.stages[index]
@@ -1369,7 +1407,8 @@ class RealBacktestRunner:
             stage.finished_at = now
         stage.status = status
         stage.detail = detail
-        trace.current_stage = key
+        if advance_current:
+            trace.current_stage = key
         trace.last_updated_at = now
 
     def _mark_non_signal_trace(self, trace: RealBacktestMessageTrace, detail: str) -> None:
