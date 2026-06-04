@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from triak_trade.backtesting.models import BacktestEvent
@@ -34,6 +34,35 @@ class _OpenPosition:
     manual_partial_exit: bool
 
 
+@dataclass(frozen=True)
+class SimulationSignalState:
+    signal_id: str
+    symbol: str
+    status: str
+    open_quantity: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    mark_price: Decimal
+    entry_time: datetime
+    exit_time: datetime | None
+    exit_price: Decimal | None
+    targets_hit: int
+
+
+@dataclass(frozen=True)
+class SimulationSnapshot:
+    timestamp: datetime
+    source_message_id: int | None
+    open_positions: int
+    closed_trades: int
+    wins: int
+    losses: int
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    total_pnl: Decimal
+    signal_states: dict[str, SimulationSignalState]
+
+
 class BacktestSimulator:
     def simulate(
         self,
@@ -43,8 +72,53 @@ class BacktestSimulator:
         initial_balance: Decimal,
         risk_per_trade_pct: Decimal,
         fill_policy: BacktestFillPolicy,
+        active_signal_hours: int | None = None,
     ) -> tuple[list[SimulatedTrade], Decimal]:
+        trades, balance, _snapshots = self._simulate_internal(
+            events=events,
+            candles=candles,
+            initial_balance=initial_balance,
+            risk_per_trade_pct=risk_per_trade_pct,
+            fill_policy=fill_policy,
+            active_signal_hours=active_signal_hours,
+            capture_snapshots=False,
+        )
+        return trades, balance
+
+    def simulate_with_snapshots(
+        self,
+        *,
+        events: list[BacktestEvent],
+        candles: list[Candle],
+        initial_balance: Decimal,
+        risk_per_trade_pct: Decimal,
+        fill_policy: BacktestFillPolicy,
+        active_signal_hours: int | None = None,
+    ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
+        return self._simulate_internal(
+            events=events,
+            candles=candles,
+            initial_balance=initial_balance,
+            risk_per_trade_pct=risk_per_trade_pct,
+            fill_policy=fill_policy,
+            active_signal_hours=active_signal_hours,
+            capture_snapshots=True,
+        )
+
+    def _simulate_internal(
+        self,
+        *,
+        events: list[BacktestEvent],
+        candles: list[Candle],
+        initial_balance: Decimal,
+        risk_per_trade_pct: Decimal,
+        fill_policy: BacktestFillPolicy,
+        active_signal_hours: int | None,
+        capture_snapshots: bool,
+    ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         trades: list[SimulatedTrade] = []
+        closed_trades_by_signal: dict[str, SimulatedTrade] = {}
+        snapshots: list[SimulationSnapshot] = []
         open_positions: dict[str, _OpenPosition] = {}
         balance = initial_balance
         sorted_events = sorted(events, key=lambda item: item.timestamp)
@@ -52,14 +126,18 @@ class BacktestSimulator:
         candle_index = 0
 
         for event in sorted_events:
-            candle_index = self._process_candles_until(
+            candle_index, resolved_trades = self._process_candles_until(
                 open_positions=open_positions,
                 candles=sorted_candles,
                 start_index=candle_index,
                 stop_at=event.timestamp,
                 fill_policy=fill_policy,
-                trades=trades,
+                active_signal_hours=active_signal_hours,
             )
+            for trade in resolved_trades:
+                trades.append(trade)
+                closed_trades_by_signal[trade.signal_id] = trade
+                balance += trade.pnl
             parsed = event.parsed_signal
             if (
                 parsed.action is SignalAction.OPEN
@@ -125,14 +203,15 @@ class BacktestSimulator:
             elif event.related_signal_id in open_positions:
                 position = open_positions[event.related_signal_id]
                 if parsed.action is SignalAction.CANCEL:
-                    trades.append(
-                        self._close_remaining_position(
-                            position,
-                            event.timestamp,
-                            position.entry_price,
-                            "cancelled" if position.targets_hit == 0 else "partial_tp_then_cancel",
-                        )
+                    trade = self._close_remaining_position(
+                        position,
+                        event.timestamp,
+                        position.entry_price,
+                        "cancelled" if position.targets_hit == 0 else "partial_tp_then_cancel",
                     )
+                    trades.append(trade)
+                    closed_trades_by_signal[trade.signal_id] = trade
+                    balance += trade.pnl
                     del open_positions[event.related_signal_id]
                 elif parsed.action is SignalAction.CLOSE:
                     close_price = (
@@ -163,6 +242,7 @@ class BacktestSimulator:
                             ),
                         )
                         trades.append(trade)
+                        closed_trades_by_signal[trade.signal_id] = trade
                         balance += trade.pnl
                         del open_positions[event.related_signal_id]
                 elif parsed.action is SignalAction.UPDATE_SL and event.move_stop_to_entry:
@@ -179,15 +259,30 @@ class BacktestSimulator:
                         "take_profits_updated="
                         + ",".join(str(item) for item in parsed.take_profits)
                     )
+            if capture_snapshots:
+                snapshots.append(
+                    self._build_snapshot(
+                        timestamp=event.timestamp,
+                        source_message_id=event.source_message_id,
+                        open_positions=open_positions,
+                        closed_trades_by_signal=closed_trades_by_signal,
+                        candles=sorted_candles,
+                        processed_candle_count=candle_index,
+                    )
+                )
 
-        candle_index = self._process_candles_until(
+        candle_index, resolved_trades = self._process_candles_until(
             open_positions=open_positions,
             candles=sorted_candles,
             start_index=candle_index,
             stop_at=None,
             fill_policy=fill_policy,
-            trades=trades,
+            active_signal_hours=active_signal_hours,
         )
+        for trade in resolved_trades:
+            trades.append(trade)
+            closed_trades_by_signal[trade.signal_id] = trade
+            balance += trade.pnl
 
         for signal_id, position in list(open_positions.items()):
             outcome = self._close_remaining_position(
@@ -202,10 +297,11 @@ class BacktestSimulator:
                 "open_until_end" if position.targets_hit == 0 else "partial_tp_open_until_end",
             )
             trades.append(outcome)
+            closed_trades_by_signal[outcome.signal_id] = outcome
             balance += outcome.pnl
             del open_positions[signal_id]
 
-        return trades, balance
+        return trades, balance, snapshots
 
     def _find_entry_execution(
         self,
@@ -256,9 +352,10 @@ class BacktestSimulator:
         start_index: int,
         stop_at: datetime | None,
         fill_policy: BacktestFillPolicy,
-        trades: list[SimulatedTrade],
-    ) -> int:
+        active_signal_hours: int | None,
+    ) -> tuple[int, list[SimulatedTrade]]:
         index = start_index
+        resolved_trades: list[SimulatedTrade] = []
         while index < len(candles):
             candle = candles[index]
             if stop_at is not None and candle.close_time > stop_at:
@@ -267,15 +364,45 @@ class BacktestSimulator:
             for signal_id, position in list(open_positions.items()):
                 if position.symbol != candle.symbol or candle.open_time < position.entry_time:
                     continue
+                expiry_status = self._expire_position_if_needed(
+                    position=position,
+                    candle=candle,
+                    active_signal_hours=active_signal_hours,
+                )
+                if expiry_status is not None:
+                    resolved_trades.append(self._finalize_position(position, status=expiry_status))
+                    closed_signal_ids.append(signal_id)
+                    continue
                 status = self._apply_candle_to_position(position, candle, fill_policy)
                 if status is None:
                     continue
-                trades.append(self._finalize_position(position, status=status))
+                resolved_trades.append(self._finalize_position(position, status=status))
                 closed_signal_ids.append(signal_id)
             for signal_id in closed_signal_ids:
                 del open_positions[signal_id]
             index += 1
-        return index
+        return index, resolved_trades
+
+    def _expire_position_if_needed(
+        self,
+        *,
+        position: _OpenPosition,
+        candle: Candle,
+        active_signal_hours: int | None,
+    ) -> str | None:
+        if active_signal_hours is None or active_signal_hours <= 0:
+            return None
+        expiry_time = position.entry_time + timedelta(hours=active_signal_hours)
+        if candle.open_time < expiry_time:
+            return None
+        self._close_fraction_of_position(
+            position,
+            candle.open_time,
+            candle.open,
+            Decimal("1"),
+            "signal_expired",
+        )
+        return "expired" if position.targets_hit == 0 else "partial_tp_expired"
 
     def _apply_candle_to_position(
         self,
@@ -425,6 +552,73 @@ class BacktestSimulator:
             fees=position.realized_fees,
             status=status,
             notes=list(position.notes),
+        )
+
+    def _build_snapshot(
+        self,
+        *,
+        timestamp: datetime,
+        source_message_id: int | None,
+        open_positions: dict[str, _OpenPosition],
+        closed_trades_by_signal: dict[str, SimulatedTrade],
+        candles: list[Candle],
+        processed_candle_count: int,
+    ) -> SimulationSnapshot:
+        realized_pnl = sum(
+            (trade.pnl for trade in closed_trades_by_signal.values()),
+            Decimal("0"),
+        )
+        signal_states: dict[str, SimulationSignalState] = {}
+        relevant_candles = candles[:processed_candle_count]
+        unrealized_pnl = Decimal("0")
+
+        for signal_id, trade in closed_trades_by_signal.items():
+            mark_price = trade.exit_price or trade.entry_price or Decimal("0")
+            signal_states[signal_id] = SimulationSignalState(
+                signal_id=signal_id,
+                symbol=trade.symbol,
+                status=trade.status,
+                open_quantity=Decimal("0"),
+                realized_pnl=trade.pnl,
+                unrealized_pnl=Decimal("0"),
+                mark_price=mark_price,
+                entry_time=trade.entry_time or timestamp,
+                exit_time=trade.exit_time,
+                exit_price=trade.exit_price,
+                targets_hit=0,
+            )
+
+        for signal_id, position in open_positions.items():
+            mark_price = self._last_price(relevant_candles, position.symbol, position.entry_price)
+            unrealized = self._calculate_pnl(position, mark_price, position.remaining_quantity)
+            unrealized_pnl += unrealized
+            signal_states[signal_id] = SimulationSignalState(
+                signal_id=signal_id,
+                symbol=position.symbol,
+                status="open",
+                open_quantity=position.remaining_quantity,
+                realized_pnl=position.realized_pnl,
+                unrealized_pnl=unrealized,
+                mark_price=mark_price,
+                entry_time=position.entry_time,
+                exit_time=position.exit_time,
+                exit_price=position.exit_price,
+                targets_hit=position.targets_hit,
+            )
+
+        wins = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl > 0)
+        losses = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl < 0)
+        return SimulationSnapshot(
+            timestamp=timestamp,
+            source_message_id=source_message_id,
+            open_positions=len(open_positions),
+            closed_trades=len(closed_trades_by_signal),
+            wins=wins,
+            losses=losses,
+            realized_pnl=realized_pnl,
+            unrealized_pnl=unrealized_pnl,
+            total_pnl=realized_pnl + unrealized_pnl,
+            signal_states=signal_states,
         )
 
     def _last_price(self, candles: list[Candle], symbol: str, fallback: Decimal) -> Decimal:

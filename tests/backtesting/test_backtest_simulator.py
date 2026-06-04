@@ -37,7 +37,7 @@ def _parsed(action: SignalAction, side: TradeSide = TradeSide.LONG) -> ParsedSig
 
 
 def _candle(minute: int, high: str, low: str, o: str = "100", c: str = "101") -> Candle:
-    t = datetime(2026, 6, 1, 0, minute, tzinfo=timezone.utc)
+    t = datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(minutes=minute)
     return Candle(
         symbol="BTCUSDT",
         interval="1m",
@@ -234,3 +234,102 @@ def test_simulator_move_stop_to_entry_respects_followup_instruction() -> None:
     assert trades[0].status == "sl_hit"
     assert trades[0].exit_price == Decimal("100.5")
     assert any("stop_loss_moved_to_entry" in note for note in trades[0].notes)
+
+
+def test_simulator_expires_open_signal_after_configured_hours() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(61, "102", "100.5", o="101.25", c="101.50"),
+    ]
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        active_signal_hours=1,
+    )
+    assert trades[0].status == "expired"
+    assert trades[0].exit_time == datetime(2026, 6, 1, 1, 1, tzinfo=timezone.utc)
+    assert trades[0].exit_price == Decimal("101.25")
+
+
+def test_simulator_ignores_followup_after_expiry_window() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    late_close_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 1, 2, tzinfo=timezone.utc),
+        action=SignalAction.CLOSE,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.CLOSE),
+        related_signal_id="s1",
+        debug_notes=[],
+        close_fraction=Decimal("1"),
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(61, "102", "100.5", o="101.25", c="101.50"),
+        _candle(62, "103", "100", o="101.5", c="102"),
+    ]
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event, late_close_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        active_signal_hours=1,
+    )
+    assert trades[0].status == "expired"
+
+
+def test_simulator_snapshots_update_live_pnl_per_message_time() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    follow_up = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+        action=SignalAction.UPDATE_TP,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.UPDATE_TP),
+        related_signal_id="s1",
+        debug_notes=[],
+        source_message_id=2,
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(1, "103", "100.5", o="100.5", c="102.5"),
+    ]
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event, follow_up],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        active_signal_hours=24,
+    )
+    assert len(snapshots) == 2
+    assert snapshots[0].source_message_id == 1
+    assert snapshots[0].open_positions == 1
+    assert snapshots[0].total_pnl == Decimal("0")
+    assert snapshots[1].open_positions == 1
+    assert snapshots[1].unrealized_pnl > Decimal("0")

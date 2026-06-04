@@ -53,6 +53,7 @@ class BacktestEngine:
         request: BacktestRequest,
         events: list[BacktestEvent],
         candles: list[Candle],
+        active_signal_hours: int | None = None,
     ) -> BacktestReport:
         conservative_trades, conservative_final = self.simulator.simulate(
             events=events,
@@ -60,6 +61,7 @@ class BacktestEngine:
             initial_balance=request.initial_balance,
             risk_per_trade_pct=request.risk_per_trade_pct,
             fill_policy=BacktestFillPolicy.CONSERVATIVE,
+            active_signal_hours=active_signal_hours,
         )
         _optimistic_trades, optimistic_final = self.simulator.simulate(
             events=events,
@@ -67,6 +69,7 @@ class BacktestEngine:
             initial_balance=request.initial_balance,
             risk_per_trade_pct=request.risk_per_trade_pct,
             fill_policy=BacktestFillPolicy.OPTIMISTIC,
+            active_signal_hours=active_signal_hours,
         )
         final_balance = (
             conservative_final

@@ -31,6 +31,7 @@ from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
 from triak_trade.backtesting.report import report_to_json, report_to_markdown_summary
 from triak_trade.backtesting.report_store import BacktestReportStore
+from triak_trade.backtesting.simulator import SimulationSnapshot
 from triak_trade.backtesting.symbol_mapper import (
     market_symbol_candidates,
     normalize_market_symbol,
@@ -93,6 +94,7 @@ class RealBacktestProgressEvent(BaseModel):
     summary: str
     current_message_id: int | None = None
     counts: dict[str, int] = Field(default_factory=dict)
+    live_metrics: dict[str, str] = Field(default_factory=dict)
     trace: RealBacktestMessageTrace | None = None
 
 
@@ -806,6 +808,7 @@ class RealBacktestRunner:
             request=report_request,
             events=events,
             candles=candles,
+            active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
         )
         score = Decimal(report.warnings[0].split("=")[1]) if report.warnings else Decimal("0")
         trades_filled = sum(1 for trade in report.trades if trade.status != "not_filled")
@@ -898,6 +901,15 @@ class RealBacktestRunner:
                 "trades_simulated": result.trades_simulated,
                 "trades_filled": result.trades_filled,
             },
+            live_metrics={
+                "live_open_positions": "0",
+                "live_closed_trades": str(result.trades_filled),
+                "live_wins": str(result.wins),
+                "live_losses": str(result.losses),
+                "live_realized_pnl": str(result.total_pnl),
+                "live_unrealized_pnl": "0",
+                "live_total_pnl": str(result.total_pnl),
+            },
         )
         stored = self.report_store.write(self._build_payload(result, report, score))
         result.report_path = stored.json_path
@@ -911,6 +923,15 @@ class RealBacktestRunner:
                 **counts,
                 "trades_simulated": result.trades_simulated,
                 "trades_filled": result.trades_filled,
+            },
+            live_metrics={
+                "live_open_positions": "0",
+                "live_closed_trades": str(result.trades_filled),
+                "live_wins": str(result.wins),
+                "live_losses": str(result.losses),
+                "live_realized_pnl": str(result.total_pnl),
+                "live_unrealized_pnl": "0",
+                "live_total_pnl": str(result.total_pnl),
             },
         )
 
@@ -1174,7 +1195,10 @@ class RealBacktestRunner:
                 request.max_messages,
                 self.settings.CHANNEL_AGENT_CONTEXT_MESSAGE_LIMIT,
             ),
-            max_update_window_hours=self.settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS,
+            max_update_window_hours=min(
+                self.settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS,
+                self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
+            ),
         )
         events: list[BacktestEvent] = []
         traces_by_message_id: dict[int, RealBacktestMessageTrace] = {}
@@ -1413,6 +1437,24 @@ class RealBacktestRunner:
                     move_stop_to_entry=detect_move_stop_to_entry(message.text),
                 )
             )
+            live_metrics = self._update_live_simulation_state(
+                request=request,
+                events=events,
+                traces_by_message_id=traces_by_message_id,
+                signal_trace_map=signal_trace_map,
+                prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                progress_callback=progress_callback,
+                counts=counts,
+                current_message_id=message.message_id,
+            )
+            self._emit_run_progress(
+                progress_callback,
+                phase="classify_messages",
+                status="running",
+                summary=f"Message {message.message_id} advanced live simulation state.",
+                counts=counts,
+                live_metrics=live_metrics,
+            )
         return (
             events,
             traces_by_message_id,
@@ -1485,6 +1527,131 @@ class RealBacktestRunner:
             "market_data_attempted=" + ",".join(attempted)
         )
         return None, market_symbol
+
+    def _update_live_simulation_state(
+        self,
+        *,
+        request: RealBacktestRunRequest,
+        events: list[BacktestEvent],
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        signal_trace_map: dict[str, int],
+        prefetched_candles_by_symbol: dict[str, list[Any]],
+        progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
+        counts: dict[str, int],
+        current_message_id: int,
+    ) -> dict[str, str]:
+        available_candles = [
+            candle
+            for candle_group in prefetched_candles_by_symbol.values()
+            for candle in candle_group
+        ]
+        if not events or not available_candles or not signal_trace_map:
+            return self._empty_live_metrics()
+
+        simulator = BacktestEngine(classifier=RegexMessageClassifier()).simulator
+        _trades, _balance, snapshots = simulator.simulate_with_snapshots(
+            events=events,
+            candles=available_candles,
+            initial_balance=self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE,
+            risk_per_trade_pct=self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT,
+            fill_policy=BacktestFillPolicy(self.settings.BACKTEST_DEFAULT_FILL_POLICY),
+            active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
+        )
+        if not snapshots:
+            return self._empty_live_metrics()
+        snapshot = snapshots[-1]
+        metrics = self._live_metrics_from_snapshot(snapshot)
+        self._apply_snapshot_to_traces(
+            snapshot=snapshot,
+            traces_by_message_id=traces_by_message_id,
+            signal_trace_map=signal_trace_map,
+            progress_callback=progress_callback,
+            counts=counts,
+            current_message_id=current_message_id,
+            live_metrics=metrics,
+        )
+        return metrics
+
+    def _apply_snapshot_to_traces(
+        self,
+        *,
+        snapshot: SimulationSnapshot,
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        signal_trace_map: dict[str, int],
+        progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
+        counts: dict[str, int],
+        current_message_id: int,
+        live_metrics: dict[str, str],
+    ) -> None:
+        for signal_id, message_id in signal_trace_map.items():
+            trace = traces_by_message_id.get(message_id)
+            signal_state = snapshot.signal_states.get(signal_id)
+            if trace is None or signal_state is None:
+                continue
+            if signal_state.status == "open":
+                trace.final_status = "simulation_tracking"
+                trace.result_summary = (
+                    f"Live simulation through message {current_message_id}: "
+                    f"mark={signal_state.mark_price}, open_qty={signal_state.open_quantity}, "
+                    f"realized_pnl={signal_state.realized_pnl}, "
+                    f"unrealized_pnl={signal_state.unrealized_pnl}"
+                )
+                self._set_trace_stage(
+                    trace,
+                    "simulated",
+                    status="active",
+                    detail=trace.result_summary,
+                )
+            else:
+                trace.final_status = signal_state.status
+                trace.result_summary = (
+                    f"Trade {signal_state.status}. Exit={signal_state.exit_price}, "
+                    f"PnL={signal_state.realized_pnl}"
+                )
+                self._set_trace_stage(
+                    trace,
+                    "simulated",
+                    status="completed",
+                    detail=trace.result_summary,
+                )
+                self._set_trace_stage(
+                    trace,
+                    "finalized",
+                    status="completed",
+                    detail=trace.result_summary,
+                )
+            self._emit_message_progress(
+                progress_callback,
+                phase="simulate",
+                summary=f"Live simulation state updated for message {message_id}.",
+                counts=counts,
+                trace=trace,
+                live_metrics=live_metrics,
+            )
+
+    @staticmethod
+    def _live_metrics_from_snapshot(snapshot: SimulationSnapshot) -> dict[str, str]:
+        return {
+            "live_open_positions": str(snapshot.open_positions),
+            "live_closed_trades": str(snapshot.closed_trades),
+            "live_wins": str(snapshot.wins),
+            "live_losses": str(snapshot.losses),
+            "live_realized_pnl": str(snapshot.realized_pnl),
+            "live_unrealized_pnl": str(snapshot.unrealized_pnl),
+            "live_total_pnl": str(snapshot.total_pnl),
+        }
+
+    @staticmethod
+    def _empty_live_metrics() -> dict[str, str]:
+        return {
+            "live_open_positions": "0",
+            "live_closed_trades": "0",
+            "live_wins": "0",
+            "live_losses": "0",
+            "live_realized_pnl": "0",
+            "live_unrealized_pnl": "0",
+            "live_total_pnl": "0",
+        }
 
     async def _prepare_message_for_classification(
         self,
@@ -1610,6 +1777,7 @@ class RealBacktestRunner:
         status: Literal["queued", "running", "completed", "failed"],
         summary: str,
         counts: dict[str, int] | None = None,
+        live_metrics: dict[str, str] | None = None,
     ) -> None:
         if progress_callback is None:
             return
@@ -1621,6 +1789,7 @@ class RealBacktestRunner:
                 status=status,
                 summary=summary,
                 counts=counts or {},
+                live_metrics=live_metrics or {},
             )
         )
 
@@ -1632,6 +1801,7 @@ class RealBacktestRunner:
         summary: str,
         counts: dict[str, int],
         trace: RealBacktestMessageTrace,
+        live_metrics: dict[str, str] | None = None,
     ) -> None:
         if progress_callback is None:
             return
@@ -1644,6 +1814,7 @@ class RealBacktestRunner:
                 summary=summary,
                 current_message_id=trace.message_id,
                 counts=counts,
+                live_metrics=live_metrics or {},
                 trace=trace.model_copy(deep=True),
             )
         )

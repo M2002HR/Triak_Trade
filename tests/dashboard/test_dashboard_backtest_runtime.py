@@ -125,6 +125,15 @@ class FakeRunner:
                         "parsed_signals": 1,
                         "valid_signals": 1,
                     },
+                    live_metrics={
+                        "live_open_positions": "1",
+                        "live_closed_trades": "0",
+                        "live_wins": "0",
+                        "live_losses": "0",
+                        "live_realized_pnl": "0",
+                        "live_unrealized_pnl": "2.5",
+                        "live_total_pnl": "2.5",
+                    },
                     trace=trace,
                 )
             )
@@ -248,6 +257,7 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     assert len(loaded.messages) == 1
     assert loaded.messages[0].message_id == 77
     assert loaded.messages[0].classification == "new_signal"
+    assert loaded.live_total_pnl == "25"
     assert loaded.report_path == "runtime/reports/backtests/report.json"
 
 

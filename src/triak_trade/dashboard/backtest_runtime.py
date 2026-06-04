@@ -60,6 +60,13 @@ class DashboardBacktestRun(BaseModel):
     ambiguous_messages: int = 0
     trades_simulated: int = 0
     trades_filled: int = 0
+    live_open_positions: int = 0
+    live_closed_trades: int = 0
+    live_wins: int = 0
+    live_losses: int = 0
+    live_realized_pnl: str = "0"
+    live_unrealized_pnl: str = "0"
+    live_total_pnl: str = "0"
     report_path: str | None = None
     markdown_report_path: str | None = None
     errors: list[str] = Field(default_factory=list)
@@ -260,6 +267,13 @@ class DashboardBacktestCoordinator:
         completed.warnings = list(result.warnings)
         completed.trades_simulated = result.trades_simulated
         completed.trades_filled = result.trades_filled
+        completed.live_open_positions = 0
+        completed.live_closed_trades = result.trades_filled
+        completed.live_wins = result.wins
+        completed.live_losses = result.losses
+        completed.live_realized_pnl = str(result.total_pnl)
+        completed.live_unrealized_pnl = "0"
+        completed.live_total_pnl = str(result.total_pnl)
         completed.events.append(
             DashboardBacktestEvent(
                 at=datetime.now(timezone.utc),
@@ -282,6 +296,12 @@ class DashboardBacktestCoordinator:
         for key, value in event.counts.items():
             if hasattr(run, key):
                 setattr(run, key, value)
+        for key in ("live_open_positions", "live_closed_trades", "live_wins", "live_losses"):
+            if key in event.live_metrics:
+                setattr(run, key, int(event.live_metrics[key]))
+        for key in ("live_realized_pnl", "live_unrealized_pnl", "live_total_pnl"):
+            if key in event.live_metrics:
+                setattr(run, key, event.live_metrics[key])
         run.events.append(
             DashboardBacktestEvent(
                 at=event.timestamp,

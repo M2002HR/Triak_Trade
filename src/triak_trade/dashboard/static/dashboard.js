@@ -384,6 +384,12 @@ document.documentElement.dataset.dashboardReady = "true";
       ["Ambiguous", run.ambiguous_messages],
       ["Trades Simulated", run.trades_simulated],
       ["Trades Filled", run.trades_filled],
+      ["Open Positions", run.live_open_positions],
+      ["Closed Trades", run.live_closed_trades],
+      ["Wins / Losses", `${run.live_wins} / ${run.live_losses}`],
+      ["Live PnL", run.live_total_pnl],
+      ["Realized PnL", run.live_realized_pnl],
+      ["Unrealized PnL", run.live_unrealized_pnl],
     ];
     nodes.metrics.innerHTML = cards
       .map(([label, value]) => `

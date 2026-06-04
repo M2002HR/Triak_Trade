@@ -163,6 +163,7 @@ class Settings(BaseSettings):
     REAL_BACKTEST_DEFAULT_INTERVAL: str = "1m"
     REAL_BACKTEST_MAX_MESSAGES: int = 1000
     REAL_BACKTEST_MAX_CANDLES: int = 100000
+    REAL_BACKTEST_ACTIVE_SIGNAL_HOURS: int = 24
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
     REAL_BACKTEST_USE_AI: bool = True
     REAL_BACKTEST_USE_REGEX_FALLBACK: bool = False
