@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from triak_trade.backtesting.real_runner import RealBacktestResult
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
+from triak_trade.dashboard.services import DashboardService
 
 
 def build_client(tmp_path: Path, *, real_guard: int = 0) -> TestClient:
@@ -128,3 +129,10 @@ def test_real_backtest_route_runs_with_fake_runner(
     assert response.status_code == 200
     assert "real_telegram_used" in response.text
     assert "runtime/reports/backtests/report.json" in response.text
+
+
+def test_dashboard_service_parses_naive_datetime_as_tehran_utc() -> None:
+    parsed = DashboardService._parse_datetime("2026-06-04T15:30:00")
+
+    assert parsed is not None
+    assert parsed.isoformat() == "2026-06-04T12:00:00+00:00"

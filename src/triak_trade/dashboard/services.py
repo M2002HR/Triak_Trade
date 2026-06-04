@@ -15,6 +15,7 @@ from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestRequest
 from triak_trade.backtesting.report import report_to_json
 from triak_trade.config.settings import Settings
+from triak_trade.core.time import parse_user_datetime_to_utc
 from triak_trade.dashboard.backtest_runtime import (
     DashboardBacktestCoordinator,
     normalize_channel_reference,
@@ -231,12 +232,12 @@ class DashboardService:
             real_request = RealBacktestRunRequest(
                 channel=form.get("channel") or self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
                 from_date=(
-                    datetime.fromisoformat(form["from_date"]).replace(tzinfo=timezone.utc)
+                    parse_user_datetime_to_utc(form["from_date"])
                     if form.get("from_date")
                     else None
                 ),
                 to_date=(
-                    datetime.fromisoformat(form["to_date"]).replace(tzinfo=timezone.utc)
+                    parse_user_datetime_to_utc(form["to_date"])
                     if form.get("to_date")
                     else None
                 ),
@@ -378,10 +379,4 @@ class DashboardService:
     def _parse_datetime(value: Any) -> datetime | None:
         if value in {None, ""}:
             return None
-        if isinstance(value, datetime):
-            raw = value
-        else:
-            raw = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if raw.tzinfo is None:
-            return raw.replace(tzinfo=timezone.utc)
-        return raw.astimezone(timezone.utc)
+        return parse_user_datetime_to_utc(value)

@@ -51,6 +51,7 @@ from triak_trade.backtesting import (
 from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
+from triak_trade.core.time import parse_user_datetime_to_utc
 from triak_trade.dashboard.runtime import (
     dashboard_logs,
     dashboard_safe_config,
@@ -767,8 +768,8 @@ def backtest_dry_run_cmd(
         )
     request = BacktestRequest(
         channel=channel,
-        from_date=datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc),
-        to_date=datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc),
+        from_date=parse_user_datetime_to_utc(from_date),
+        to_date=parse_user_datetime_to_utc(to_date),
         initial_balance=settings.BACKTEST_DEFAULT_INITIAL_BALANCE,
         interval=interval,
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
@@ -826,10 +827,8 @@ def real_backtest_run_cmd(
     runner = _build_real_backtest_runner(settings)
     request = RealBacktestRunRequest(
         channel=channel,
-        from_date=datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
-        if from_date
-        else None,
-        to_date=datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc) if to_date else None,
+        from_date=parse_user_datetime_to_utc(from_date) if from_date else None,
+        to_date=parse_user_datetime_to_utc(to_date) if to_date else None,
         hours=hours,
         interval=interval,
         max_messages=max_messages,

@@ -58,6 +58,7 @@ def test_backtest_cli_real_guarded() -> None:
 class _FakeRunner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.last_request: object | None = None
 
     def readiness(self) -> object:
         class _Readiness:
@@ -78,6 +79,7 @@ class _FakeRunner:
         return _Readiness()
 
     def run_sync(self, request: object) -> object:
+        self.last_request = request
         return RealBacktestResult(
             success=True,
             channel="https://t.me/Tofan_Trade",
@@ -123,10 +125,8 @@ class _FakeRunner:
 
 
 def test_real_backtest_cli_commands_with_fake_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "triak_trade.cli._build_real_backtest_runner",
-        lambda settings: _FakeRunner(settings),
-    )
+    fake_runner = _FakeRunner(Settings(_env_file=None))
+    monkeypatch.setattr("triak_trade.cli._build_real_backtest_runner", lambda settings: fake_runner)
 
     check = runner.invoke(app, ["real-backtest-check"])
     assert check.exit_code == 0
@@ -160,3 +160,36 @@ def test_real_backtest_cli_commands_with_fake_runner(monkeypatch: pytest.MonkeyP
     latest = runner.invoke(app, ["backtest-show-latest"])
     assert latest.exit_code == 0
     assert '"report_path": "runtime/reports/backtests/report.json"' in latest.stdout
+
+
+def test_real_backtest_cli_interprets_naive_dates_as_tehran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_runner = _FakeRunner(Settings(_env_file=None))
+    monkeypatch.setattr("triak_trade.cli._build_real_backtest_runner", lambda settings: fake_runner)
+
+    run = runner.invoke(
+        app,
+        [
+            "real-backtest-run",
+            "--channel",
+            "https://t.me/Tofan_Trade",
+            "--from",
+            "2026-06-04T15:30:00",
+            "--to",
+            "2026-06-04T16:30:00",
+            "--interval",
+            "1m",
+            "--max-messages",
+            "10",
+            "--no-send-telegram-summary",
+            "--no-send-log-channel",
+            "--no-ai",
+        ],
+    )
+
+    assert run.exit_code == 0
+    request = fake_runner.last_request
+    assert request is not None
+    assert request.from_date.isoformat() == "2026-06-04T12:00:00+00:00"
+    assert request.to_date.isoformat() == "2026-06-04T13:00:00+00:00"
