@@ -114,6 +114,8 @@ class AdminApprovalService:
             hours=hours,
             interval=self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
             max_messages=self.settings.REAL_BACKTEST_MAX_MESSAGES,
+            initial_balance=self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE,
+            risk_per_trade_pct=self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT,
             use_ai=self.settings.REAL_BACKTEST_USE_AI,
             send_telegram_summary=self.settings.REAL_BACKTEST_SEND_TO_ADMIN_BOT,
             send_log_channel=self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,

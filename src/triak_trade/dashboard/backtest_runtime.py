@@ -8,6 +8,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,8 @@ class DashboardBacktestRun(BaseModel):
     to_date: datetime
     interval: str
     max_messages: int
+    initial_balance: Decimal = Decimal("100")
+    risk_per_trade_pct: Decimal = Decimal("3")
     use_ai: bool
     send_log_channel: bool
     log_per_message: bool
@@ -67,6 +70,8 @@ class DashboardBacktestRun(BaseModel):
     live_realized_pnl: str = "0"
     live_unrealized_pnl: str = "0"
     live_total_pnl: str = "0"
+    live_realized_balance: str = "0"
+    live_current_balance: str = "0"
     signals: list[dict[str, Any]] = Field(default_factory=list)
     report_path: str | None = None
     markdown_report_path: str | None = None
@@ -192,6 +197,8 @@ class DashboardBacktestCoordinator:
             to_date=to_date,
             interval=request.interval,
             max_messages=request.max_messages,
+            initial_balance=request.initial_balance,
+            risk_per_trade_pct=request.risk_per_trade_pct,
             use_ai=request.use_ai,
             send_log_channel=request.send_log_channel,
             log_per_message=request.log_per_message,
@@ -255,6 +262,8 @@ class DashboardBacktestCoordinator:
             start_message_id=previous.start_message_id,
             interval=previous.interval,
             max_messages=previous.max_messages,
+            initial_balance=previous.initial_balance,
+            risk_per_trade_pct=previous.risk_per_trade_pct,
             use_ai=previous.use_ai,
             send_telegram_summary=False,
             send_log_channel=previous.send_log_channel,
@@ -366,11 +375,16 @@ class DashboardBacktestCoordinator:
         for key in ("live_open_positions", "live_closed_trades", "live_wins", "live_losses"):
             if key in event.live_metrics:
                 setattr(run, key, int(event.live_metrics[key]))
-        for key in ("live_realized_pnl", "live_unrealized_pnl", "live_total_pnl"):
+        for key in (
+            "live_realized_pnl",
+            "live_unrealized_pnl",
+            "live_total_pnl",
+            "live_realized_balance",
+            "live_current_balance",
+        ):
             if key in event.live_metrics:
                 setattr(run, key, event.live_metrics[key])
-        if event.live_signals:
-            run.signals = event.live_signals
+        run.signals = list(event.live_signals)
         run.events.append(
             DashboardBacktestEvent(
                 at=event.timestamp,

@@ -32,6 +32,8 @@ document.documentElement.dataset.dashboardReady = "true";
     startMessageLink: document.getElementById("backtest-start-message-link"),
     interval: document.getElementById("backtest-interval"),
     maxMessages: document.getElementById("backtest-max-messages"),
+    initialBalance: document.getElementById("backtest-initial-balance"),
+    riskPerTradePct: document.getElementById("backtest-risk-per-trade-pct"),
     useAi: document.getElementById("backtest-use-ai"),
     sendLogChannel: document.getElementById("backtest-send-log-channel"),
     logPerMessage: document.getElementById("backtest-log-per-message"),
@@ -84,6 +86,8 @@ document.documentElement.dataset.dashboardReady = "true";
   function seedDefaults() {
     nodes.interval.value = bootstrap.default_interval || "1m";
     nodes.maxMessages.value = String(bootstrap.default_max_messages || 1000);
+    nodes.initialBalance.value = String(bootstrap.default_initial_balance || "100");
+    nodes.riskPerTradePct.value = String(bootstrap.default_risk_per_trade_pct || "3");
     nodes.useAi.checked = Boolean(bootstrap.default_use_ai);
     nodes.sendLogChannel.checked = Boolean(bootstrap.default_send_log_channel);
     nodes.logPerMessage.checked = Boolean(bootstrap.default_log_per_message);
@@ -288,6 +292,8 @@ document.documentElement.dataset.dashboardReady = "true";
       start_message_link: nodes.startMessageLink.value.trim(),
       interval: nodes.interval.value,
       max_messages: Number(nodes.maxMessages.value || "1000"),
+      initial_balance: nodes.initialBalance.value.trim(),
+      risk_per_trade_pct: nodes.riskPerTradePct.value.trim(),
       use_ai: nodes.useAi.checked,
       send_log_channel: nodes.sendLogChannel.checked,
       log_per_message: nodes.logPerMessage.checked,
@@ -421,12 +427,16 @@ document.documentElement.dataset.dashboardReady = "true";
       ["Ambiguous", run.ambiguous_messages],
       ["Trades Simulated", run.trades_simulated],
       ["Trades Filled", run.trades_filled],
+      ["Initial Balance", run.initial_balance],
+      ["Risk / Signal %", run.risk_per_trade_pct],
       ["Open Positions", run.live_open_positions],
       ["Closed Trades", run.live_closed_trades],
       ["Wins / Losses", `${run.live_wins} / ${run.live_losses}`],
       ["Live PnL", run.live_total_pnl],
       ["Realized PnL", run.live_realized_pnl],
       ["Unrealized PnL", run.live_unrealized_pnl],
+      ["Realized Balance", run.live_realized_balance],
+      ["Live Balance", run.live_current_balance],
     ];
     nodes.metrics.innerHTML = cards
       .map(([label, value]) => `
@@ -684,9 +694,13 @@ document.documentElement.dataset.dashboardReady = "true";
           ${detailMetric("Entry Price", signal.entry_price || "n/a")}
           ${detailMetric("Mark Price", signal.mark_price || "n/a")}
           ${detailMetric("Stop Loss", signal.stop_loss || "n/a")}
+          ${detailMetric("Original Quantity", signal.original_quantity || "0")}
           ${detailMetric("Open Quantity", signal.open_quantity || "0")}
+          ${detailMetric("Risk Amount", signal.risk_amount || "0")}
+          ${detailMetric("Notional Value", signal.notional_value || "0")}
           ${detailMetric("Targets Hit", signal.targets_hit ?? "0")}
           ${detailMetric("Total PnL", signal.total_pnl ?? "0", pnlClassName(signal.total_pnl))}
+          ${detailMetric("Total PnL %", signal.total_pnl_pct ?? "0", pnlClassName(signal.total_pnl_pct))}
           ${detailMetric("Realized PnL", signal.realized_pnl ?? "0", pnlClassName(signal.realized_pnl))}
           ${detailMetric("Unrealized PnL", signal.unrealized_pnl ?? "0", pnlClassName(signal.unrealized_pnl))}
         </div>

@@ -40,12 +40,16 @@ class SimulationSignalState:
     symbol: str
     side: TradeSide
     status: str
+    original_quantity: Decimal
     open_quantity: Decimal
     entry_price: Decimal | None
     stop_loss: Decimal | None
     take_profits: list[Decimal]
+    notional_value: Decimal
+    risk_amount: Decimal
     realized_pnl: Decimal
     unrealized_pnl: Decimal
+    total_pnl_pct: Decimal
     mark_price: Decimal
     entry_time: datetime
     exit_time: datetime | None
@@ -65,6 +69,8 @@ class SimulationSnapshot:
     realized_pnl: Decimal
     unrealized_pnl: Decimal
     total_pnl: Decimal
+    realized_balance: Decimal
+    current_balance: Decimal
     signal_states: dict[str, SimulationSignalState]
 
 
@@ -273,6 +279,7 @@ class BacktestSimulator:
                         closed_trades_by_signal=closed_trades_by_signal,
                         candles=sorted_candles,
                         processed_candle_count=candle_index,
+                        initial_balance=initial_balance,
                     )
                 )
 
@@ -578,6 +585,7 @@ class BacktestSimulator:
         closed_trades_by_signal: dict[str, SimulatedTrade],
         candles: list[Candle],
         processed_candle_count: int,
+        initial_balance: Decimal,
     ) -> SimulationSnapshot:
         realized_pnl = sum(
             (trade.pnl for trade in closed_trades_by_signal.values()),
@@ -594,12 +602,16 @@ class BacktestSimulator:
                 symbol=trade.symbol,
                 side=trade.side,
                 status=trade.status,
+                original_quantity=trade.quantity,
                 open_quantity=Decimal("0"),
                 entry_price=trade.entry_price,
                 stop_loss=None,
                 take_profits=[],
+                notional_value=(trade.entry_price or Decimal("0")) * trade.quantity,
+                risk_amount=Decimal("0"),
                 realized_pnl=trade.pnl,
                 unrealized_pnl=Decimal("0"),
+                total_pnl_pct=trade.pnl_pct,
                 mark_price=mark_price,
                 entry_time=trade.entry_time or timestamp,
                 exit_time=trade.exit_time,
@@ -612,17 +624,30 @@ class BacktestSimulator:
             mark_price = self._last_price(relevant_candles, position.symbol, position.entry_price)
             unrealized = self._calculate_pnl(position, mark_price, position.remaining_quantity)
             unrealized_pnl += unrealized
+            notional_value = position.entry_price * position.original_quantity
+            total_pnl = position.realized_pnl + unrealized
             signal_states[signal_id] = SimulationSignalState(
                 signal_id=signal_id,
                 symbol=position.symbol,
                 side=position.side,
                 status="open",
+                original_quantity=position.original_quantity,
                 open_quantity=position.remaining_quantity,
                 entry_price=position.entry_price,
                 stop_loss=position.stop_loss,
                 take_profits=list(position.take_profits),
+                notional_value=notional_value,
+                risk_amount=(
+                    abs(position.entry_price - position.stop_loss)
+                    * position.original_quantity
+                ),
                 realized_pnl=position.realized_pnl,
                 unrealized_pnl=unrealized,
+                total_pnl_pct=(
+                    (total_pnl / notional_value) * Decimal("100")
+                    if notional_value > Decimal("0")
+                    else Decimal("0")
+                ),
                 mark_price=mark_price,
                 entry_time=position.entry_time,
                 exit_time=position.exit_time,
@@ -633,6 +658,8 @@ class BacktestSimulator:
 
         wins = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl > 0)
         losses = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl < 0)
+        realized_balance = initial_balance + realized_pnl
+        current_balance = realized_balance + unrealized_pnl
         return SimulationSnapshot(
             timestamp=timestamp,
             source_message_id=source_message_id,
@@ -643,6 +670,8 @@ class BacktestSimulator:
             realized_pnl=realized_pnl,
             unrealized_pnl=unrealized_pnl,
             total_pnl=realized_pnl + unrealized_pnl,
+            realized_balance=realized_balance,
+            current_balance=current_balance,
             signal_states=signal_states,
         )
 

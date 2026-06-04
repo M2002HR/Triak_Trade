@@ -134,6 +134,8 @@ class FakeRunner:
                         "live_realized_pnl": "0",
                         "live_unrealized_pnl": "2.5",
                         "live_total_pnl": "2.5",
+                        "live_realized_balance": "100",
+                        "live_current_balance": "102.5",
                     },
                     live_signals=[
                         {
@@ -318,6 +320,8 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     assert loaded.messages[0].message_id == 77
     assert loaded.messages[0].classification == "new_signal"
     assert loaded.live_total_pnl == "25"
+    assert loaded.live_realized_balance == "100"
+    assert loaded.live_current_balance == "102.5"
     assert loaded.signals
     assert loaded.signals[0]["signal_id"] == "sig_77"
     assert loaded.signals[0]["symbol"] == "BTCUSDT"
@@ -340,6 +344,8 @@ def test_dashboard_backtest_coordinator_notifies_on_updates(tmp_path: Path) -> N
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
             interval="1m",
             max_messages=100,
+            initial_balance=Decimal("100"),
+            risk_per_trade_pct=Decimal("3"),
             use_ai=False,
             send_telegram_summary=False,
             send_log_channel=True,

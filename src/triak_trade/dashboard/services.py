@@ -152,6 +152,10 @@ class DashboardService:
             "default_channel": self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
             "default_interval": self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
             "default_max_messages": self.settings.REAL_BACKTEST_MAX_MESSAGES,
+            "default_initial_balance": str(self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE),
+            "default_risk_per_trade_pct": str(
+                self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT
+            ),
             "default_use_ai": (
                 self.settings.REAL_BACKTEST_USE_AI
                 and self.settings.AI_GATEWAY_ENABLED
@@ -210,6 +214,18 @@ class DashboardService:
             interval=str(payload.get("interval") or self.settings.REAL_BACKTEST_DEFAULT_INTERVAL),
             max_messages=int(
                 payload.get("max_messages") or self.settings.REAL_BACKTEST_MAX_MESSAGES
+            ),
+            initial_balance=Decimal(
+                str(
+                    payload.get("initial_balance")
+                    or self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE
+                )
+            ),
+            risk_per_trade_pct=Decimal(
+                str(
+                    payload.get("risk_per_trade_pct")
+                    or self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT
+                )
             ),
             use_ai=bool(payload.get("use_ai", self.settings.REAL_BACKTEST_USE_AI)),
             send_telegram_summary=False,
@@ -324,6 +340,14 @@ class DashboardService:
                 max_messages=int(
                     form.get("max_messages") or self.settings.REAL_BACKTEST_MAX_MESSAGES
                 ),
+                initial_balance=Decimal(
+                    form.get("initial_balance")
+                    or str(self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE)
+                ),
+                risk_per_trade_pct=Decimal(
+                    form.get("risk_per_trade_pct")
+                    or str(self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT)
+                ),
                 use_ai=form.get("use_ai") == "on",
                 send_telegram_summary=form.get("send_telegram_summary") == "on",
                 send_log_channel=form.get("send_log_channel") == "on",
@@ -355,8 +379,13 @@ class DashboardService:
             }
         channel = form.get("channel") or self.settings.BACKTEST_DEFAULT_CHANNEL
         interval = form.get("interval") or self.settings.BACKTEST_DEFAULT_INTERVAL
-        initial_balance = Decimal(form.get("initial_balance") or "1000")
-        risk_pct = Decimal(form.get("risk_per_trade_pct") or "1")
+        initial_balance = Decimal(
+            form.get("initial_balance") or str(self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE)
+        )
+        risk_pct = Decimal(
+            form.get("risk_per_trade_pct")
+            or str(self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT)
+        )
         fill_policy = BacktestFillPolicy(form.get("fill_policy") or "conservative")
         now = datetime.now(timezone.utc)
         fixture_request = BacktestRequest(

@@ -158,6 +158,30 @@ def _sapien_candles(now: datetime) -> list[Candle]:
     return candles
 
 
+def _home_candles(now: datetime) -> list[Candle]:
+    candles: list[Candle] = []
+    for index, open_price, high_price, low_price, close_price in (
+        (0, "1.00", "1.05", "0.99", "1.03"),
+        (1, "1.03", "1.08", "1.01", "1.06"),
+    ):
+        open_time = now + timedelta(minutes=index)
+        candles.append(
+            Candle(
+                symbol="HOMEUSDT",
+                interval="1m",
+                open_time=open_time,
+                close_time=open_time + timedelta(minutes=1),
+                open=Decimal(open_price),
+                high=Decimal(high_price),
+                low=Decimal(low_price),
+                close=Decimal(close_price),
+                volume=Decimal("25"),
+                source=CandleSource.TOOBIT,
+            )
+        )
+    return candles
+
+
 def test_real_backtest_runner_blocks_when_disabled(tmp_path: Path) -> None:
     settings = _settings(tmp_path, REAL_BACKTEST_ENABLED=False)
     runner = RealBacktestRunner(
@@ -476,6 +500,115 @@ def test_real_backtest_runner_anchors_market_data_to_start_message_time(
     debug_notes = "\n".join(traces[-1].debug_notes)
     assert "market_data_start_utc=2026-06-01T16:43:56+00:00" in debug_notes
     assert "market_data_start_tehran=2026-06-01T20:13:56+03:30" in debug_notes
+
+
+def test_real_backtest_runner_skips_empty_messages_without_classifying_them(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    telegram = FakeTelegramClient(
+        history_by_channel={
+            "https://t.me/Tofan_Trade": [
+                _message(
+                    now,
+                    "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 2x",
+                ),
+                RawTelegramMessage(
+                    channel_id="https://t.me/Tofan_Trade",
+                    channel_username="Tofan_Trade",
+                    message_id=2,
+                    text=None,
+                    date=now + timedelta(minutes=1),
+                    edited_at=None,
+                    reply_to_msg_id=None,
+                ),
+            ]
+        }
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)}),
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        )
+    )
+
+    assert result.success is True
+    assert result.classified_messages == 1
+    assert result.ignored_messages == 1
+
+
+def test_real_backtest_runner_activates_signal_after_follow_up_stop_loss(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=10,
+        text="HOMEUSDT LONG Entry: 1.00 - 1.10 TP: 1.20 / 1.30",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=11,
+        text="SL: 0.95",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=10,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    provider = FakeMarketDataProvider(candles_by_symbol={"HOMEUSDT": _home_candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    assert result.valid_signals >= 1
+    live_signal_events = [event.live_signals for event in progress_events if event.live_signals]
+    assert live_signal_events
+    latest_signal = live_signal_events[-1][0]
+    assert latest_signal["symbol"] == "HOMEUSDT"
+    assert latest_signal["status_group"] == "active"
+    traces = [event.trace for event in progress_events if event.trace is not None]
+    originating = next(trace for trace in reversed(traces) if trace.message_id == 10)
+    assert originating is not None
+    assert "signal_tracking_activated_from_follow_up" in originating.debug_notes
 
 
 def test_real_backtest_runner_hydrates_caption_media_on_demand_only(tmp_path: Path) -> None:

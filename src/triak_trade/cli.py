@@ -832,6 +832,8 @@ def real_backtest_run_cmd(
         hours=hours,
         interval=interval,
         max_messages=max_messages,
+        initial_balance=settings.BACKTEST_DEFAULT_INITIAL_BALANCE,
+        risk_per_trade_pct=settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT,
         use_ai=use_ai,
         send_telegram_summary=send_telegram_summary,
         send_log_channel=send_log_channel,

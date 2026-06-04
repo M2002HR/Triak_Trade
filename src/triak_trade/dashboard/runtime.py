@@ -176,8 +176,8 @@ def dashboard_smoke_test(settings: Settings) -> dict[str, Any]:
             data={
                 "channel": settings.BACKTEST_DEFAULT_CHANNEL,
                 "interval": "1m",
-                "initial_balance": "1000",
-                "risk_per_trade_pct": "1",
+                "initial_balance": str(settings.BACKTEST_DEFAULT_INITIAL_BALANCE),
+                "risk_per_trade_pct": str(settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT),
                 "fill_policy": "conservative",
             },
         )

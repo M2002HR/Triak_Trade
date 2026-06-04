@@ -358,5 +358,57 @@ def test_simulator_snapshots_update_live_pnl_per_message_time() -> None:
     assert snapshots[0].source_message_id == 1
     assert snapshots[0].open_positions == 1
     assert snapshots[0].total_pnl == Decimal("0")
+    assert snapshots[0].realized_balance == Decimal("1000")
+    assert snapshots[0].current_balance == Decimal("1000")
     assert snapshots[1].open_positions == 1
     assert snapshots[1].unrealized_pnl > Decimal("0")
+    assert snapshots[1].current_balance > snapshots[1].realized_balance
+
+
+def test_simulator_compounds_risk_from_realized_balance() -> None:
+    first = _parsed(SignalAction.OPEN)
+    first.entry_low = Decimal("100")
+    first.entry_high = Decimal("100")
+    first.stop_loss = Decimal("98")
+    first.take_profits = [Decimal("104")]
+    first.source_message_id = 1
+    second = _parsed(SignalAction.OPEN)
+    second.entry_low = Decimal("200")
+    second.entry_high = Decimal("200")
+    second.stop_loss = Decimal("196")
+    second.take_profits = [Decimal("208")]
+    second.source_message_id = 2
+    open_first = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=first,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    open_second = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s2",
+        parsed_signal=second,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    candles = [
+        _candle(0, "104.5", "99.5", o="100", c="104"),
+        _candle(2, "208.5", "199.5", o="200", c="208"),
+    ]
+
+    trades, final_balance = BacktestSimulator().simulate(
+        events=[open_first, open_second],
+        candles=candles,
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("3"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert len(trades) == 2
+    assert trades[0].pnl == Decimal("6")
+    assert trades[1].quantity == Decimal("0.795")
+    assert trades[1].pnl == Decimal("6.360")
+    assert final_balance == Decimal("112.360")
