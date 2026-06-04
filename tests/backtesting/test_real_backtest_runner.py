@@ -488,7 +488,7 @@ def test_real_backtest_runner_sends_per_message_log_trace(tmp_path: Path) -> Non
         settings=_settings(
             tmp_path,
             AI_GATEWAY_ENABLED=False,
-            REAL_BACKTEST_SEND_TO_LOG_CHANNEL=True,
+            REAL_BACKTEST_SEND_TO_LOG_CHANNEL=False,
         ),
         telegram_client=telegram,
         market_data_provider=provider,
@@ -512,6 +512,8 @@ def test_real_backtest_runner_sends_per_message_log_trace(tmp_path: Path) -> Non
     assert result.success is True
     assert any("Backtest Message Trace" in text for text in log_client.texts)
     assert any("Message Link" in text for text in log_client.texts)
+    assert any("classification=new_signal" in text for text in log_client.texts)
+    assert len(log_client.texts) >= 2
 
 
 def test_real_backtest_runner_survives_log_channel_failures(tmp_path: Path) -> None:

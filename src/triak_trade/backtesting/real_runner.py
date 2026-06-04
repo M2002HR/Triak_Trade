@@ -1040,8 +1040,6 @@ class RealBacktestRunner:
         )
 
     async def _send_log(self, text: str) -> object | None:
-        if not self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL:
-            return None
         return await self.log_client.send_text(text, real=True)
 
     async def _try_send_log(
@@ -1077,8 +1075,15 @@ class RealBacktestRunner:
         request: RealBacktestRunRequest,
         trace: RealBacktestMessageTrace,
         warnings: list[str],
+        *,
+        checkpoint: str | None = None,
     ) -> None:
         if not (request.send_log_channel and request.log_per_message):
+            return
+        checkpoint_key = checkpoint or trace.current_stage
+        sent_marker = f"telegram_log_sent={checkpoint_key}"
+        failed_marker = f"telegram_log_failed={checkpoint_key}"
+        if sent_marker in trace.debug_notes or failed_marker in trace.debug_notes:
             return
         sent = await self._try_send_log(
             self._format_trace_for_telegram(trace),
@@ -1089,7 +1094,9 @@ class RealBacktestRunner:
             ),
         )
         if not sent:
+            trace.debug_notes.append(failed_marker)
             return
+        trace.debug_notes.append(sent_marker)
 
     @staticmethod
     def _append_warning(warnings: list[str], message: str) -> None:
@@ -1252,6 +1259,12 @@ class RealBacktestRunner:
                     f"classification={trace.classification}, action={trace.parsed_action}, "
                     f"confidence={trace.confidence}"
                 ),
+            )
+            await self._maybe_send_message_log(
+                request,
+                trace,
+                warnings,
+                checkpoint="classification_complete",
             )
 
             signal_id: str | None = None
