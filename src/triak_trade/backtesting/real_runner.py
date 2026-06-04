@@ -114,6 +114,8 @@ class RealBacktestRunRequest(BaseModel):
     from_date: datetime | None = None
     to_date: datetime | None = None
     hours: int | None = None
+    start_message_link: str | None = None
+    start_message_id: int | None = None
     interval: str
     max_messages: int
     use_ai: bool
@@ -133,6 +135,8 @@ class RealBacktestRunRequest(BaseModel):
             and self.to_date <= self.from_date
         ):
             raise ValueError("to_date must be after from_date")
+        if self.start_message_id is not None and self.start_message_id <= 0:
+            raise ValueError("start_message_id must be positive")
         return self
 
     def resolve_range(self) -> tuple[datetime, datetime]:
@@ -341,6 +345,7 @@ class RealBacktestRunner:
                 start=from_date,
                 end=to_date,
                 limit=min(request.max_messages, self.settings.REAL_BACKTEST_MAX_MESSAGES),
+                start_message_id=request.start_message_id,
             )
         except TelegramCredentialError as exc:
             return self._write_failure(

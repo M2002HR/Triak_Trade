@@ -19,6 +19,7 @@ from triak_trade.core.time import parse_user_datetime_to_utc
 from triak_trade.dashboard.backtest_runtime import (
     DashboardBacktestCoordinator,
     normalize_channel_reference,
+    parse_telegram_message_link,
 )
 from triak_trade.dashboard.schemas import AutoModeState, KillSwitchState, utc_now
 from triak_trade.domain.enums import BacktestFillPolicy
@@ -166,7 +167,23 @@ class DashboardService:
 
     def start_live_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
         channel_input = str(payload.get("channel") or "").strip()
-        if not channel_input:
+        start_message_link = str(payload.get("start_message_link") or "").strip()
+        channel_resolved: str | None = (
+            normalize_channel_reference(channel_input) if channel_input else None
+        )
+        start_message_id: int | None = None
+        normalized_start_message_link: str | None = None
+        if start_message_link:
+            link_channel, start_message_id = parse_telegram_message_link(start_message_link)
+            normalized_start_message_link = (
+                f"{link_channel}/{start_message_id}"
+            )
+            if channel_resolved is None:
+                channel_resolved = link_channel
+                channel_input = start_message_link
+            elif channel_resolved != link_channel:
+                raise ValueError("start_message_link must belong to the selected channel")
+        if channel_resolved is None:
             raise ValueError("channel is required")
         readiness = self.backtests.readiness()
         if not readiness.get("ready", False):
@@ -184,10 +201,12 @@ class DashboardService:
             raise ValueError("from_date and to_date are required")
 
         request = RealBacktestRunRequest(
-            channel=normalize_channel_reference(channel_input),
+            channel=channel_resolved,
             from_date=from_date,
             to_date=to_date,
             hours=None,
+            start_message_link=normalized_start_message_link,
+            start_message_id=start_message_id,
             interval=str(payload.get("interval") or self.settings.REAL_BACKTEST_DEFAULT_INTERVAL),
             max_messages=int(
                 payload.get("max_messages") or self.settings.REAL_BACKTEST_MAX_MESSAGES
@@ -225,12 +244,49 @@ class DashboardService:
                     "issues": readiness.issues,
                     "readiness": readiness.model_dump(mode="json"),
                 }
+            channel_input = (form.get("channel") or "").strip()
+            start_message_link = (form.get("start_message_link") or "").strip()
+            channel_resolved: str | None = (
+                normalize_channel_reference(channel_input) if channel_input else None
+            )
+            start_message_id: int | None = None
+            normalized_start_message_link: str | None = None
+            if start_message_link:
+                try:
+                    link_channel, start_message_id = parse_telegram_message_link(
+                        start_message_link
+                    )
+                except ValueError as exc:
+                    return {
+                        "blocked": True,
+                        "reason": str(exc),
+                        "issues": [str(exc)],
+                        "readiness": readiness.model_dump(mode="json"),
+                    }
+                normalized_start_message_link = f"{link_channel}/{start_message_id}"
+                if channel_resolved is None:
+                    channel_resolved = link_channel
+                elif channel_resolved != link_channel:
+                    message = "start_message_link must belong to the selected channel"
+                    return {
+                        "blocked": True,
+                        "reason": message,
+                        "issues": [message],
+                        "readiness": readiness.model_dump(mode="json"),
+                    }
+            if channel_resolved is None:
+                return {
+                    "blocked": True,
+                    "reason": "channel is required",
+                    "issues": ["channel is required"],
+                    "readiness": readiness.model_dump(mode="json"),
+                }
             hours = int(
                 form.get("lookback_hours")
                 or self.settings.REAL_BACKTEST_DEFAULT_LOOKBACK_HOURS
             )
             real_request = RealBacktestRunRequest(
-                channel=form.get("channel") or self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+                channel=channel_resolved,
                 from_date=(
                     parse_user_datetime_to_utc(form["from_date"])
                     if form.get("from_date")
@@ -242,6 +298,8 @@ class DashboardService:
                     else None
                 ),
                 hours=hours if not form.get("from_date") and not form.get("to_date") else None,
+                start_message_link=normalized_start_message_link,
+                start_message_id=start_message_id,
                 interval=form.get("interval") or self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
                 max_messages=int(
                     form.get("max_messages") or self.settings.REAL_BACKTEST_MAX_MESSAGES

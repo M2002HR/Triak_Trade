@@ -17,6 +17,7 @@ class TelegramClientInterface(Protocol):
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        min_message_id: int | None = None,
     ) -> list[RawTelegramMessage]: ...
 
     async def listen_new_messages(
@@ -44,12 +45,15 @@ class FakeTelegramClient:
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        min_message_id: int | None = None,
     ) -> list[RawTelegramMessage]:
         messages = list(self.history_by_channel.get(channel, []))
         if start is not None:
             messages = [m for m in messages if m.date >= start]
         if end is not None:
             messages = [m for m in messages if m.date <= end]
+        if min_message_id is not None:
+            messages = [m for m in messages if m.message_id >= min_message_id]
         if limit is not None:
             messages = messages[:limit]
         return messages

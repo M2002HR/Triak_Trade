@@ -28,6 +28,31 @@ async def test_fake_client_fetch_history_contract() -> None:
     assert await client.ensure_media_payload(message) is message
 
 
+@pytest.mark.asyncio
+async def test_fake_client_fetch_history_honors_min_message_id() -> None:
+    first = RawTelegramMessage(
+        channel_id="c",
+        channel_username="u",
+        message_id=1,
+        text="x",
+        date=datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="c",
+        channel_username="u",
+        message_id=5,
+        text="y",
+        date=datetime(2026, 6, 4, 10, 1, tzinfo=timezone.utc),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    client = FakeTelegramClient(history_by_channel={"c": [first, second]})
+    got = await client.fetch_history("c", min_message_id=5)
+    assert [item.message_id for item in got] == [5]
+
+
 def test_telethon_client_instantiation_and_missing_credentials() -> None:
     settings = Settings(TELEGRAM_API_ID=0, TELEGRAM_API_HASH="replace_me")
     client = TelethonTelegramClient(settings)

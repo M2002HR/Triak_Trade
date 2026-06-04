@@ -23,9 +23,8 @@
         value="{{ default_channel }}"
         placeholder="@Tofan_Trade or https://t.me/Tofan_Trade"
         autocomplete="off"
-        required
       >
-      <span class="help-text">Username, <code>@channel</code>, or full Telegram link.</span>
+      <span class="help-text">Username, <code>@channel</code>, or full Telegram link. Optional when a start message link is provided below.</span>
     </label>
 
     <label class="field">Start Date &amp; Time
@@ -34,6 +33,16 @@
 
     <label class="field">End Date &amp; Time
       <input id="backtest-to-date" name="to_date" type="datetime-local" required>
+    </label>
+
+    <label class="field span-2">Start From Message Link
+      <input
+        id="backtest-start-message-link"
+        name="start_message_link"
+        placeholder="https://t.me/Tofan_Trade/5880"
+        autocomplete="off"
+      >
+      <span class="help-text">Optional. If provided, history processing starts from this message onward in the same channel.</span>
     </label>
 
     <label class="field">Interval

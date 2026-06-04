@@ -88,16 +88,24 @@ class TelethonTelegramClient:
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        min_message_id: int | None = None,
     ) -> list[RawTelegramMessage]:
         client = await self._ensure_client()
         result: list[RawTelegramMessage] = []
+        effective_min_id = max((min_message_id or 0) - 1, 0)
         async with client:
-            async for msg in client.iter_messages(channel, limit=limit):
+            async for msg in client.iter_messages(
+                channel,
+                limit=limit,
+                min_id=effective_min_id or None,
+            ):
                 raw = telethon_message_to_raw(msg, channel=channel)
                 self._cache_message(raw, msg)
                 if start is not None and raw.date < start:
                     continue
                 if end is not None and raw.date > end:
+                    continue
+                if min_message_id is not None and raw.message_id < min_message_id:
                     continue
                 result.append(raw)
         result.sort(key=lambda item: item.date)

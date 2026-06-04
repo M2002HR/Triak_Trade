@@ -28,6 +28,7 @@ document.documentElement.dataset.dashboardReady = "true";
     channel: document.getElementById("backtest-channel"),
     fromDate: document.getElementById("backtest-from-date"),
     toDate: document.getElementById("backtest-to-date"),
+    startMessageLink: document.getElementById("backtest-start-message-link"),
     interval: document.getElementById("backtest-interval"),
     maxMessages: document.getElementById("backtest-max-messages"),
     useAi: document.getElementById("backtest-use-ai"),
@@ -256,6 +257,7 @@ document.documentElement.dataset.dashboardReady = "true";
       channel: nodes.channel.value.trim(),
       from_date: fromDate.toISOString(),
       to_date: toDate.toISOString(),
+      start_message_link: nodes.startMessageLink.value.trim(),
       interval: nodes.interval.value,
       max_messages: Number(nodes.maxMessages.value || "1000"),
       use_ai: nodes.useAi.checked,
@@ -357,7 +359,10 @@ document.documentElement.dataset.dashboardReady = "true";
   function renderCurrentRunHeader(run) {
     nodes.activeRunHeadline.textContent = run.status === "running" ? "Streaming" : run.current_phase_label;
     nodes.runTitle.textContent = `${run.channel_resolved} • ${run.interval}`;
-    nodes.runSubtitle.textContent = `${formatDate(run.from_date)} → ${formatDate(run.to_date)}`;
+    const startMessageSuffix = run.start_message_id
+      ? ` • from message ${run.start_message_id}`
+      : "";
+    nodes.runSubtitle.textContent = `${formatDate(run.from_date)} → ${formatDate(run.to_date)}${startMessageSuffix}`;
     nodes.runPhasePill.textContent = run.current_phase_label;
     nodes.runPhasePill.className = `phase-pill phase-${run.status}`;
     nodes.currentPhaseLabel.textContent = run.current_phase_label;

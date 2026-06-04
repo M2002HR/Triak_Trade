@@ -18,6 +18,7 @@ from triak_trade.dashboard.backtest_runtime import (
     DashboardBacktestRun,
     DashboardBacktestStore,
     normalize_channel_reference,
+    parse_telegram_message_link,
 )
 
 
@@ -171,6 +172,21 @@ def test_normalize_channel_reference_accepts_usernames() -> None:
     assert normalize_channel_reference("@Tofan_Trade") == "https://t.me/Tofan_Trade"
 
 
+def test_parse_telegram_message_link_extracts_channel_and_message_id() -> None:
+    channel, message_id = parse_telegram_message_link("https://t.me/Tofan_Trade/5880")
+    assert channel == "https://t.me/Tofan_Trade"
+    assert message_id == 5880
+
+
+def test_parse_telegram_message_link_rejects_non_message_urls() -> None:
+    try:
+        parse_telegram_message_link("https://t.me/Tofan_Trade")
+    except ValueError as exc:
+        assert "public Telegram message link" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected ValueError for invalid message link")
+
+
 def test_dashboard_backtest_store_round_trip(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = DashboardBacktestStore(settings)
@@ -302,3 +318,38 @@ def test_dashboard_backtest_coordinator_recovers_incomplete_runs_on_startup(tmp_
     assert recovered.current_phase == "failed"
     assert "interrupted" in recovered.current_phase_summary.lower()
     assert any("interrupted" in error.lower() for error in recovered.errors)
+
+
+def test_dashboard_backtest_coordinator_persists_start_message_metadata(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        runner_factory=FakeRunner,
+    )
+    run = coordinator.start_run(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            start_message_link="https://t.me/Tofan_Trade/5880",
+            start_message_id=5880,
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        ),
+        channel_input="https://t.me/Tofan_Trade/5880",
+    )
+
+    for _ in range(50):
+        loaded = coordinator.get_run(run.run_id)
+        if loaded is not None and loaded.status in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
+
+    loaded = coordinator.get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.start_message_link == "https://t.me/Tofan_Trade/5880"
+    assert loaded.start_message_id == 5880

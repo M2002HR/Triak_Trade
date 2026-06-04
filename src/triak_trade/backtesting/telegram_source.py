@@ -29,13 +29,17 @@ class BacktestTelegramSource:
         start: datetime,
         end: datetime,
         limit: int,
+        start_message_id: int | None = None,
     ) -> tuple[list[RawTelegramMessage], TelegramHistoryFetchResult]:
         messages = await self.telegram_client.fetch_history(
             channel,
             start=start,
             end=end,
             limit=limit,
+            min_message_id=start_message_id,
         )
+        if start_message_id is not None:
+            messages = [message for message in messages if message.message_id >= start_message_id]
         return messages, TelegramHistoryFetchResult(
             channel=channel,
             fetched_count=len(messages),

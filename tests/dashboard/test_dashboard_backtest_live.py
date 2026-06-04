@@ -182,6 +182,7 @@ def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> No
     assert response.status_code == 200
     assert "Live Telegram Backtest Monitor" in response.text
     assert "Start Backtest" in response.text
+    assert "Start From Message Link" in response.text
     assert "Per-Message Trace" in response.text
     assert "Open Run Feed" in response.text
     assert "Open History" in response.text
@@ -249,6 +250,82 @@ def test_backtest_start_api_defaults_log_per_message_to_enabled(
     assert start.status_code == 202
     body = start.json()
     assert body["run"]["log_per_message"] is True
+
+
+def test_backtest_start_api_accepts_start_message_link(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    start = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "channel": "@Tofan_Trade",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "start_message_link": "https://t.me/Tofan_Trade/5880",
+            "interval": "1m",
+            "max_messages": 1000,
+            "use_ai": False,
+            "send_log_channel": True,
+            "log_per_message": True,
+        },
+    )
+    assert start.status_code == 202
+    body = start.json()
+    assert body["run"]["start_message_id"] == 5880
+    assert body["run"]["start_message_link"] == "https://t.me/Tofan_Trade/5880"
+
+
+def test_backtest_start_api_derives_channel_from_start_message_link(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    start = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "channel": "",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "start_message_link": "https://t.me/Tofan_Trade/5880",
+            "interval": "1m",
+            "max_messages": 1000,
+            "use_ai": False,
+            "send_log_channel": True,
+            "log_per_message": True,
+        },
+    )
+    assert start.status_code == 202
+    body = start.json()
+    assert body["run"]["channel_resolved"] == "https://t.me/Tofan_Trade"
+    assert body["run"]["start_message_id"] == 5880
+
+
+def test_backtest_start_api_rejects_cross_channel_start_message_link(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    response = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "channel": "@Tofan_Trade",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "start_message_link": "https://t.me/Another_Channel/5880",
+            "interval": "1m",
+            "max_messages": 1000,
+            "use_ai": False,
+            "send_log_channel": True,
+            "log_per_message": True,
+        },
+    )
+    assert response.status_code == 400
+    assert "must belong to the selected channel" in response.json()["detail"]
 
 
 def test_backtest_start_api_rejects_missing_dates(tmp_path: Path, monkeypatch) -> None:

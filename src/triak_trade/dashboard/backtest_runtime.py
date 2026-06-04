@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from collections.abc import Callable
@@ -33,6 +34,8 @@ class DashboardBacktestRun(BaseModel):
     run_id: str
     channel_input: str
     channel_resolved: str
+    start_message_link: str | None = None
+    start_message_id: int | None = None
     from_date: datetime
     to_date: datetime
     interval: str
@@ -122,6 +125,23 @@ def normalize_channel_reference(channel_input: str) -> str:
     return f"https://t.me/{normalized}"
 
 
+_TELEGRAM_MESSAGE_LINK_PATTERN = re.compile(
+    r"^https?://(?:t\.me|telegram\.me)/(?P<channel>[A-Za-z0-9_]{5,})/(?P<message_id>\d+)(?:[/?#].*)?$"
+)
+
+
+def parse_telegram_message_link(message_link: str) -> tuple[str, int]:
+    normalized = message_link.strip()
+    match = _TELEGRAM_MESSAGE_LINK_PATTERN.match(normalized)
+    if not match:
+        raise ValueError("start_message_link must be a public Telegram message link")
+    channel_reference = normalize_channel_reference(match.group("channel"))
+    message_id = int(match.group("message_id"))
+    if message_id <= 0:
+        raise ValueError("start_message_link must include a positive message id")
+    return channel_reference, message_id
+
+
 class DashboardBacktestCoordinator:
     def __init__(
         self,
@@ -153,6 +173,8 @@ class DashboardBacktestCoordinator:
             run_id=f"backtest_{uuid.uuid4().hex[:12]}",
             channel_input=channel_input,
             channel_resolved=request.channel,
+            start_message_link=request.start_message_link,
+            start_message_id=request.start_message_id,
             from_date=from_date,
             to_date=to_date,
             interval=request.interval,
