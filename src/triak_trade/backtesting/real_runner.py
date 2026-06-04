@@ -1903,6 +1903,10 @@ class RealBacktestRunner:
         if not snapshots:
             return self._empty_live_metrics(), []
         snapshot = snapshots[-1]
+        counts["trades_simulated"] = len(snapshot.signal_states)
+        counts["trades_filled"] = sum(
+            1 for state in snapshot.signal_states.values() if state.status != "not_filled"
+        )
         metrics = self._live_metrics_from_snapshot(snapshot)
         live_signals = self._live_signals_from_snapshot(snapshot)
         self._apply_snapshot_to_traces(
@@ -1946,6 +1950,21 @@ class RealBacktestRunner:
                     trace,
                     "simulated",
                     status="active",
+                    detail=trace.result_summary,
+                )
+            elif signal_state.status == "not_filled":
+                trace.final_status = "not_filled"
+                trace.result_summary = "Entry conditions were not met in the available market data."
+                self._set_trace_stage(
+                    trace,
+                    "simulated",
+                    status="completed",
+                    detail=trace.result_summary,
+                )
+                self._set_trace_stage(
+                    trace,
+                    "finalized",
+                    status="completed",
                     detail=trace.result_summary,
                 )
             else:

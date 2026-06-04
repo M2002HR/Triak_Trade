@@ -365,6 +365,42 @@ def test_simulator_snapshots_update_live_pnl_per_message_time() -> None:
     assert snapshots[1].current_balance > snapshots[1].realized_balance
 
 
+def test_simulator_snapshots_include_not_filled_signals() -> None:
+    signal = _parsed(SignalAction.OPEN)
+    signal.entry_type = EntryType.MARKET
+    signal.entry_low = None
+    signal.entry_high = None
+    signal.stop_loss = Decimal("98")
+    signal.take_profits = [Decimal("104")]
+    event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, 30, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=signal,
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    candles = [
+        _candle(5, "104.5", "99.5", o="100", c="104"),
+    ]
+
+    trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[event],
+        candles=candles,
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("3"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].status == "not_filled"
+    assert len(snapshots) == 1
+    assert snapshots[0].closed_trades == 1
+    assert "s1" in snapshots[0].signal_states
+    assert snapshots[0].signal_states["s1"].status == "not_filled"
+
+
 def test_simulator_compounds_risk_from_realized_balance() -> None:
     first = _parsed(SignalAction.OPEN)
     first.entry_low = Decimal("100")

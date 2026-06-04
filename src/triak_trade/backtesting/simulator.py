@@ -164,25 +164,37 @@ class BacktestSimulator:
                     parsed.symbol,
                 )
                 if entry_price is None or entry_time is None:
-                    trades.append(
-                        SimulatedTrade(
-                            trade_id=f"no_fill_{event.signal_id or 'x'}",
-                            signal_id=event.signal_id or "unknown",
-                            channel_id=parsed.source_channel_id,
-                            symbol=parsed.symbol,
-                            side=parsed.side,
-                            entry_time=None,
-                            exit_time=None,
-                            entry_price=None,
-                            exit_price=None,
-                            quantity=Decimal("0"),
-                            pnl=Decimal("0"),
-                            pnl_pct=Decimal("0"),
-                            fees=Decimal("0"),
-                            status="not_filled",
-                            notes=["entry not touched"],
-                        )
+                    no_fill_trade = SimulatedTrade(
+                        trade_id=f"no_fill_{event.signal_id or 'x'}",
+                        signal_id=event.signal_id or "unknown",
+                        channel_id=parsed.source_channel_id,
+                        symbol=parsed.symbol,
+                        side=parsed.side,
+                        entry_time=None,
+                        exit_time=None,
+                        entry_price=None,
+                        exit_price=None,
+                        quantity=Decimal("0"),
+                        pnl=Decimal("0"),
+                        pnl_pct=Decimal("0"),
+                        fees=Decimal("0"),
+                        status="not_filled",
+                        notes=["entry not touched"],
                     )
+                    trades.append(no_fill_trade)
+                    closed_trades_by_signal[no_fill_trade.signal_id] = no_fill_trade
+                    if capture_snapshots:
+                        snapshots.append(
+                            self._build_snapshot(
+                                timestamp=event.timestamp,
+                                source_message_id=event.source_message_id,
+                                open_positions=open_positions,
+                                closed_trades_by_signal=closed_trades_by_signal,
+                                candles=sorted_candles,
+                                processed_candle_count=candle_index,
+                                initial_balance=initial_balance,
+                            )
+                        )
                     continue
 
                 risk_amount = (balance * risk_per_trade_pct) / Decimal("100")

@@ -454,6 +454,58 @@ def test_real_backtest_runner_starts_simulation_tracking_immediately_for_valid_s
     assert "Simulation tracking started" in (simulated_stage.detail or "")
 
 
+def test_real_backtest_runner_exposes_not_filled_signal_in_live_state(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, 30, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        "BTCUSDT LONG MARKET SL: 67400 TP: 69000 / 70000 Leverage: 2x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    late_candles = _candles(now + timedelta(minutes=5))
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": late_candles}),
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    assert result.trades_simulated == 1
+    assert result.trades_filled == 0
+    assert any(event.counts.get("trades_simulated") == 1 for event in progress_events)
+    assert any(event.counts.get("trades_filled") == 0 for event in progress_events)
+    live_signal_events = [event.live_signals for event in progress_events if event.live_signals]
+    assert live_signal_events
+    latest_signal = live_signal_events[-1][0]
+    assert latest_signal["signal_id"].startswith("sig_")
+    assert latest_signal["status"] == "not_filled"
+    assert latest_signal["status_group"] == "inactive"
+    final_trace = next(
+        event.trace
+        for event in reversed(progress_events)
+        if event.trace is not None and event.trace.message_id == 1
+    )
+    assert final_trace is not None
+    assert final_trace.final_status == "not_filled"
+
+
 def test_real_backtest_runner_anchors_market_data_to_start_message_time(
     tmp_path: Path,
 ) -> None:
