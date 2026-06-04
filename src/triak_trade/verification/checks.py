@@ -28,6 +28,7 @@ from triak_trade.domain.enums import ProposedActionType
 from triak_trade.domain.models import ProposedAction, RawTelegramMessage
 from triak_trade.exchange.toobit.account import ToobitAccountClient
 from triak_trade.exchange.toobit.client import ToobitClient
+from triak_trade.market_data.binance_public import BinancePublicFuturesProvider
 from triak_trade.market_data.toobit import ToobitMarketDataProvider
 from triak_trade.parsing.normalizer import MessageNormalizer
 from triak_trade.parsing.regex_parser import RegexSignalParser
@@ -60,6 +61,7 @@ def real_checks() -> list[CheckCallable]:
         mysql_real_check,
         redis_real_check,
         telegram_real_tofan_check,
+        binance_public_real_check,
         toobit_public_real_check,
         toobit_signed_real_check,
         toobit_ordertest_real_check,
@@ -522,6 +524,54 @@ def toobit_public_real_check(settings: Settings) -> VerificationCheckResult:
             status=VerificationStatus.FAIL,
             category="real",
             summary="Toobit public kline fetch failed",
+            started=started,
+            error_type=type(exc).__name__,
+        )
+
+
+def binance_public_real_check(settings: Settings) -> VerificationCheckResult:
+    started = time.perf_counter()
+    if (
+        settings.RUN_SYSTEM_REAL_SMOKE_TESTS != 1
+        or settings.RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS != 1
+    ):
+        return _skip(
+            "binance_public_real",
+            started,
+            "enable system and Binance public market-data guards",
+        )
+    try:
+        provider = BinancePublicFuturesProvider(
+            base_url=settings.BINANCE_PUBLIC_DATA_BASE_URL,
+            rest_base_url=settings.BINANCE_FUTURES_REST_BASE_URL,
+            klines_path=settings.BINANCE_FUTURES_KLINES_PATH,
+            ticker_price_path=settings.BINANCE_FUTURES_TICKER_PRICE_PATH,
+            cache_dir=settings.BINANCE_PUBLIC_DATA_CACHE_DIR,
+            timeout_seconds=settings.BINANCE_PUBLIC_DATA_TIMEOUT_SECONDS,
+        )
+        end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        candles = asyncio.run(
+            provider.get_klines(
+                settings.BINANCE_PUBLIC_REAL_TEST_SYMBOL,
+                "1m",
+                end - timedelta(minutes=5),
+                end,
+            )
+        )
+        return _result(
+            name="binance_public_real",
+            status=VerificationStatus.PASS,
+            category="real",
+            summary="Binance public historical futures fetch completed",
+            started=started,
+            details={"candle_count": len(candles)},
+        )
+    except Exception as exc:
+        return _result(
+            name="binance_public_real",
+            status=VerificationStatus.FAIL,
+            category="real",
+            summary="Binance public historical futures fetch failed",
             started=started,
             error_type=type(exc).__name__,
         )

@@ -86,6 +86,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         "REAL_BACKTEST_ENABLED": True,
         "RUN_BACKTEST_INTEGRATION_TESTS": 1,
         "RUN_TELEGRAM_INTEGRATION_TESTS": 1,
+        "RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS": 1,
         "RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS": 1,
         "TELEGRAM_API_ID": 123,
         "TELEGRAM_API_HASH": "fake-hash",

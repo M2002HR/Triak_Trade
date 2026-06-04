@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     TOOBIT_ORDERTEST_TYPE: str = "LIMIT"
     TOOBIT_ORDERTEST_QUANTITY: str = ""
     TOOBIT_ORDERTEST_PRICE: str = ""
+    BINANCE_PUBLIC_DATA_BASE_URL: str = "https://data.binance.vision"
+    BINANCE_FUTURES_REST_BASE_URL: str = "https://fapi.binance.com"
+    BINANCE_FUTURES_KLINES_PATH: str = "/fapi/v1/klines"
+    BINANCE_FUTURES_TICKER_PRICE_PATH: str = "/fapi/v1/ticker/price"
+    BINANCE_PUBLIC_DATA_CACHE_DIR: str = "runtime/cache/binance_public"
+    BINANCE_PUBLIC_DATA_TIMEOUT_SECONDS: int = 30
+    BINANCE_PUBLIC_REAL_TEST_SYMBOL: str = "BTCUSDT"
+    RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS: int = 0
+    BACKTEST_MARKET_DATA_PROVIDER: Literal["binance_public", "toobit"] = "binance_public"
+    BACKTEST_MARKET_DATA_USE_TOOBIT_FALLBACK: bool = True
     TOOBIT_API_KEY: SecretStr = Field(default=SecretStr("replace_me"))
     TOOBIT_API_SECRET: SecretStr = Field(default=SecretStr("replace_me"))
     TELEGRAM_API_ID: int = 0

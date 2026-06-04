@@ -141,7 +141,10 @@ class RegexSignalParser:
             lower,
         )
         if range_match:
-            return EntryType.RANGE, Decimal(range_match.group(1)), Decimal(range_match.group(2))
+            first = Decimal(range_match.group(1))
+            second = Decimal(range_match.group(2))
+            entry_low, entry_high = sorted((first, second))
+            return EntryType.RANGE, entry_low, entry_high
 
         single_match = re.search(
             r"(?:entry|entries|zone|\u0648\u0631\u0648\u062f)[^\d]{0,20}(\d+(?:\.\d+)?)",

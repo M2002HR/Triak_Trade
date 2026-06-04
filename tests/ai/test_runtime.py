@@ -13,6 +13,7 @@ from triak_trade.config.settings import Settings
 def _settings(tmp_path: Path) -> Settings:
     runtime_dir = tmp_path / 'ai_gateway'
     return Settings(
+        _env_file=None,
         AI_GATEWAY_ENABLED=True,
         AI_GATEWAY_BASE_URL='http://127.0.0.1:8090',
         AI_GATEWAY_RUNTIME_DIR=str(runtime_dir),

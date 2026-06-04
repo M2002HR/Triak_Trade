@@ -56,6 +56,12 @@ def test_decimal_values_no_float() -> None:
     assert all(isinstance(x, Decimal) for x in parsed.take_profits)
 
 
+def test_reversed_entry_range_is_sorted() -> None:
+    parsed = _parse("TON/USD LONG Entry: 1.94 - 1.87 SL: 1.82 TP: 1.95 / 1.97 / 2.00")
+    assert parsed.entry_low == Decimal("1.87")
+    assert parsed.entry_high == Decimal("1.94")
+
+
 def test_extract_noisy_markdown_signal_fields() -> None:
     parsed = _parse(
         """

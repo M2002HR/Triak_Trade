@@ -44,8 +44,8 @@ from triak_trade.core.time import TEHRAN_TZ
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import RawTelegramMessage, SignalState
+from triak_trade.market_data.factory import build_backtest_market_data_provider
 from triak_trade.market_data.interfaces import MarketDataProvider
-from triak_trade.market_data.toobit import ToobitMarketDataProvider
 from triak_trade.observability.events import build_message_link
 from triak_trade.observability.telegram_log_channel import TelegramLogChannelClient
 from triak_trade.parsing.validator import ParsedSignalValidator
@@ -242,14 +242,8 @@ class RealBacktestRunner:
         self.settings = settings
         self.telegram_client = telegram_client or TelethonTelegramClient(settings)
         self.telegram_source = BacktestTelegramSource(self.telegram_client)
-        self.market_data_provider = market_data_provider or ToobitMarketDataProvider(
-            base_url=settings.TOOBIT_BASE_URL,
-            klines_path=settings.TOOBIT_KLINES_PATH,
-            mark_price_klines_path=settings.TOOBIT_FUTURES_MARK_PRICE_KLINES_PATH,
-            index_klines_path=settings.TOOBIT_FUTURES_INDEX_KLINES_PATH,
-            contract_ticker_price_path=settings.TOOBIT_FUTURES_TICKER_PRICE_PATH,
-            timeout_seconds=settings.TOOBIT_MARKET_DATA_TIMEOUT_SECONDS,
-            limit=settings.TOOBIT_MARKET_DATA_LIMIT,
+        self.market_data_provider = market_data_provider or build_backtest_market_data_provider(
+            settings
         )
         self.report_store = report_store or BacktestReportStore(settings.REAL_BACKTEST_REPORT_DIR)
         self.log_client = log_client or TelegramLogChannelClient(settings=settings)
@@ -271,29 +265,33 @@ class RealBacktestRunner:
                 and self.settings.TELEGRAM_SESSION_DIR
             )
         )
-        toobit_ready = bool(self.settings.TOOBIT_BASE_URL and self.settings.TOOBIT_KLINES_PATH)
+        historical_market_ready = bool(
+            self.settings.BINANCE_PUBLIC_DATA_BASE_URL
+            and self.settings.BINANCE_PUBLIC_DATA_CACHE_DIR
+        )
         if not self.settings.REAL_BACKTEST_ENABLED:
             issues.append("REAL_BACKTEST_ENABLED=true is required")
         if self.settings.RUN_BACKTEST_INTEGRATION_TESTS != 1:
             issues.append("RUN_BACKTEST_INTEGRATION_TESTS=1 is required")
         if self.settings.RUN_TELEGRAM_INTEGRATION_TESTS != 1:
             issues.append("RUN_TELEGRAM_INTEGRATION_TESTS=1 is required")
-        if self.settings.RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS != 1:
-            issues.append("RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1 is required")
+        if self.settings.RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS != 1:
+            issues.append("RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS=1 is required")
         if not telegram_credentials_present:
             issues.append("TELEGRAM_API_ID and TELEGRAM_API_HASH must be configured")
         if not telegram_session_configured:
             issues.append("TELEGRAM_SESSION_NAME and TELEGRAM_SESSION_DIR must be configured")
-        if not toobit_ready:
-            issues.append("Toobit public market-data settings are incomplete")
+        if not historical_market_ready:
+            issues.append("Binance public historical market-data settings are incomplete")
         Path(self.settings.REAL_BACKTEST_REPORT_DIR).mkdir(parents=True, exist_ok=True)
+        Path(self.settings.BINANCE_PUBLIC_DATA_CACHE_DIR).mkdir(parents=True, exist_ok=True)
         return RealBacktestReadiness(
             ready=not issues,
             issues=issues,
             real_backtest_enabled=self.settings.REAL_BACKTEST_ENABLED,
             telegram_credentials_present=telegram_credentials_present,
             telegram_session_configured=telegram_session_configured,
-            toobit_public_market_ready=toobit_ready,
+            toobit_public_market_ready=historical_market_ready,
             ai_gateway_enabled=self.settings.AI_GATEWAY_ENABLED,
             regex_fallback_enabled=self.settings.REAL_BACKTEST_USE_REGEX_FALLBACK,
             report_dir=self.settings.REAL_BACKTEST_REPORT_DIR,

@@ -75,6 +75,7 @@ from triak_trade.exchange.toobit.client import ToobitClient
 from triak_trade.exchange.toobit.demo_execution import DemoExecutionAdapter
 from triak_trade.exchange.toobit.errors import ToobitError
 from triak_trade.exchange.toobit.spot import ToobitSpotClient
+from triak_trade.market_data.binance_public import BinancePublicFuturesProvider
 from triak_trade.market_data.toobit import ToobitMarketDataProvider
 from triak_trade.observability.formatters import format_processing_audit_for_telegram
 from triak_trade.observability.processing_audit import (
@@ -109,6 +110,17 @@ def _build_toobit_client(settings: Settings) -> ToobitClient:
         recv_window=settings.TOOBIT_RECV_WINDOW,
         time_path=settings.TOOBIT_TIME_PATH,
         exchange_info_path=settings.TOOBIT_EXCHANGE_INFO_PATH,
+    )
+
+
+def _build_binance_public_provider(settings: Settings) -> BinancePublicFuturesProvider:
+    return BinancePublicFuturesProvider(
+        base_url=settings.BINANCE_PUBLIC_DATA_BASE_URL,
+        rest_base_url=settings.BINANCE_FUTURES_REST_BASE_URL,
+        klines_path=settings.BINANCE_FUTURES_KLINES_PATH,
+        ticker_price_path=settings.BINANCE_FUTURES_TICKER_PRICE_PATH,
+        cache_dir=settings.BINANCE_PUBLIC_DATA_CACHE_DIR,
+        timeout_seconds=settings.BINANCE_PUBLIC_DATA_TIMEOUT_SECONDS,
     )
 
 
@@ -631,6 +643,39 @@ def toobit_klines_dry_run_cmd(
         "first_open_time": candles[0].open_time.isoformat() if candles else None,
         "last_open_time": candles[-1].open_time.isoformat() if candles else None,
         "source": CandleSource.TOOBIT.value if candles else "none",
+    }
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("binance-public-klines-dry-run")
+def binance_public_klines_dry_run_cmd(
+    symbol: str,
+    interval: str = typer.Option("1m"),
+    minutes: int = typer.Option(5, min=1),
+    real: bool = typer.Option(False, "--real"),
+) -> None:
+    """Run guarded Binance public historical futures fetch without auth."""
+    settings = _load_settings()
+    if not real:
+        raise typer.BadParameter("Blocked by default. Pass --real with integration guard enabled.")
+    if settings.RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS != 1:
+        raise typer.BadParameter(
+            "Real mode requires "
+            "RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS=1 in root .env.local"
+        )
+
+    end_time = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    start_time = end_time - timedelta(minutes=minutes)
+    provider = _build_binance_public_provider(settings)
+    candles = asyncio.run(provider.get_klines(symbol, interval, start_time, end_time))
+    payload = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "candle_count": len(candles),
+        "first_open_time": candles[0].open_time.isoformat() if candles else None,
+        "last_open_time": candles[-1].open_time.isoformat() if candles else None,
+        "source": CandleSource.BINANCE.value if candles else "none",
+        "cache_dir": settings.BINANCE_PUBLIC_DATA_CACHE_DIR,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 

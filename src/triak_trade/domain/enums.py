@@ -80,6 +80,7 @@ class AdminDecisionType(str, Enum):
 
 
 class CandleSource(str, Enum):
+    BINANCE = "binance"
     TOOBIT = "toobit"
     FALLBACK = "fallback"
     FIXTURE = "fixture"
