@@ -168,7 +168,7 @@ class Settings(BaseSettings):
     REAL_BACKTEST_USE_REGEX_FALLBACK: bool = False
     REAL_BACKTEST_SEND_TO_ADMIN_BOT: bool = True
     REAL_BACKTEST_SEND_TO_LOG_CHANNEL: bool = True
-    REAL_BACKTEST_LOG_PER_MESSAGE: bool = False
+    REAL_BACKTEST_LOG_PER_MESSAGE: bool = True
     VERIFICATION_REPORT_DIR: str = "runtime/reports"
     VERIFICATION_WRITE_JSON: bool = True
     VERIFICATION_WRITE_MARKDOWN: bool = True

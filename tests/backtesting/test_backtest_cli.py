@@ -193,3 +193,38 @@ def test_real_backtest_cli_interprets_naive_dates_as_tehran(
     assert request is not None
     assert request.from_date.isoformat() == "2026-06-04T12:00:00+00:00"
     assert request.to_date.isoformat() == "2026-06-04T13:00:00+00:00"
+
+
+def test_real_backtest_cli_enables_per_message_log_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, REAL_BACKTEST_LOG_PER_MESSAGE=True)
+    fake_runner = _FakeRunner(settings)
+    monkeypatch.setattr("triak_trade.cli._load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "triak_trade.cli._build_real_backtest_runner",
+        lambda _settings: fake_runner,
+    )
+
+    run = runner.invoke(
+        app,
+        [
+            "real-backtest-run",
+            "--channel",
+            "https://t.me/Tofan_Trade",
+            "--hours",
+            "1",
+            "--interval",
+            "1m",
+            "--max-messages",
+            "10",
+            "--no-send-telegram-summary",
+            "--no-send-log-channel",
+            "--no-ai",
+        ],
+    )
+
+    assert run.exit_code == 0
+    request = fake_runner.last_request
+    assert request is not None
+    assert request.log_per_message is True

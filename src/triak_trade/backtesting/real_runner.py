@@ -115,7 +115,7 @@ class RealBacktestRunRequest(BaseModel):
     use_ai: bool
     send_telegram_summary: bool
     send_log_channel: bool
-    log_per_message: bool = False
+    log_per_message: bool = True
 
     @model_validator(mode="after")
     def validate_window(self) -> RealBacktestRunRequest:

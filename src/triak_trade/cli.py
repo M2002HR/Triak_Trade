@@ -835,6 +835,7 @@ def real_backtest_run_cmd(
         use_ai=use_ai,
         send_telegram_summary=send_telegram_summary,
         send_log_channel=send_log_channel,
+        log_per_message=settings.REAL_BACKTEST_LOG_PER_MESSAGE,
     )
     logger_overrides = {
         "telethon": logging.ERROR,

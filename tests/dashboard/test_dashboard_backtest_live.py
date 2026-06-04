@@ -228,6 +228,29 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
     assert loaded["report_path"] == "runtime/reports/backtests/report.json"
 
 
+def test_backtest_start_api_defaults_log_per_message_to_enabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    start = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "channel": "@Tofan_Trade",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "interval": "1m",
+            "max_messages": 1000,
+            "use_ai": False,
+            "send_log_channel": True,
+        },
+    )
+    assert start.status_code == 202
+    body = start.json()
+    assert body["run"]["log_per_message"] is True
+
+
 def test_backtest_start_api_rejects_missing_dates(tmp_path: Path, monkeypatch) -> None:
     client = build_client(tmp_path, monkeypatch)
     response = client.post(

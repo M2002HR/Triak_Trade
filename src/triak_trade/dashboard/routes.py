@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
@@ -106,7 +107,7 @@ def build_router(
         if redirect is not None:
             return redirect
         form = {key: str(value) for key, value in (await request.form()).items()}
-        result = service.run_fixture_backtest_from_form(form)
+        result = await asyncio.to_thread(service.run_fixture_backtest_from_form, form)
         return templates.TemplateResponse(
             request,
             "backtests.html",

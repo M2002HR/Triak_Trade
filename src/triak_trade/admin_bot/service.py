@@ -117,6 +117,7 @@ class AdminApprovalService:
             use_ai=self.settings.REAL_BACKTEST_USE_AI,
             send_telegram_summary=self.settings.REAL_BACKTEST_SEND_TO_ADMIN_BOT,
             send_log_channel=self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
+            log_per_message=self.settings.REAL_BACKTEST_LOG_PER_MESSAGE,
         )
         result = runner.run_sync(request)
         return {
