@@ -48,3 +48,16 @@ class BacktestEvent(BaseModel):
     parsed_signal: ParsedSignal
     related_signal_id: str | None
     debug_notes: list[str]
+    source_message_id: int | None = None
+    source_text: str | None = None
+    close_fraction: Decimal | None = None
+    move_stop_to_entry: bool = False
+
+    @field_validator("close_fraction")
+    @classmethod
+    def validate_close_fraction(cls, value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
+        if value <= Decimal("0") or value > Decimal("1"):
+            raise ValueError("close_fraction must be between 0 and 1")
+        return value

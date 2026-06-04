@@ -21,8 +21,17 @@ class _OpenPosition:
     entry_price: Decimal
     stop_loss: Decimal
     take_profits: list[Decimal]
-    quantity: Decimal
+    original_quantity: Decimal
+    remaining_quantity: Decimal
     entry_time: datetime
+    realized_pnl: Decimal
+    realized_fees: Decimal
+    exit_price: Decimal | None
+    exit_time: datetime | None
+    status: str
+    notes: list[str]
+    targets_hit: int
+    manual_partial_exit: bool
 
 
 class BacktestSimulator:
@@ -38,22 +47,34 @@ class BacktestSimulator:
         trades: list[SimulatedTrade] = []
         open_positions: dict[str, _OpenPosition] = {}
         balance = initial_balance
+        sorted_events = sorted(events, key=lambda item: item.timestamp)
+        sorted_candles = sorted(candles, key=lambda item: item.open_time)
+        candle_index = 0
 
-        for event in events:
+        for event in sorted_events:
+            candle_index = self._process_candles_until(
+                open_positions=open_positions,
+                candles=sorted_candles,
+                start_index=candle_index,
+                stop_at=event.timestamp,
+                fill_policy=fill_policy,
+                trades=trades,
+            )
             parsed = event.parsed_signal
             if (
                 parsed.action is SignalAction.OPEN
                 and parsed.symbol
                 and parsed.stop_loss is not None
             ):
-                entry_price = self._find_entry_price(
+                entry_price, entry_time = self._find_entry_execution(
                     parsed.entry_type,
                     parsed.entry_low,
                     parsed.entry_high,
                     event.timestamp,
-                    candles,
+                    sorted_candles,
+                    parsed.symbol,
                 )
-                if entry_price is None:
+                if entry_price is None or entry_time is None:
                     trades.append(
                         SimulatedTrade(
                             trade_id=f"no_fill_{event.signal_id or 'x'}",
@@ -89,18 +110,27 @@ class BacktestSimulator:
                     entry_price=entry_price,
                     stop_loss=parsed.stop_loss,
                     take_profits=parsed.take_profits,
-                    quantity=qty,
-                    entry_time=event.timestamp,
+                    original_quantity=qty,
+                    remaining_quantity=qty,
+                    entry_time=entry_time,
+                    realized_pnl=Decimal("0"),
+                    realized_fees=Decimal("0"),
+                    exit_price=None,
+                    exit_time=None,
+                    status="open",
+                    notes=[],
+                    targets_hit=0,
+                    manual_partial_exit=False,
                 )
             elif event.related_signal_id in open_positions:
                 position = open_positions[event.related_signal_id]
                 if parsed.action is SignalAction.CANCEL:
                     trades.append(
-                        self._close_trade(
+                        self._close_remaining_position(
                             position,
                             event.timestamp,
                             position.entry_price,
-                            "cancelled",
+                            "cancelled" if position.targets_hit == 0 else "partial_tp_then_cancel",
                         )
                     )
                     del open_positions[event.related_signal_id]
@@ -108,57 +138,106 @@ class BacktestSimulator:
                     close_price = (
                         self._first_candle_open_after(
                             event.timestamp,
-                            candles,
+                            sorted_candles,
                             position.symbol,
                         )
                         or position.entry_price
                     )
-                    trade = self._close_trade(position, event.timestamp, close_price, "closed")
-                    trades.append(trade)
-                    balance += trade.pnl
-                    del open_positions[event.related_signal_id]
+                    fraction = event.close_fraction or Decimal("1")
+                    self._close_fraction_of_position(
+                        position,
+                        event.timestamp,
+                        close_price,
+                        fraction,
+                        "manual_partial_close" if fraction < Decimal("1") else "manual_close",
+                    )
+                    if fraction < Decimal("1"):
+                        position.manual_partial_exit = True
+                    if position.remaining_quantity <= Decimal("0"):
+                        trade = self._finalize_position(
+                            position,
+                            status=(
+                                "closed"
+                                if position.targets_hit == 0
+                                else "partial_tp_then_close"
+                            ),
+                        )
+                        trades.append(trade)
+                        balance += trade.pnl
+                        del open_positions[event.related_signal_id]
+                elif parsed.action is SignalAction.UPDATE_SL and event.move_stop_to_entry:
+                    position.stop_loss = position.entry_price
+                    position.notes.append("stop_loss_moved_to_entry")
                 elif parsed.action is SignalAction.UPDATE_SL and parsed.stop_loss is not None:
                     position.stop_loss = parsed.stop_loss
+                    position.notes.append(f"stop_loss_updated={parsed.stop_loss}")
                 elif parsed.action is SignalAction.UPDATE_TP and parsed.take_profits:
-                    position.take_profits = parsed.take_profits
+                    position.take_profits = (
+                        position.take_profits[: position.targets_hit] + parsed.take_profits
+                    )
+                    position.notes.append(
+                        "take_profits_updated="
+                        + ",".join(str(item) for item in parsed.take_profits)
+                    )
+
+        candle_index = self._process_candles_until(
+            open_positions=open_positions,
+            candles=sorted_candles,
+            start_index=candle_index,
+            stop_at=None,
+            fill_policy=fill_policy,
+            trades=trades,
+        )
 
         for signal_id, position in list(open_positions.items()):
-            outcome = self._resolve_with_candles(position, candles, fill_policy)
+            outcome = self._close_remaining_position(
+                position,
+                position.exit_time or position.entry_time,
+                position.exit_price
+                or self._last_price(
+                    sorted_candles,
+                    position.symbol,
+                    position.entry_price,
+                ),
+                "open_until_end" if position.targets_hit == 0 else "partial_tp_open_until_end",
+            )
             trades.append(outcome)
             balance += outcome.pnl
             del open_positions[signal_id]
 
         return trades, balance
 
-    def _find_entry_price(
+    def _find_entry_execution(
         self,
         entry_type: EntryType,
         entry_low: Decimal | None,
         entry_high: Decimal | None,
         signal_time: datetime,
         candles: list[Candle],
-    ) -> Decimal | None:
-        next_candle = next((c for c in candles if c.open_time >= signal_time), None)
+        symbol: str,
+    ) -> tuple[Decimal | None, datetime | None]:
+        relevant_candles = [c for c in candles if c.symbol == symbol]
+        next_candle = next((c for c in relevant_candles if c.open_time >= signal_time), None)
         if next_candle is None:
-            return None
+            return None, None
         if entry_type is EntryType.MARKET:
-            return next_candle.open
+            return next_candle.open, next_candle.open_time
         if entry_low is not None and entry_high is not None:
             midpoint = (entry_low + entry_high) / Decimal("2")
-            for candle in candles:
+            for candle in relevant_candles:
                 if candle.open_time < signal_time:
                     continue
                 if candle.low <= entry_high and candle.high >= entry_low:
-                    return midpoint
-            return None
+                    return midpoint, candle.open_time
+            return None, None
         if entry_low is not None:
-            for candle in candles:
+            for candle in relevant_candles:
                 if candle.open_time < signal_time:
                     continue
                 if candle.low <= entry_low <= candle.high:
-                    return entry_low
-            return None
-        return next_candle.open
+                    return entry_low, candle.open_time
+            return None, None
+        return next_candle.open, next_candle.open_time
 
     def _first_candle_open_after(
         self,
@@ -169,36 +248,190 @@ class BacktestSimulator:
         candle = next((c for c in candles if c.symbol == symbol and c.open_time >= ts), None)
         return candle.open if candle is not None else None
 
-    def _resolve_with_candles(
+    def _process_candles_until(
+        self,
+        *,
+        open_positions: dict[str, _OpenPosition],
+        candles: list[Candle],
+        start_index: int,
+        stop_at: datetime | None,
+        fill_policy: BacktestFillPolicy,
+        trades: list[SimulatedTrade],
+    ) -> int:
+        index = start_index
+        while index < len(candles):
+            candle = candles[index]
+            if stop_at is not None and candle.close_time > stop_at:
+                break
+            closed_signal_ids: list[str] = []
+            for signal_id, position in list(open_positions.items()):
+                if position.symbol != candle.symbol or candle.open_time < position.entry_time:
+                    continue
+                status = self._apply_candle_to_position(position, candle, fill_policy)
+                if status is None:
+                    continue
+                trades.append(self._finalize_position(position, status=status))
+                closed_signal_ids.append(signal_id)
+            for signal_id in closed_signal_ids:
+                del open_positions[signal_id]
+            index += 1
+        return index
+
+    def _apply_candle_to_position(
         self,
         position: _OpenPosition,
-        candles: list[Candle],
+        candle: Candle,
         fill_policy: BacktestFillPolicy,
-    ) -> SimulatedTrade:
-        relevant = [
-            c for c in candles if c.symbol == position.symbol and c.open_time >= position.entry_time
-        ]
-        tp = position.take_profits[0] if position.take_profits else None
-        for candle in relevant:
-            hit_sl = self._hit_sl(position, candle)
-            hit_tp = self._hit_tp(position, candle, tp)
-            if hit_sl and hit_tp:
-                if fill_policy is BacktestFillPolicy.CONSERVATIVE:
-                    return self._close_trade(
-                        position,
-                        candle.close_time,
-                        position.stop_loss,
-                        "sl_hit_same_candle",
-                    )
-                if tp is not None:
-                    return self._close_trade(position, candle.close_time, tp, "tp_hit_same_candle")
-            elif hit_sl:
-                return self._close_trade(position, candle.close_time, position.stop_loss, "sl_hit")
-            elif hit_tp and tp is not None:
-                return self._close_trade(position, candle.close_time, tp, "tp_hit")
+    ) -> str | None:
+        pending_tps = self._pending_take_profits(position)
+        hit_sl = self._hit_sl(position, candle)
+        hit_tp_values = [tp for tp in pending_tps if self._hit_tp(position, candle, tp)]
 
-        last_price = relevant[-1].close if relevant else position.entry_price
-        return self._close_trade(position, position.entry_time, last_price, "open_until_end")
+        if hit_sl and hit_tp_values:
+            if fill_policy is BacktestFillPolicy.CONSERVATIVE:
+                self._close_fraction_of_position(
+                    position,
+                    candle.close_time,
+                    position.stop_loss,
+                    Decimal("1"),
+                    "sl_hit_same_candle",
+                )
+                return self._sl_status(position, same_candle=True)
+            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values)
+            if position.remaining_quantity > Decimal("0"):
+                self._close_fraction_of_position(
+                    position,
+                    candle.close_time,
+                    position.stop_loss,
+                    Decimal("1"),
+                    "sl_after_partial_tp_same_candle",
+                )
+                return self._sl_status(position, same_candle=True)
+            return self._tp_status(position, same_candle=True)
+
+        if hit_tp_values:
+            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values)
+            if position.remaining_quantity <= Decimal("0"):
+                return self._tp_status(position, same_candle=False)
+
+        if hit_sl and position.remaining_quantity > Decimal("0"):
+            self._close_fraction_of_position(
+                position,
+                candle.close_time,
+                position.stop_loss,
+                Decimal("1"),
+                "sl_hit",
+            )
+            return self._sl_status(position, same_candle=False)
+        return None
+
+    def _apply_take_profit_hits(
+        self,
+        position: _OpenPosition,
+        exit_time: datetime,
+        tp_values: list[Decimal],
+    ) -> None:
+        for tp in tp_values:
+            if position.remaining_quantity <= Decimal("0"):
+                return
+            remaining_targets = len(self._pending_take_profits(position))
+            fraction = (
+                Decimal("1")
+                if remaining_targets <= 1
+                else (Decimal("1") / Decimal(remaining_targets))
+            )
+            self._close_fraction_of_position(
+                position,
+                exit_time,
+                tp,
+                fraction,
+                f"take_profit_hit={tp}",
+            )
+            position.targets_hit += 1
+
+    def _pending_take_profits(self, position: _OpenPosition) -> list[Decimal]:
+        pending = position.take_profits[position.targets_hit :]
+        return pending if pending else []
+
+    def _close_fraction_of_position(
+        self,
+        position: _OpenPosition,
+        exit_time: datetime,
+        exit_price: Decimal,
+        fraction: Decimal,
+        note: str,
+    ) -> None:
+        effective_fraction = min(max(fraction, Decimal("0")), Decimal("1"))
+        if effective_fraction <= Decimal("0") or position.remaining_quantity <= Decimal("0"):
+            return
+        quantity = position.remaining_quantity * effective_fraction
+        if effective_fraction >= Decimal("1") or quantity > position.remaining_quantity:
+            quantity = position.remaining_quantity
+        pnl = self._calculate_pnl(position, exit_price, quantity)
+        position.realized_pnl += pnl
+        position.remaining_quantity -= quantity
+        position.exit_time = exit_time
+        position.exit_price = exit_price
+        position.notes.append(f"{note}; qty={quantity}; px={exit_price}; pnl={pnl}")
+        if position.remaining_quantity < Decimal("0"):
+            position.remaining_quantity = Decimal("0")
+
+    def _close_remaining_position(
+        self,
+        position: _OpenPosition,
+        exit_time: datetime,
+        exit_price: Decimal,
+        status: str,
+    ) -> SimulatedTrade:
+        if position.remaining_quantity > Decimal("0"):
+            self._close_fraction_of_position(position, exit_time, exit_price, Decimal("1"), status)
+        return self._finalize_position(position, status=status)
+
+    def _tp_status(self, position: _OpenPosition, *, same_candle: bool) -> str:
+        if position.manual_partial_exit:
+            return "partial_close_then_tp"
+        if position.targets_hit > 1:
+            return "partial_tp_complete"
+        return "tp_hit_same_candle" if same_candle else "tp_hit"
+
+    def _sl_status(self, position: _OpenPosition, *, same_candle: bool) -> str:
+        if position.manual_partial_exit:
+            return "partial_close_then_sl"
+        if position.targets_hit > 0:
+            return "partial_tp_then_sl"
+        return "sl_hit_same_candle" if same_candle else "sl_hit"
+
+    def _finalize_position(self, position: _OpenPosition, *, status: str) -> SimulatedTrade:
+        position.status = status
+        exposure = position.entry_price * position.original_quantity
+        pnl_pct = (
+            (position.realized_pnl / exposure) * Decimal("100")
+            if exposure > Decimal("0")
+            else Decimal("0")
+        )
+        return SimulatedTrade(
+            trade_id=position.trade_id,
+            signal_id=position.signal_id,
+            channel_id=position.channel_id,
+            symbol=position.symbol,
+            side=position.side,
+            entry_time=position.entry_time,
+            exit_time=position.exit_time,
+            entry_price=position.entry_price,
+            exit_price=position.exit_price,
+            quantity=position.original_quantity,
+            pnl=position.realized_pnl,
+            pnl_pct=pnl_pct,
+            fees=position.realized_fees,
+            status=status,
+            notes=list(position.notes),
+        )
+
+    def _last_price(self, candles: list[Candle], symbol: str, fallback: Decimal) -> Decimal:
+        relevant = [c for c in candles if c.symbol == symbol]
+        if not relevant:
+            return fallback
+        return relevant[-1].close
 
     def _hit_sl(self, position: _OpenPosition, candle: Candle) -> bool:
         if position.side is TradeSide.SHORT:
@@ -212,30 +445,11 @@ class BacktestSimulator:
             return candle.low <= tp
         return candle.high >= tp
 
-    def _close_trade(
+    def _calculate_pnl(
         self,
         position: _OpenPosition,
-        exit_time: datetime,
         exit_price: Decimal,
-        status: str,
-    ) -> SimulatedTrade:
+        quantity: Decimal,
+    ) -> Decimal:
         direction = Decimal("-1") if position.side is TradeSide.SHORT else Decimal("1")
-        pnl = (exit_price - position.entry_price) * position.quantity * direction
-        pnl_pct = (pnl / (position.entry_price * position.quantity)) * Decimal("100")
-        return SimulatedTrade(
-            trade_id=position.trade_id,
-            signal_id=position.signal_id,
-            channel_id=position.channel_id,
-            symbol=position.symbol,
-            side=position.side,
-            entry_time=position.entry_time,
-            exit_time=exit_time,
-            entry_price=position.entry_price,
-            exit_price=exit_price,
-            quantity=position.quantity,
-            pnl=pnl,
-            pnl_pct=pnl_pct,
-            fees=Decimal("0"),
-            status=status,
-            notes=[],
-        )
+        return (exit_price - position.entry_price) * quantity * direction

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from triak_trade.agents.classifier import MessageClassifier
 from triak_trade.agents.context import ChannelContext
+from triak_trade.backtesting.directives import (
+    detect_move_stop_to_entry,
+    extract_close_fraction,
+)
 from triak_trade.backtesting.models import BacktestEvent
 from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import RawTelegramMessage
@@ -38,6 +42,10 @@ class BacktestTimelineBuilder:
                     parsed_signal=classified.parsed_signal,
                     related_signal_id=classified.related_signal_id,
                     debug_notes=classified.debug_notes,
+                    source_message_id=message.message_id,
+                    source_text=message.text,
+                    close_fraction=extract_close_fraction(message.text),
+                    move_stop_to_entry=detect_move_stop_to_entry(message.text),
                 )
             )
         return events

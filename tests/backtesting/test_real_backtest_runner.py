@@ -696,9 +696,14 @@ def test_real_backtest_runner_simulates_noisy_market_signal_immediately(tmp_path
         if event.trace is not None and event.trace.message_id == 5880
     )
     assert latest_trace is not None
-    assert latest_trace.symbol == "SAPIENUSD"
+    assert latest_trace.symbol == "SAPIENUSDT"
     assert latest_trace.current_stage == "finalized"
-    assert latest_trace.final_status in {"tp_hit", "tp_hit_same_candle", "open_until_end"}
+    assert latest_trace.final_status in {
+        "tp_hit",
+        "tp_hit_same_candle",
+        "open_until_end",
+        "partial_tp_open_until_end",
+    }
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:

@@ -73,3 +73,16 @@ def test_timeline_orders_and_classifies() -> None:
     assert events[0].action is SignalAction.OPEN
     assert events[1].action is SignalAction.UPDATE_TP
     assert events[2].action is SignalAction.IGNORE
+
+
+def test_timeline_extracts_close_fraction_and_breakeven_directive() -> None:
+    builder = BacktestTimelineBuilder(classifier=FakeClassifier(), channel_id="c")
+    events = builder.build(
+        [
+            _msg(1, "new signal", 1),
+            _msg(2, "close 50% now", 2),
+            _msg(3, "move SL to breakeven", 3),
+        ]
+    )
+    assert events[1].close_fraction == Decimal("0.5")
+    assert events[2].move_stop_to_entry is True

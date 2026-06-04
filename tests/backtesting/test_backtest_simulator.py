@@ -107,3 +107,130 @@ def test_simulator_cancel_before_resolution() -> None:
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
     )
     assert any(t.status == "cancelled" for t in trades)
+
+
+def test_simulator_partial_take_profit_ladder_then_stop_loss() -> None:
+    parsed = _parsed(SignalAction.OPEN)
+    parsed.take_profits = [Decimal("102"), Decimal("104")]
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    candles = [
+        _candle(0, "102.5", "99", o="100", c="102"),
+        _candle(1, "101.5", "97.5", o="101", c="98"),
+    ]
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    assert trades[0].status == "partial_tp_then_sl"
+    assert any("take_profit_hit=102" in note for note in trades[0].notes)
+    assert any("sl_hit" in note for note in trades[0].notes)
+
+
+def test_simulator_message_close_has_priority_over_future_candle_outcome() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    close_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 1, 30, tzinfo=timezone.utc),
+        action=SignalAction.CLOSE,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.CLOSE),
+        related_signal_id="s1",
+        debug_notes=[],
+        close_fraction=Decimal("1"),
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(1, "110", "97", o="100.5", c="105"),
+    ]
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event, close_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    assert trades[0].status == "closed"
+    assert trades[0].exit_time == datetime(2026, 6, 1, 0, 1, 30, tzinfo=timezone.utc)
+
+
+def test_simulator_close_partial_then_finish_on_take_profit() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    partial_close_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 1, 30, tzinfo=timezone.utc),
+        action=SignalAction.CLOSE,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.CLOSE),
+        related_signal_id="s1",
+        debug_notes=[],
+        close_fraction=Decimal("0.5"),
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(1, "104.5", "100", o="100.5", c="104"),
+    ]
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event, partial_close_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    assert trades[0].status == "partial_close_then_tp"
+    assert any("manual_partial_close" in note for note in trades[0].notes)
+
+
+def test_simulator_move_stop_to_entry_respects_followup_instruction() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    breakeven_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 1, 30, tzinfo=timezone.utc),
+        action=SignalAction.UPDATE_SL,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.UPDATE_SL),
+        related_signal_id="s1",
+        debug_notes=[],
+        move_stop_to_entry=True,
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(1, "101", "99.9", o="100.5", c="100"),
+    ]
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event, breakeven_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    assert trades[0].status == "sl_hit"
+    assert trades[0].exit_price == Decimal("100.5")
+    assert any("stop_loss_moved_to_entry" in note for note in trades[0].notes)

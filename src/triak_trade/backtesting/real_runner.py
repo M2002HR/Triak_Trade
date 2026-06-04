@@ -23,6 +23,10 @@ from triak_trade.agents.classifier import (
 from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
+from triak_trade.backtesting.directives import (
+    detect_move_stop_to_entry,
+    extract_close_fraction,
+)
 from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
 from triak_trade.backtesting.report import report_to_json, report_to_markdown_summary
@@ -1265,8 +1269,12 @@ class RealBacktestRunner:
                         detail="Signal is structurally valid for backtesting.",
                     )
                     prefetched_candles = prefetched_candles_by_symbol.get(market_symbol)
+                    selected_symbol = market_symbol
                     if prefetched_candles is None:
-                        prefetched_candles = await self._prefetch_market_data_for_trace(
+                        (
+                            prefetched_candles,
+                            selected_symbol,
+                        ) = await self._prefetch_market_data_for_trace(
                             request=request,
                             trace=trace,
                             market_symbol=market_symbol,
@@ -1275,9 +1283,11 @@ class RealBacktestRunner:
                             warnings=warnings,
                         )
                         if prefetched_candles is not None:
-                            prefetched_candles_by_symbol[market_symbol] = prefetched_candles
+                            prefetched_candles_by_symbol[selected_symbol] = prefetched_candles
 
                     if prefetched_candles is not None:
+                        parsed = parsed.model_copy(update={"symbol": selected_symbol})
+                        trace.symbol = selected_symbol
                         trace.final_status = "simulation_tracking"
                         trace.result_summary = (
                             "Signal validated, candle data loaded, and simulation tracking "
@@ -1288,7 +1298,7 @@ class RealBacktestRunner:
                             "market_data",
                             status="completed",
                             detail=(
-                                f"Fetched {len(prefetched_candles)} candles for {market_symbol}."
+                                f"Fetched {len(prefetched_candles)} candles for {selected_symbol}."
                             ),
                         )
                         self._set_trace_stage(
@@ -1300,7 +1310,7 @@ class RealBacktestRunner:
                                 "candle resolution will determine the final trade outcome."
                             ),
                         )
-                        symbol_trace_map.setdefault(market_symbol, []).append(message.message_id)
+                        symbol_trace_map.setdefault(selected_symbol, []).append(message.message_id)
                         if signal_id is not None:
                             signal_trace_map[signal_id] = message.message_id
                     else:
@@ -1392,6 +1402,10 @@ class RealBacktestRunner:
                     parsed_signal=parsed,
                     related_signal_id=classified.related_signal_id,
                     debug_notes=list(classified.debug_notes),
+                    source_message_id=message.message_id,
+                    source_text=message.text,
+                    close_fraction=extract_close_fraction(message.text),
+                    move_stop_to_entry=detect_move_stop_to_entry(message.text),
                 )
             )
         return (
@@ -1412,7 +1426,7 @@ class RealBacktestRunner:
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         warnings: list[str],
-    ) -> list[Any] | None:
+    ) -> tuple[list[Any] | None, str]:
         candidate_symbols = market_symbol_candidates(market_symbol) or [market_symbol]
         self._set_trace_stage(
             trace,
@@ -1444,7 +1458,7 @@ class RealBacktestRunner:
             if fetched:
                 if candidate_symbol != market_symbol:
                     trace.debug_notes.append(f"market_symbol_selected={candidate_symbol}")
-                return fetched
+                return fetched, candidate_symbol
 
         if last_error_type is not None:
             self._append_warning(
@@ -1465,7 +1479,7 @@ class RealBacktestRunner:
         trace.debug_notes.append(
             "market_data_attempted=" + ",".join(attempted)
         )
-        return None
+        return None, market_symbol
 
     async def _prepare_message_for_classification(
         self,
