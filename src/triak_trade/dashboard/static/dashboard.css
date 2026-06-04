@@ -260,6 +260,33 @@ pre {
   flex-wrap: wrap;
 }
 
+.message-stream-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.filter-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filter-pill,
+.secondary-open-button {
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--accent-strong);
+  border: 1px solid rgba(14, 124, 102, 0.16);
+}
+
+.filter-pill.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
 .backtest-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -425,6 +452,25 @@ pre {
 .message-stream,
 .event-feed,
 .recent-runs {
+  display: grid;
+  gap: 12px;
+}
+
+.modal-preview-blurb {
+  min-height: 92px;
+}
+
+.preview-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.panel-modal-card {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.panel-modal-body,
+.panel-modal-list {
   display: grid;
   gap: 12px;
 }

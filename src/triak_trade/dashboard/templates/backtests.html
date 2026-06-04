@@ -71,7 +71,17 @@
           <h2>Per-Message Trace</h2>
           <p class="subtle">Click any row to open a full stage timeline, message text, and decision details.</p>
         </div>
-        <div id="message-count-label" class="counter-pill">0 messages</div>
+        <div class="message-stream-toolbar">
+          <div id="message-filter-bar" class="filter-pill-row">
+            <button type="button" class="filter-pill active" data-message-filter="all">All</button>
+            <button type="button" class="filter-pill" data-message-filter="signals">Signals</button>
+            <button type="button" class="filter-pill" data-message-filter="updates">Updates</button>
+            <button type="button" class="filter-pill" data-message-filter="invalid">Invalid</button>
+            <button type="button" class="filter-pill" data-message-filter="ignored">Ignored</button>
+            <button type="button" class="filter-pill" data-message-filter="ambiguous">Ambiguous</button>
+          </div>
+          <div id="message-count-label" class="counter-pill">0 messages</div>
+        </div>
       </div>
       <div id="message-stream" class="message-stream empty-state-box">
         No messages have been processed yet.
@@ -87,7 +97,8 @@
           <h2>Stage Activity</h2>
         </div>
       </div>
-      <div id="event-feed" class="event-feed empty-state-box">No activity yet.</div>
+      <div id="event-feed" class="modal-preview-blurb empty-state-box">No activity yet.</div>
+      <button type="button" class="button secondary-open-button" data-open-panel-modal="feed">Open Run Feed</button>
     </section>
 
     <section class="panel recent-runs-panel">
@@ -97,7 +108,8 @@
           <h2>Recent Backtests</h2>
         </div>
       </div>
-      <div id="recent-runs" class="recent-runs empty-state-box">No previous runs found.</div>
+      <div id="recent-runs" class="modal-preview-blurb empty-state-box">No previous runs found.</div>
+      <button type="button" class="button secondary-open-button" data-open-panel-modal="history">Open History</button>
     </section>
 
     {% if result %}
@@ -152,6 +164,20 @@
       <h3>Debug Notes</h3>
       <div id="message-modal-debug" class="debug-note-list"></div>
     </section>
+  </div>
+</div>
+
+<div id="panel-modal" class="modal-shell" hidden>
+  <div class="modal-backdrop" data-close-panel-modal="true"></div>
+  <div class="modal-card panel-modal-card" role="dialog" aria-modal="true" aria-labelledby="panel-modal-title">
+    <button type="button" class="modal-close" data-close-panel-modal="true" aria-label="Close panel details">×</button>
+    <div class="modal-header">
+      <div>
+        <p class="eyebrow">Backtest Panel</p>
+        <h2 id="panel-modal-title">Panel Details</h2>
+      </div>
+    </div>
+    <div id="panel-modal-body" class="panel-modal-body"></div>
   </div>
 </div>
 {% endblock %}

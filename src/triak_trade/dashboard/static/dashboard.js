@@ -14,6 +14,9 @@ document.documentElement.dataset.dashboardReady = "true";
     recentRuns: bootstrap.recent_runs || [],
     selectedMessageId: null,
     modalOpen: false,
+    panelModalOpen: false,
+    activePanelModal: null,
+    messageFilter: "all",
     pollTimer: null,
     listTimer: null,
     ws: null,
@@ -45,6 +48,7 @@ document.documentElement.dataset.dashboardReady = "true";
     currentMessageLabel: document.getElementById("current-message-label"),
     currentMessageSummary: document.getElementById("current-message-summary"),
     messageCountLabel: document.getElementById("message-count-label"),
+    messageFilterBar: document.getElementById("message-filter-bar"),
     messageStream: document.getElementById("message-stream"),
     eventFeed: document.getElementById("event-feed"),
     recentRuns: document.getElementById("recent-runs"),
@@ -56,6 +60,9 @@ document.documentElement.dataset.dashboardReady = "true";
     modalPreview: document.getElementById("message-modal-preview"),
     modalSummary: document.getElementById("message-modal-summary"),
     modalDebug: document.getElementById("message-modal-debug"),
+    panelModal: document.getElementById("panel-modal"),
+    panelModalTitle: document.getElementById("panel-modal-title"),
+    panelModalBody: document.getElementById("panel-modal-body"),
   };
 
   seedDefaults();
@@ -89,6 +96,15 @@ document.documentElement.dataset.dashboardReady = "true";
         applyDateRange(start.toISOString(), end.toISOString());
       });
     });
+    nodes.messageFilterBar?.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-message-filter]") : null;
+      if (!target) {
+        return;
+      }
+      state.messageFilter = target.getAttribute("data-message-filter") || "all";
+      renderFilterBar();
+      renderMessages(state.activeRun?.messages || []);
+    });
     nodes.messageStream?.addEventListener("click", (event) => {
       const target = event.target instanceof Element ? event.target.closest("[data-message-id]") : null;
       if (!target) {
@@ -101,12 +117,19 @@ document.documentElement.dataset.dashboardReady = "true";
         openModal(trace);
       }
     });
-    nodes.recentRuns?.addEventListener("click", (event) => {
+    document.addEventListener("click", (event) => {
+      const panelTarget = event.target instanceof Element ? event.target.closest("[data-open-panel-modal]") : null;
+      if (panelTarget) {
+        const kind = panelTarget.getAttribute("data-open-panel-modal") || "feed";
+        openPanelModal(kind);
+        return;
+      }
       const target = event.target instanceof Element ? event.target.closest("[data-run-id]") : null;
       if (!target) {
         return;
       }
       state.activeRunId = target.getAttribute("data-run-id");
+      closePanelModal();
       closeModal();
       fetchRun();
     });
@@ -116,11 +139,57 @@ document.documentElement.dataset.dashboardReady = "true";
         closeModal();
       }
     });
+    document.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-close-panel-modal='true']") : null;
+      if (target) {
+        closePanelModal();
+      }
+    });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         closeModal();
+        closePanelModal();
       }
     });
+  }
+
+  function renderFilterBar() {
+    nodes.messageFilterBar?.querySelectorAll("[data-message-filter]").forEach((button) => {
+      const active = button.getAttribute("data-message-filter") === state.messageFilter;
+      button.classList.toggle("active", active);
+    });
+  }
+
+  function openPanelModal(kind) {
+    state.panelModalOpen = true;
+    state.activePanelModal = kind;
+    nodes.panelModal.hidden = false;
+    if (kind === "history") {
+      nodes.panelModalTitle.textContent = "Recent Backtests";
+      nodes.panelModalBody.innerHTML = buildRecentRunsMarkup(state.recentRuns, true);
+    } else {
+      nodes.panelModalTitle.textContent = "Run Feed";
+      nodes.panelModalBody.innerHTML = buildEventFeedMarkup(state.activeRun?.events || [], true);
+    }
+    syncBodyModalState();
+  }
+
+  function closePanelModal() {
+    if (!nodes.panelModal) {
+      return;
+    }
+    state.panelModalOpen = false;
+    state.activePanelModal = null;
+    nodes.panelModal.hidden = true;
+    syncBodyModalState();
+  }
+
+  function syncBodyModalState() {
+    if (state.modalOpen || state.panelModalOpen) {
+      document.body.classList.add("modal-open");
+    } else {
+      document.body.classList.remove("modal-open");
+    }
   }
 
   async function handleSubmit(event) {
@@ -328,32 +397,32 @@ document.documentElement.dataset.dashboardReady = "true";
       return;
     }
     nodes.eventFeed.classList.remove("empty-state-box");
-    nodes.eventFeed.innerHTML = events
-      .slice()
-      .reverse()
-      .slice(0, 40)
-      .map((event) => `
-        <article class="event-item event-${escapeHtml(event.status)}">
-          <div class="event-line">
-            <strong>${escapeHtml(event.phase.replaceAll("_", " "))}</strong>
-            <span>${formatDate(event.at)}</span>
-          </div>
-          <p>${escapeHtml(event.summary)}</p>
-          ${event.current_message_id ? `<small>message ${escapeHtml(String(event.current_message_id))}</small>` : ""}
-        </article>
-      `)
-      .join("");
+    const latest = events[events.length - 1];
+    nodes.eventFeed.innerHTML = `
+      <div class="preview-stack">
+        <strong>${escapeHtml(latest.phase.replaceAll("_", " "))}</strong>
+        <span>${escapeHtml(latest.summary)}</span>
+        <small>${events.length} updates captured</small>
+      </div>
+    `;
+    if (state.panelModalOpen && state.activePanelModal === "feed") {
+      nodes.panelModalBody.innerHTML = buildEventFeedMarkup(events, true);
+    }
   }
 
   function renderMessages(messages) {
-    nodes.messageCountLabel.textContent = `${messages.length} messages`;
-    if (!messages.length) {
-      nodes.messageStream.textContent = "No messages have been processed yet.";
+    const filteredMessages = messages.filter(matchesMessageFilter);
+    nodes.messageCountLabel.textContent = `${filteredMessages.length} of ${messages.length} messages`;
+    if (!filteredMessages.length) {
+      nodes.messageStream.textContent = messages.length
+        ? "No messages match the current filter."
+        : "No messages have been processed yet.";
       nodes.messageStream.classList.add("empty-state-box");
       return;
     }
     nodes.messageStream.classList.remove("empty-state-box");
     nodes.messageStream.innerHTML = messages
+      .filter(matchesMessageFilter)
       .map((trace) => {
         const active = state.activeRun?.current_message_id === trace.message_id;
         return `
@@ -388,15 +457,17 @@ document.documentElement.dataset.dashboardReady = "true";
       return;
     }
     nodes.recentRuns.classList.remove("empty-state-box");
-    nodes.recentRuns.innerHTML = runs
-      .map((run) => `
-        <button type="button" class="recent-run-card ${state.activeRunId === run.run_id ? "active" : ""}" data-run-id="${escapeHtml(run.run_id)}">
-          <strong>${escapeHtml(run.channel_input || run.channel_resolved)}</strong>
-          <span>${escapeHtml(run.current_phase_label || run.current_phase || run.status)}</span>
-          <small>${formatDate(run.created_at)}</small>
-        </button>
-      `)
-      .join("");
+    const latest = runs[0];
+    nodes.recentRuns.innerHTML = `
+      <div class="preview-stack">
+        <strong>${escapeHtml(latest.channel_input || latest.channel_resolved)}</strong>
+        <span>${escapeHtml(latest.current_phase_label || latest.current_phase || latest.status)}</span>
+        <small>${runs.length} runs available</small>
+      </div>
+    `;
+    if (state.panelModalOpen && state.activePanelModal === "history") {
+      nodes.panelModalBody.innerHTML = buildRecentRunsMarkup(runs, true);
+    }
   }
 
   function renderEmptyRun() {
@@ -451,7 +522,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.modalDebug.innerHTML = (trace.debug_notes || []).length
       ? trace.debug_notes.map((note) => `<div class="debug-note">${escapeHtml(note)}</div>`).join("")
       : '<div class="debug-note empty">No debug notes.</div>';
-    document.body.classList.add("modal-open");
+    syncBodyModalState();
   }
 
   function closeModal() {
@@ -461,7 +532,7 @@ document.documentElement.dataset.dashboardReady = "true";
     state.modalOpen = false;
     state.selectedMessageId = null;
     nodes.modal.hidden = true;
-    document.body.classList.remove("modal-open");
+    syncBodyModalState();
   }
 
   function upsertRun(run) {
@@ -528,6 +599,7 @@ document.documentElement.dataset.dashboardReady = "true";
         state.activeRun = state.recentRuns[0];
         renderRun(state.activeRun);
       }
+      renderFilterBar();
       return;
     }
     if (payload.type !== "backtest_run" || !payload.run) {
@@ -591,5 +663,66 @@ document.documentElement.dataset.dashboardReady = "true";
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#39;");
+  }
+
+  function matchesMessageFilter(trace) {
+    switch (state.messageFilter) {
+      case "signals":
+        return trace.parsed_action === "open" || trace.classification === "new_signal";
+      case "updates":
+        return ["update_sl", "update_tp", "update_leverage", "cancel", "close"].includes(trace.parsed_action);
+      case "invalid":
+        return ["invalid_signal", "market_data_unavailable"].includes(trace.final_status);
+      case "ignored":
+        return trace.final_status === "ignored" || trace.parsed_action === "ignore";
+      case "ambiguous":
+        return trace.final_status === "ambiguous" || trace.classification === "ambiguous";
+      default:
+        return true;
+    }
+  }
+
+  function buildEventFeedMarkup(events, expanded) {
+    if (!events.length) {
+      return '<div class="empty-state-box">No activity yet.</div>';
+    }
+    return `
+      <div class="event-feed ${expanded ? "panel-modal-list" : ""}">
+        ${events
+          .slice()
+          .reverse()
+          .slice(0, 80)
+          .map((event) => `
+            <article class="event-item event-${escapeHtml(event.status)}">
+              <div class="event-line">
+                <strong>${escapeHtml(event.phase.replaceAll("_", " "))}</strong>
+                <span>${formatDate(event.at)}</span>
+              </div>
+              <p>${escapeHtml(event.summary)}</p>
+              ${event.current_message_id ? `<small>message ${escapeHtml(String(event.current_message_id))}</small>` : ""}
+            </article>
+          `)
+          .join("")}
+      </div>
+    `;
+  }
+
+  function buildRecentRunsMarkup(runs, expanded) {
+    if (!runs.length) {
+      return '<div class="empty-state-box">No previous runs found.</div>';
+    }
+    return `
+      <div class="recent-runs ${expanded ? "panel-modal-list" : ""}">
+        ${runs
+          .map((run) => `
+            <button type="button" class="recent-run-card ${state.activeRunId === run.run_id ? "active" : ""}" data-run-id="${escapeHtml(run.run_id)}">
+              <strong>${escapeHtml(run.channel_input || run.channel_resolved)}</strong>
+              <span>${escapeHtml(run.current_phase_label || run.current_phase || run.status)}</span>
+              <small>${formatDate(run.created_at)}</small>
+            </button>
+          `)
+          .join("")}
+      </div>
+    `;
   }
 })();

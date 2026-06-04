@@ -26,7 +26,10 @@ from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
 from triak_trade.backtesting.report import report_to_json, report_to_markdown_summary
 from triak_trade.backtesting.report_store import BacktestReportStore
-from triak_trade.backtesting.symbol_mapper import normalize_market_symbol
+from triak_trade.backtesting.symbol_mapper import (
+    market_symbol_candidates,
+    normalize_market_symbol,
+)
 from triak_trade.backtesting.telegram_source import BacktestTelegramSource
 from triak_trade.config.settings import Settings
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
@@ -384,6 +387,7 @@ class RealBacktestRunner:
             )
             if symbol is not None
         })
+        symbol_candidates_by_primary = self._build_symbol_candidates_by_primary(valid_open_events)
         ignored_messages = counts["ignored_messages"]
         ambiguous_messages = counts["ambiguous_messages"]
         invalid_signals = counts["invalid_signals"]
@@ -490,22 +494,52 @@ class RealBacktestRunner:
             counts=counts,
         )
         for symbol in symbols:
-            try:
-                fetched = await self.market_data_provider.get_klines(
-                    symbol,
-                    request.interval,
-                    from_date,
-                    to_date,
-                )
-            except Exception as exc:
-                skipped_reasons.append(f"{symbol}: candle fetch failed ({type(exc).__name__})")
+            candidate_symbols = symbol_candidates_by_primary.get(symbol, [symbol])
+            fetched: list[Any] = []
+            selected_symbol = symbol
+            last_error_type: str | None = None
+            no_data_candidates: list[str] = []
+            for candidate_symbol in candidate_symbols:
+                try:
+                    fetched = await self.market_data_provider.get_klines(
+                        candidate_symbol,
+                        request.interval,
+                        from_date,
+                        to_date,
+                    )
+                except Exception as exc:
+                    last_error_type = type(exc).__name__
+                    continue
+                if fetched:
+                    selected_symbol = candidate_symbol
+                    break
+                no_data_candidates.append(candidate_symbol)
+
+            if last_error_type is not None and not fetched and not no_data_candidates:
+                skipped_reasons.append(f"{symbol}: candle fetch failed ({last_error_type})")
                 for message_id in symbol_trace_map.get(symbol, []):
                     message_trace = traces_by_message_id[message_id]
+                    message_trace.final_status = "market_data_unavailable"
+                    message_trace.result_summary = (
+                        f"Candle fetch failed for {symbol}: {last_error_type}"
+                    )
                     self._set_trace_stage(
                         message_trace,
                         "market_data",
                         status="failed",
-                        detail=f"Candle fetch failed for {symbol}: {type(exc).__name__}",
+                        detail=message_trace.result_summary,
+                    )
+                    self._set_trace_stage(
+                        message_trace,
+                        "simulated",
+                        status="skipped",
+                        detail="Simulation skipped because market data was unavailable.",
+                    )
+                    self._set_trace_stage(
+                        message_trace,
+                        "finalized",
+                        status="completed",
+                        detail=message_trace.result_summary,
                     )
                     self._emit_message_progress(
                         progress_callback,
@@ -514,17 +548,23 @@ class RealBacktestRunner:
                         counts=counts,
                         trace=message_trace,
                     )
+                    await self._maybe_send_message_log(request, message_trace, warnings)
                 continue
+
             if fetched:
                 real_market_data_used = True
                 candles.extend(fetched)
                 for message_id in symbol_trace_map.get(symbol, []):
                     message_trace = traces_by_message_id[message_id]
+                    if selected_symbol != symbol:
+                        message_trace.debug_notes.append(
+                            f"market_symbol_selected={selected_symbol}"
+                        )
                     self._set_trace_stage(
                         message_trace,
                         "market_data",
                         status="completed",
-                        detail=f"Fetched {len(fetched)} candles for {symbol}.",
+                        detail=f"Fetched {len(fetched)} candles for {selected_symbol}.",
                     )
                     self._emit_message_progress(
                         progress_callback,
@@ -534,14 +574,31 @@ class RealBacktestRunner:
                         trace=message_trace,
                     )
             else:
-                skipped_reasons.append(f"{symbol}: no candle data returned")
+                attempted = ", ".join(no_data_candidates or candidate_symbols)
+                skipped_reasons.append(f"{symbol}: no candle data returned (tried: {attempted})")
                 for message_id in symbol_trace_map.get(symbol, []):
                     message_trace = traces_by_message_id[message_id]
+                    message_trace.final_status = "market_data_unavailable"
+                    message_trace.result_summary = (
+                        f"No candle data returned for {symbol}. Tried: {attempted}"
+                    )
                     self._set_trace_stage(
                         message_trace,
                         "market_data",
                         status="failed",
-                        detail=f"No candle data returned for {symbol}.",
+                        detail=message_trace.result_summary,
+                    )
+                    self._set_trace_stage(
+                        message_trace,
+                        "simulated",
+                        status="skipped",
+                        detail="Simulation skipped because market data was unavailable.",
+                    )
+                    self._set_trace_stage(
+                        message_trace,
+                        "finalized",
+                        status="completed",
+                        detail=message_trace.result_summary,
                     )
                     self._emit_message_progress(
                         progress_callback,
@@ -550,6 +607,7 @@ class RealBacktestRunner:
                         counts=counts,
                         trace=message_trace,
                     )
+                    await self._maybe_send_message_log(request, message_trace, warnings)
 
         if request.send_log_channel:
             await self._try_send_log(
@@ -1259,6 +1317,22 @@ class RealBacktestRunner:
         if action is SignalAction.UNKNOWN:
             return "ambiguous"
         return str(action.value)
+
+    def _build_symbol_candidates_by_primary(
+        self,
+        events: list[BacktestEvent],
+    ) -> dict[str, list[str]]:
+        candidates_by_primary: dict[str, list[str]] = {}
+        for event in events:
+            candidates = market_symbol_candidates(event.parsed_signal.symbol)
+            if not candidates:
+                continue
+            primary = candidates[0]
+            existing = candidates_by_primary.setdefault(primary, [])
+            for candidate in candidates:
+                if candidate not in existing:
+                    existing.append(candidate)
+        return candidates_by_primary
 
     def _format_trace_for_telegram(self, trace: RealBacktestMessageTrace) -> str:
         emoji = {

@@ -199,6 +199,50 @@ def test_real_backtest_runner_skips_unknown_symbol_safely(tmp_path: Path) -> Non
     assert any("BTCUSDT" in item for item in result.skipped_reasons)
 
 
+def test_real_backtest_runner_finalizes_trace_when_market_data_missing(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    telegram = FakeTelegramClient(
+        history_by_channel={
+            "https://t.me/Tofan_Trade": [
+                _message(
+                    now,
+                    "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 2x",
+                )
+            ]
+        }
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(),
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is False
+    message_events = [event for event in progress_events if event.trace is not None]
+    assert message_events
+    final_trace = message_events[-1].trace
+    assert final_trace is not None
+    assert final_trace.final_status == "market_data_unavailable"
+    assert final_trace.current_stage == "finalized"
+    assert "No candle data returned" in (final_trace.result_summary or "")
+
+
 def test_real_backtest_runner_emits_message_progress(tmp_path: Path) -> None:
     now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
     message = _message(
