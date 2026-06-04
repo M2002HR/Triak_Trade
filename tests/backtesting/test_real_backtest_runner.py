@@ -50,6 +50,20 @@ class FailingLogClient:
         raise TelegramLogChannelError("simulated log channel failure")
 
 
+class SkippingLogClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def send_text(self, text: str, *, real: bool = False) -> object:
+        self.calls += 1
+        return {
+            "sent": False,
+            "skipped": True,
+            "reason": "guard disabled",
+            "message_id": None,
+        }
+
+
 class TrackingTelegramClient(FakeTelegramClient):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -463,6 +477,84 @@ def test_real_backtest_runner_survives_log_channel_failures(tmp_path: Path) -> N
     assert log_client.calls > 0
     assert any("Telegram log channel send failed" in warning for warning in result.warnings)
     assert not any("simulated log channel failure" == error for error in result.errors)
+
+
+def test_real_backtest_runner_warns_when_log_channel_send_is_skipped(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)})
+    log_client = SkippingLogClient()
+    runner = RealBacktestRunner(
+        settings=_settings(
+            tmp_path,
+            AI_GATEWAY_ENABLED=False,
+            REAL_BACKTEST_SEND_TO_LOG_CHANNEL=True,
+        ),
+        telegram_client=telegram,
+        market_data_provider=provider,
+        log_client=log_client,
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        )
+    )
+
+    assert result.success is True
+    assert log_client.calls > 0
+    assert any("(skipped)" in warning for warning in result.warnings)
+
+
+def test_real_backtest_runner_sends_failure_log_for_no_valid_signal_case(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    telegram = FakeTelegramClient(
+        history_by_channel={
+            "https://t.me/Tofan_Trade": [
+                _message(now, "Random market commentary only"),
+            ]
+        }
+    )
+    log_client = FakeLogClient()
+    runner = RealBacktestRunner(
+        settings=_settings(
+            tmp_path,
+            AI_GATEWAY_ENABLED=False,
+            REAL_BACKTEST_SEND_TO_LOG_CHANNEL=True,
+        ),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(),
+        log_client=log_client,
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=True,
+            log_per_message=True,
+        )
+    )
+
+    assert result.success is False
+    assert any("Real backtest finished without valid signals" in text for text in log_client.texts)
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:

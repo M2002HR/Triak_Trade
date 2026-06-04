@@ -277,6 +277,16 @@ class RealBacktestRunner:
             summary="Backtest run created and waiting for readiness checks.",
         )
         if not readiness.ready:
+            if request.send_log_channel:
+                await self._try_send_log(
+                    "Real backtest blocked before start\n"
+                    f"channel={request.channel}\nissues={'; '.join(readiness.issues)}",
+                    warnings=warnings,
+                    warning_message=(
+                        "Telegram log channel send failed before blocked backtest return; "
+                        "continuing without Telegram run log delivery."
+                    ),
+                )
             return self._write_failure(
                 channel=request.channel,
                 from_date=from_date,
@@ -287,6 +297,16 @@ class RealBacktestRunner:
 
         selection = self._select_classifier(request.use_ai)
         if request.use_ai and not selection.ai_configured:
+            if request.send_log_channel:
+                await self._try_send_log(
+                    "Real backtest failed before classification\n"
+                    f"channel={request.channel}\nreason=AI gateway required but not enabled",
+                    warnings=warnings,
+                    warning_message=(
+                        "Telegram log channel send failed before AI-config return; "
+                        "continuing without Telegram run log delivery."
+                    ),
+                )
             return self._write_failure(
                 channel=request.channel,
                 from_date=from_date,
@@ -442,6 +462,17 @@ class RealBacktestRunner:
             )
 
         if not messages:
+            if request.send_log_channel:
+                await self._try_send_log(
+                    "Real backtest finished with no messages\n"
+                    f"channel={request.channel}\n"
+                    f"range={from_date.isoformat()} -> {to_date.isoformat()}",
+                    warnings=warnings,
+                    warning_message=(
+                        "Telegram log channel send failed before no-message failure return; "
+                        "continuing without Telegram run log delivery."
+                    ),
+                )
             self._emit_run_progress(
                 progress_callback,
                 phase="classify_messages",
@@ -468,6 +499,17 @@ class RealBacktestRunner:
                 warnings=warnings,
             )
         if not symbols:
+            if request.send_log_channel:
+                await self._try_send_log(
+                    "Real backtest finished without valid signals\n"
+                    f"channel={request.channel}\nmessages={len(messages)}\n"
+                    "reason=No structurally valid signals were detected",
+                    warnings=warnings,
+                    warning_message=(
+                        "Telegram log channel send failed before no-signal failure return; "
+                        "continuing without Telegram run log delivery."
+                    ),
+                )
             self._emit_run_progress(
                 progress_callback,
                 phase="classify_messages",
@@ -639,6 +681,17 @@ class RealBacktestRunner:
         )
 
         if not candles:
+            if request.send_log_channel:
+                await self._try_send_log(
+                    "Real backtest finished without market data\n"
+                    f"channel={request.channel}\nsymbols={', '.join(symbols)}\n"
+                    "reason=No candle data available for detected symbols",
+                    warnings=warnings,
+                    warning_message=(
+                        "Telegram log channel send failed before no-candle failure return; "
+                        "continuing without Telegram run log delivery."
+                    ),
+                )
             return self._write_failure(
                 channel=request.channel,
                 from_date=from_date,
@@ -896,10 +949,10 @@ class RealBacktestRunner:
             ),
         )
 
-    async def _send_log(self, text: str) -> None:
+    async def _send_log(self, text: str) -> object | None:
         if not self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL:
-            return
-        await self.log_client.send_text(text, real=True)
+            return None
+        return await self.log_client.send_text(text, real=True)
 
     async def _try_send_log(
         self,
@@ -909,12 +962,25 @@ class RealBacktestRunner:
         warning_message: str,
     ) -> bool:
         try:
-            await self._send_log(text)
+            result = await self._send_log(text)
         except Exception as exc:
             if warnings is not None:
                 self._append_warning(warnings, f"{warning_message} ({type(exc).__name__})")
             return False
+        if self._send_result_skipped(result):
+            if warnings is not None:
+                self._append_warning(warnings, f"{warning_message} (skipped)")
+            return False
         return True
+
+    @staticmethod
+    def _send_result_skipped(result: object | None) -> bool:
+        if result is None:
+            return True
+        if isinstance(result, dict):
+            return bool(result.get("skipped"))
+        skipped = getattr(result, "skipped", None)
+        return bool(skipped)
 
     async def _maybe_send_message_log(
         self,
