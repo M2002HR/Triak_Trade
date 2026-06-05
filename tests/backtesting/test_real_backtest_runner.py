@@ -691,7 +691,9 @@ def test_real_backtest_runner_activates_signal_after_follow_up_stop_loss(
     )
 
     assert result.success is True
-    assert result.valid_signals >= 1
+    assert result.valid_signals == 1
+    assert result.trades_simulated == 1
+    assert result.trades_filled == 1
     live_signal_events = [event.live_signals for event in progress_events if event.live_signals]
     assert live_signal_events
     latest_signal = live_signal_events[-1][0]

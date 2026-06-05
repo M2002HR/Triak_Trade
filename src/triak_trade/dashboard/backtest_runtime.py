@@ -386,7 +386,8 @@ class DashboardBacktestCoordinator:
                 if key in event.live_metrics:
                     setattr(run, key, event.live_metrics[key])
         if event.live_signals is not None:
-            run.signals = list(event.live_signals)
+            run.signals = self._merge_signal_history(run.signals, event.live_signals)
+            self._refresh_signal_aggregate_metrics(run)
         run.events.append(
             DashboardBacktestEvent(
                 at=event.timestamp,
@@ -410,6 +411,78 @@ class DashboardBacktestCoordinator:
         else:
             run.messages.append(trace)
         run.messages.sort(key=lambda item: item.message_date, reverse=True)
+
+    @staticmethod
+    def _merge_signal_history(
+        existing_signals: list[dict[str, Any]],
+        incoming_signals: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for signal in existing_signals:
+            signal_id = str(signal.get("signal_id") or "")
+            if signal_id:
+                merged[signal_id] = dict(signal)
+        for signal in incoming_signals:
+            signal_id = str(signal.get("signal_id") or "")
+            if not signal_id:
+                continue
+            base = merged.get(signal_id, {})
+            base.update(signal)
+            merged[signal_id] = base
+        return sorted(
+            merged.values(),
+            key=lambda item: (
+                item.get("status_group") != "active",
+                str(item.get("entry_time") or ""),
+                str(item.get("signal_id") or ""),
+            ),
+        )
+
+    @staticmethod
+    def _refresh_signal_aggregate_metrics(run: DashboardBacktestRun) -> None:
+        realized_pnl = Decimal("0")
+        unrealized_pnl = Decimal("0")
+        wins = 0
+        losses = 0
+        filled = 0
+        active = 0
+        closed = 0
+
+        for signal in run.signals:
+            status = str(signal.get("status") or "")
+            status_group = str(signal.get("status_group") or "")
+            if status != "not_filled":
+                filled += 1
+            if status_group == "active":
+                active += 1
+            elif status != "not_filled":
+                closed += 1
+
+            signal_realized = Decimal(str(signal.get("realized_pnl") or "0"))
+            signal_unrealized = Decimal(str(signal.get("unrealized_pnl") or "0"))
+            signal_total = Decimal(str(signal.get("total_pnl") or "0"))
+            realized_pnl += signal_realized
+            unrealized_pnl += signal_unrealized
+
+            if status_group != "active" and status != "not_filled":
+                if signal_total > Decimal("0"):
+                    wins += 1
+                elif signal_total < Decimal("0"):
+                    losses += 1
+
+        total_pnl = realized_pnl + unrealized_pnl
+        run.trades_simulated = len(run.signals)
+        run.trades_filled = filled
+        run.live_open_positions = active
+        run.live_closed_trades = closed
+        run.live_wins = wins
+        run.live_losses = losses
+        run.live_realized_pnl = str(realized_pnl)
+        run.live_unrealized_pnl = str(unrealized_pnl)
+        run.live_total_pnl = str(total_pnl)
+        initial_balance = Decimal(run.initial_balance)
+        run.live_realized_balance = str(initial_balance + realized_pnl)
+        run.live_current_balance = str(initial_balance + total_pnl)
 
     def _notify(self, run: DashboardBacktestRun) -> None:
         if self.notifier is None:

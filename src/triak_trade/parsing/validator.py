@@ -51,6 +51,8 @@ class ParsedSignalValidator:
             return False, [f"signal action is {signal.action.value}"]
 
         errors = self._base_open_checks(signal, min_confidence=min_confidence)
+        if signal.stop_loss is None:
+            errors.append("missing stop_loss")
         self._append_directional_checks(errors, signal)
         return len(errors) == 0, errors
 

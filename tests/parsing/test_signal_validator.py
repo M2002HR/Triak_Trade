@@ -85,9 +85,17 @@ def test_validator_rejects_unknown() -> None:
     assert "signal action is UNKNOWN" in errors
 
 
-def test_backtest_validator_allows_signal_without_stop_loss_or_tp() -> None:
+def test_backtest_validator_requires_stop_loss_for_simulation() -> None:
     ok, errors = ParsedSignalValidator().validate_for_backtest(
         _signal(stop_loss=None, take_profits=[], leverage=20),
+    )
+    assert ok is False
+    assert "missing stop_loss" in errors
+
+
+def test_backtest_validator_allows_signal_without_take_profits() -> None:
+    ok, errors = ParsedSignalValidator().validate_for_backtest(
+        _signal(take_profits=[], leverage=20),
     )
     assert ok is True
     assert errors == []

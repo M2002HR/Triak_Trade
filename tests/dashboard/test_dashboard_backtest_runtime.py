@@ -477,6 +477,126 @@ def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_
     assert loaded.signals[0]["signal_id"] == "sig_77"
 
 
+def test_dashboard_backtest_coordinator_keeps_signal_history_and_aggregate_counts(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        store=store,
+        runner_factory=FakeRunner,
+    )
+    run = store.create(
+        DashboardBacktestRun(
+            run_id="run_signal_history",
+            channel_input="https://t.me/Tofan_Trade",
+            channel_resolved="https://t.me/Tofan_Trade",
+            from_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            to_date=datetime(2026, 6, 5, tzinfo=timezone.utc),
+            interval="1m",
+            max_messages=100,
+            initial_balance=Decimal("100"),
+            risk_per_trade_pct=Decimal("3"),
+            use_ai=False,
+            send_log_channel=False,
+            log_per_message=False,
+            status="running",
+            created_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        )
+    )
+    now = datetime(2026, 6, 4, tzinfo=timezone.utc)
+
+    coordinator._handle_progress(
+        run.run_id,
+        RealBacktestProgressEvent(
+            event_type="message",
+            timestamp=now,
+            phase="simulate",
+            status="running",
+            summary="Snapshot 1",
+            counts={"total_messages": 2, "valid_signals": 2, "trades_simulated": 1},
+            current_message_id=100,
+            live_signals=[
+                {
+                    "signal_id": "sig_1",
+                    "symbol": "BTCUSDT",
+                    "side": "long",
+                    "status": "open",
+                    "status_group": "active",
+                    "entry_time": now.isoformat(),
+                    "entry_time_tehran": "2026-06-04T03:30:00+03:30",
+                    "exit_time": None,
+                    "exit_time_tehran": None,
+                    "entry_price": "100",
+                    "stop_loss": "95",
+                    "take_profits": ["105"],
+                    "notional_value": "30",
+                    "risk_amount": "3",
+                    "open_quantity": "1",
+                    "original_quantity": "1",
+                    "mark_price": "101",
+                    "realized_pnl": "0",
+                    "unrealized_pnl": "1",
+                    "total_pnl": "1",
+                    "total_pnl_pct": "1",
+                    "targets_hit": 0,
+                    "lifecycle": ["created"],
+                }
+            ],
+        ),
+    )
+    coordinator._handle_progress(
+        run.run_id,
+        RealBacktestProgressEvent(
+            event_type="message",
+            timestamp=now,
+            phase="simulate",
+            status="running",
+            summary="Snapshot 2",
+            counts={"total_messages": 3, "valid_signals": 2, "trades_simulated": 1},
+            current_message_id=101,
+            live_signals=[
+                {
+                    "signal_id": "sig_2",
+                    "symbol": "ETHUSDT",
+                    "side": "short",
+                    "status": "not_filled",
+                    "status_group": "inactive",
+                    "entry_time": now.isoformat(),
+                    "entry_time_tehran": "2026-06-04T03:30:00+03:30",
+                    "exit_time": None,
+                    "exit_time_tehran": None,
+                    "entry_price": None,
+                    "stop_loss": "3600",
+                    "take_profits": [],
+                    "notional_value": "0",
+                    "risk_amount": "0",
+                    "open_quantity": "0",
+                    "original_quantity": "0",
+                    "mark_price": "0",
+                    "realized_pnl": "0",
+                    "unrealized_pnl": "0",
+                    "total_pnl": "0",
+                    "total_pnl_pct": "0",
+                    "targets_hit": 0,
+                    "lifecycle": ["entry not touched"],
+                }
+            ],
+        ),
+    )
+
+    loaded = store.read(run.run_id)
+    assert loaded is not None
+    assert {item["signal_id"] for item in loaded.signals} == {"sig_1", "sig_2"}
+    assert loaded.trades_simulated == 2
+    assert loaded.trades_filled == 1
+    assert loaded.live_open_positions == 1
+    assert loaded.live_closed_trades == 0
+    assert loaded.live_total_pnl == "1"
+    assert loaded.live_current_balance == "101"
+
+
 def test_dashboard_backtest_coordinator_recovers_incomplete_runs_on_startup(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     store = DashboardBacktestStore(settings)
