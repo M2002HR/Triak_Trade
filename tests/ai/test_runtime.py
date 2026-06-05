@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from triak_trade.ai.runtime import (
     ai_gateway_safe_config,
     ai_gateway_status,
+    ensure_local_ai_gateway_ready,
     stop_ai_gateway_process,
 )
 from triak_trade.config.settings import Settings
@@ -43,3 +46,44 @@ def test_ai_gateway_stop_without_process_is_safe(tmp_path: Path) -> None:
     result = stop_ai_gateway_process(settings)
     assert result['stopped'] is True
     assert result['running_before'] is False
+
+
+def test_ensure_local_ai_gateway_ready_starts_when_not_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(
+        "triak_trade.ai.runtime.wait_for_gateway_ready",
+        lambda settings, timeout_seconds=20: False,
+    )
+    monkeypatch.setattr(
+        "triak_trade.ai.runtime.start_ai_gateway_process",
+        lambda settings: {"started": True, "pid": 1234},
+    )
+    result = ensure_local_ai_gateway_ready(settings)
+    assert result["managed"] is True
+    assert result["running"] is True
+    assert result["started"] is True
+
+
+def test_ensure_local_ai_gateway_ready_skips_non_local_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        AI_GATEWAY_ENABLED=True,
+        AI_GATEWAY_BASE_URL="http://ai-gateway:8080",
+        AI_GATEWAY_RUNTIME_DIR=str(tmp_path / "ai_gateway"),
+        AI_GATEWAY_PID_FILE=str(tmp_path / "ai_gateway" / "gateway.pid"),
+        AI_GATEWAY_STATUS_FILE=str(tmp_path / "ai_gateway" / "status.json"),
+        AI_GATEWAY_LOG_FILE=str(tmp_path / "ai_gateway" / "gateway.log"),
+    )
+    monkeypatch.setattr(
+        "triak_trade.ai.runtime.wait_for_gateway_ready",
+        lambda settings, timeout_seconds=20: True,
+    )
+    result = ensure_local_ai_gateway_ready(settings)
+    assert result["managed"] is False
+    assert result["running"] is True

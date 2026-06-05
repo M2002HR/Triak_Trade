@@ -18,12 +18,29 @@ cp .env.example .env.local
 ```
 
 `/.env.local` in project root is the single runtime config source. Do not create `.env` inside `external/Ajil_Unified_AI_Gateway`.
+If your network needs a proxy, set root env keys such as `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `UAG_PROXY_ENABLED`, and `UAG_PROXY_URL`.
 
-## Start MySQL and Redis
+## Start Full Stack
 
 ```bash
-docker compose up -d
+docker compose up --build
 ```
+
+Or use the helper:
+
+```bash
+./scripts/stack_up.sh
+```
+
+This single command starts:
+- MySQL
+- Redis
+- Ajil AI gateway on `http://127.0.0.1:8090`
+- Dashboard on `http://127.0.0.1:8088`
+
+The compose stack reads runtime secrets only from root `.env.local`.
+Local `docker compose` env substitution is wired through a gitignored `.env -> .env.local` symlink.
+Do not create `.env` inside `external/Ajil_Unified_AI_Gateway`.
 
 ## Commands
 
@@ -63,11 +80,14 @@ mypy src
 ## Ajil Gateway
 
 - Submodule location: `external/Ajil_Unified_AI_Gateway`
-- Local runtime is started from Triak and must read only root `.env.local` via `UAG_ENV_FILE`.
+- Docker Compose builds the gateway from Ajil's own Dockerfile and injects runtime env from root `.env.local`.
+- Local host runtime is started from Triak and must read only root `.env.local` via `UAG_ENV_FILE`.
+- `run-dashboard` auto-ensures the local gateway when `AI_GATEWAY_ENABLED=true` and the gateway base URL is local.
 - Do not create `.env` inside `external/Ajil_Unified_AI_Gateway`.
 - Unit tests use fakes/mocks; no real gateway required.
 - Real gateway tests must be explicitly guarded (`RUN_AI_GATEWAY_INTEGRATION_TESTS=1` with `AI_GATEWAY_ENABLED=true`).
 - First future real-world evaluation channel is `https://t.me/Tofan_Trade` (not hard-coded in parser logic).
+- If outbound networking is unstable, use root env keys such as `UAG_PROXY_ENABLED`, `UAG_PROXY_URL`, `UAG_BUILD_HTTP_PROXY`, and `UAG_BUILD_HTTPS_PROXY`.
 
 ## Telegram Collection
 
@@ -140,6 +160,7 @@ mypy src
 ## Management Dashboard
 
 - FastAPI/Jinja dashboard runs locally at `http://127.0.0.1:8088` by default.
+- In Docker Compose, the dashboard waits for MySQL, Redis, Ajil, runs migrations, and then starts automatically.
 - Auth uses `DASHBOARD_ADMIN_TOKEN`; the token is stored only in root `.env.local`.
 - Use `triak-trade dashboard-check` for safe non-secret config status.
 - Use `triak-trade dashboard-start`, `dashboard-status`, `dashboard-logs`, and `dashboard-stop` for runtime control.

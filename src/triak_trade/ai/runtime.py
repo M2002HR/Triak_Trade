@@ -103,6 +103,30 @@ def start_ai_gateway_process(settings: Settings) -> dict[str, Any]:
     }
 
 
+def ensure_local_ai_gateway_ready(settings: Settings) -> dict[str, Any]:
+    if not settings.AI_GATEWAY_ENABLED:
+        return {"enabled": False, "managed": False, "running": False}
+    raw = urlparse(settings.AI_GATEWAY_BASE_URL)
+    host = raw.hostname or "127.0.0.1"
+    if host not in {"127.0.0.1", "localhost"}:
+        return {
+            "enabled": True,
+            "managed": False,
+            "running": wait_for_gateway_ready(settings, timeout_seconds=2),
+        }
+    _parse_local_base_url(settings.AI_GATEWAY_BASE_URL)
+    if wait_for_gateway_ready(settings, timeout_seconds=2):
+        return {"enabled": True, "managed": True, "running": True, "started": False}
+    started = start_ai_gateway_process(settings)
+    return {
+        "enabled": True,
+        "managed": True,
+        "running": True,
+        "started": bool(started.get("started")),
+        "pid": started.get("pid"),
+    }
+
+
 def stop_ai_gateway_process(settings: Settings) -> dict[str, Any]:
     pid = read_pid(settings)
     running_before = pid_is_running(pid)

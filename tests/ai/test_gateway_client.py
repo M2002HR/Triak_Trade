@@ -102,6 +102,8 @@ def test_gateway_client_sends_payload(context: AIMessageContext) -> None:
     assert "messages" in str(observed["json"])
     assert "response_format" in str(observed["json"])
     assert "x_router" in str(observed["json"])
+    assert "required_output_contract" in str(observed["json"])
+    assert "required_output_schema" not in str(observed["json"])
 
 
 def test_gateway_client_routes_text_requests_to_groq_model(context: AIMessageContext) -> None:

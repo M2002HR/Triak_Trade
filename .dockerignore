@@ -1,0 +1,13 @@
+.git
+.gitmodules
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.sessions
+.venv
+__pycache__
+*.pyc
+*.pyo
+.env.local
+runtime
+tests

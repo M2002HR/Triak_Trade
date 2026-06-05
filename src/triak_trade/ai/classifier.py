@@ -19,6 +19,9 @@ from triak_trade.parsing.validator import ParsedSignalValidator
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _RAW_URL_RE = re.compile(r"https?://\S+")
+_MAX_RECENT_MESSAGES = 8
+_MAX_ACTIVE_SIGNALS = 8
+_MAX_CONTEXT_TEXT_CHARS = 700
 
 
 class AIMessageClassifier(MessageClassifier):
@@ -260,9 +263,10 @@ class AIMessageClassifier(MessageClassifier):
                 limit=self.settings.AI_CLASSIFIER_FORWARD_CONTEXT_LIMIT,
             )
         ]
+        recent_source = list(context.recent_messages)
         recent_messages = [
             self._serialize_message_context(item)
-            for item in context.recent_messages
+            for item in recent_source[-_MAX_RECENT_MESSAGES:]
         ]
         images = self._extract_images(message)
         raw_payload = message.raw_payload
@@ -286,7 +290,7 @@ class AIMessageClassifier(MessageClassifier):
                     "updated_at": signal.updated_at.isoformat(),
                     "related_message_ids": list(signal.related_message_ids),
                 }
-                for signal in context.active_signals.values()
+                for signal in list(context.active_signals.values())[-_MAX_ACTIVE_SIGNALS:]
             ],
             parser_version="ai-v2",
             notes=["ai-classifier", "reply-aware", "forward-context-aware"],
@@ -311,7 +315,8 @@ class AIMessageClassifier(MessageClassifier):
             return None
         without_markdown_urls = _MARKDOWN_LINK_RE.sub(r"\1", text)
         without_raw_urls = _RAW_URL_RE.sub("", without_markdown_urls)
-        return without_raw_urls
+        collapsed = re.sub(r"\s+", " ", without_raw_urls).strip()
+        return collapsed[:_MAX_CONTEXT_TEXT_CHARS]
 
     @staticmethod
     def _extract_images(message: RawTelegramMessage) -> list[dict[str, object]]:

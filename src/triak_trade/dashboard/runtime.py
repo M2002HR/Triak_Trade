@@ -16,6 +16,7 @@ from typing import Any
 import uvicorn
 from fastapi.testclient import TestClient
 
+from triak_trade.ai.runtime import ensure_local_ai_gateway_ready
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
 from triak_trade.dashboard.auth import session_secret_present, token_present
@@ -44,6 +45,7 @@ def run_dashboard(
     max_runtime_seconds: int | None = None,
 ) -> dict[str, Any]:
     _quiet_external_runtime_loggers()
+    ensure_local_ai_gateway_ready(settings)
     actual_host = host or settings.DASHBOARD_HOST
     actual_port = port or settings.DASHBOARD_PORT
     config = uvicorn.Config(

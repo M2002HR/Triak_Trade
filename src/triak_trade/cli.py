@@ -38,6 +38,7 @@ from triak_trade.ai.runtime import (
     ai_gateway_logs,
     ai_gateway_safe_config,
     ai_gateway_status,
+    ensure_local_ai_gateway_ready,
     start_ai_gateway_process,
     stop_ai_gateway_process,
 )
@@ -304,6 +305,7 @@ def ai_classify_dry_run_cmd(message: str, real_gateway: bool = typer.Option(Fals
     )
 
     if using_real_gateway:
+        ensure_local_ai_gateway_ready(settings)
         client = _build_ai_gateway_client(settings)
         mode = "real-gateway"
     else:

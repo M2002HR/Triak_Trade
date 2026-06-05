@@ -114,7 +114,6 @@ class AjilGatewayClient:
 
     def _build_payload(self, context: AIMessageContext, *, attempt: int) -> dict[str, Any]:
         prompt = build_telegram_signal_prompt(context)
-        schema = AIClassificationResult.model_json_schema()
         context_payload = context.model_dump(mode="json")
         route = self.plan_for_context(context)
         task = "Classify this Telegram channel message and return only valid JSON."
@@ -127,7 +126,7 @@ class AjilGatewayClient:
             {
                 "task": task,
                 "context": context_payload,
-                "required_output_schema": schema,
+                "required_output_contract": self._output_contract(),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -149,6 +148,7 @@ class AjilGatewayClient:
             {"role": "user", "content": user_content},
         ]
         payload: dict[str, Any] = {
+            "model": route.model,
             "messages": messages,
             "temperature": 0,
             "response_format": {"type": "json_object"},
@@ -169,9 +169,81 @@ class AjilGatewayClient:
                 }
             ]
             payload["x_router"] = router_options
-        else:
-            payload["model"] = route.model
         return payload
+
+    @staticmethod
+    def _output_contract() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "json_only": True,
+            "required_keys": [
+                "classification",
+                "action",
+                "market",
+                "symbol",
+                "symbol_raw",
+                "side",
+                "entry_type",
+                "entry_low",
+                "entry_high",
+                "entry_prices",
+                "stop_loss",
+                "take_profits",
+                "leverage",
+                "leverage_mode",
+                "close_fraction",
+                "move_stop_to_entry",
+                "related_signal_id",
+                "relation_reason",
+                "source_message_ids",
+                "extracted_from_context",
+                "missing_fields",
+                "confidence",
+                "reasoning_summary",
+                "risk_notes",
+                "ignored_numeric_tokens",
+                "requires_admin_confirmation",
+                "raw_provider_metadata",
+            ],
+            "enum_fields": {
+                "classification": [
+                    "NEW_SIGNAL",
+                    "SIGNAL_UPDATE",
+                    "CANCEL",
+                    "CLOSE",
+                    "RESULT_REPORT",
+                    "ADVERTISEMENT",
+                    "GENERAL_ANALYSIS",
+                    "UNRELATED",
+                    "AMBIGUOUS",
+                    "UNKNOWN",
+                ],
+                "action": [
+                    "open",
+                    "cancel",
+                    "close",
+                    "update_sl",
+                    "update_tp",
+                    "update_leverage",
+                    "update_entry",
+                    "ignore",
+                    "unknown",
+                ],
+                "market": ["futures", "spot", "unknown"],
+                "side": ["long", "short", "buy", "sell", "unknown"],
+                "entry_type": ["market", "limit", "range", "unknown"],
+                "leverage_mode": ["cross", "isolated", "unknown"],
+            },
+            "price_string_fields": [
+                "entry_low",
+                "entry_high",
+                "entry_prices",
+                "stop_loss",
+                "take_profits",
+                "confidence",
+                "close_fraction",
+            ],
+        }
 
     def _build_headers(self) -> dict[str, str]:
         if self.auth_token.strip():
