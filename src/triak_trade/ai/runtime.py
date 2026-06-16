@@ -106,6 +106,15 @@ def start_ai_gateway_process(settings: Settings) -> dict[str, Any]:
 def ensure_local_ai_gateway_ready(settings: Settings) -> dict[str, Any]:
     if not settings.AI_GATEWAY_ENABLED:
         return {"enabled": False, "managed": False, "running": False}
+
+    import os
+    if os.path.exists("/.dockerenv"):
+        return {
+            "enabled": True,
+            "managed": False,
+            "running": wait_for_gateway_ready(settings, timeout_seconds=2),
+        }
+
     raw = urlparse(settings.AI_GATEWAY_BASE_URL)
     host = raw.hostname or "127.0.0.1"
     if host not in {"127.0.0.1", "localhost"}:

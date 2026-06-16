@@ -83,6 +83,42 @@ class AIClassificationResult(BaseModel):
             raise ValueError("close_fraction must be between 0 and 1")
         return value
 
+    @field_validator("entry_low", "entry_high", "stop_loss", mode="before")
+    @classmethod
+    def normalize_price_scalar(cls, value: Any) -> Any:
+        # Channels write prices with thousands separators ("61,000"), ranges
+        # ("58,500-59,000"), or stray currency/percent characters. Coerce the
+        # first numeric token so a real price is never dropped (which would
+        # crash schema validation and silently lose the signal).
+        if value is None or isinstance(value, (int, float, Decimal)):
+            return value
+        if isinstance(value, str):
+            cleaned = value.strip().replace(",", "")
+            if not cleaned:
+                return None
+            match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+            return match.group(0) if match else None
+        return value
+
+    @field_validator("leverage", mode="before")
+    @classmethod
+    def normalize_leverage_scalar(cls, value: Any) -> Any:
+        # Leverage may arrive as a range ("40-60"), with an "x" ("20x"), or with
+        # separators. Take the first integer; never reject the signal over it.
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, (float, Decimal)):
+            return int(value)
+        if isinstance(value, str):
+            cleaned = value.strip().replace(",", "")
+            if not cleaned:
+                return None
+            match = re.search(r"\d+", cleaned)
+            return int(match.group(0)) if match else None
+        return value
+
     @field_validator("entry_prices", "take_profits", mode="before")
     @classmethod
     def normalize_decimal_lists(cls, value: Any) -> list[Any]:

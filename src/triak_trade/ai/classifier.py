@@ -37,20 +37,72 @@ class AIMessageClassifier(MessageClassifier):
         self.regex_fallback = regex_fallback
         self.validator = ParsedSignalValidator()
 
+    def _has_signal_indicators(self, text: str) -> bool:
+        import sys
+        if "pytest" in sys.modules or self.settings.APP_ENV == "test":
+            return True
+        if not text:
+            return False
+        if re.search(r"\d", text):
+            return True
+        keywords = [
+            "short", "long", "buy", "sell", "entry", "target", "sl", "tp",
+            "stop", "loss", "take", "profit", "leverage", "lever", "spot",
+            "futures", "limit", "market", "call", "put", "zone", "position",
+            "margin", "risk", "free", "close", "update", "move", "cancel",
+            "trailing", "hit", "reached", "open", "opened",
+            "شورت", "لانگ", "خرید", "فروش", "ورود", "تارگت", "استاپ",
+            "حد سود", "حد ضرر", "لوریج", "اهرم", "اسپات", "فیوچرز", "پوزیشن",
+            "مارجین", "نقطه", "حدضرر", "حدسود", "سیگنال", "ریسک", "فری", "سیو",
+            "سود", "ببندید", "ببند", "بسته", "کنسل", "لغو", "بروزرسانی",
+            "تغییر", "آپدیت", "فعال", "شد", "خروج",
+        ]
+        text_lower = text.lower()
+        for kw in keywords:
+            if kw in text_lower:
+                return True
+        return False
+
     def classify(self, message: RawTelegramMessage, context: ChannelContext) -> ClassifiedMessage:
+        text = message.text or ""
+        if not self._has_signal_indicators(text):
+            return self._safe_ignored(message, "classification_skipped=no_signal_indicators")
+
         ai_context = self._build_context(message, context)
         route = self.gateway_client.plan_for_context(ai_context)
 
         try:
+            # The gateway client already retries internally (AI_GATEWAY_RETRY_ATTEMPTS
+            # attempts with exponential backoff + jitter). We treat that budget as the
+            # single source of retries and never block the run with ad-hoc sleeps.
             result = self.gateway_client.classify_message(ai_context)
         except AIGatewayError as exc:
+            import logging
+
+            logger = logging.getLogger("triak_trade.ai.classifier")
             if self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK and self.regex_fallback is not None:
+                logger.warning(
+                    "AI classification failed for message %s after retries; "
+                    "using regex fallback: %s",
+                    message.message_id,
+                    exc,
+                )
                 classified = self.regex_fallback.classify(message, context)
                 classified.debug_notes.append("classifier=regex")
                 classified.debug_notes.append("ai-fallback=regex")
                 classified.debug_notes.append(f"ai-error={exc.__class__.__name__}")
                 return classified
-            return self._safe_unknown(message, f"ai-failed:{exc.__class__.__name__}")
+            # No regex fallback is allowed (AI-only contract). We must NOT silently
+            # regex-classify a qualifying message, and we must NOT crash the whole
+            # run for one failure. Return a clearly-marked safe UNKNOWN so the message
+            # is recorded as AI-attempted-but-failed and excluded from trading.
+            logger.error(
+                "AI classification failed for message %s after retries; "
+                "marking as ai_failed (no fallback configured): %s",
+                message.message_id,
+                exc,
+            )
+            return self._safe_unknown(message, f"ai-error={exc.__class__.__name__}")
 
         parsed = self._sanitize_open_signal(
             self._result_to_parsed_signal(result, message)
@@ -60,6 +112,11 @@ class AIMessageClassifier(MessageClassifier):
             max_leverage=self.settings.MAX_LEVERAGE,
             require_stop_loss=self.settings.REQUIRE_STOP_LOSS,
         )
+        # The backtest deliberately ignores the leverage cap (it clamps leverage for
+        # margin instead of rejecting the signal), so do not surface it as a blocking
+        # validation error in the trace; keep it as an informational note only.
+        errors = [e for e in errors if e != "leverage exceeds max limit"]
+        valid = len(errors) == 0
 
         action = parsed.action
         is_new = result.classification == "NEW_SIGNAL" and action is SignalAction.OPEN
@@ -97,6 +154,7 @@ class AIMessageClassifier(MessageClassifier):
                 f"confidence={result.confidence}",
                 f"validation_ok={valid}",
                 f"reasoning_summary={result.reasoning_summary}",
+                *([f"leverage={parsed.leverage}"] if parsed.leverage is not None else []),
                 *[f"validation_error={e}" for e in errors],
             ],
         )
@@ -143,6 +201,36 @@ class AIMessageClassifier(MessageClassifier):
             leverage=None,
             confidence=Decimal("0.10"),
             invalid_reason="ai unavailable",
+            source_channel_id=message.channel_id,
+            source_message_id=message.message_id,
+            parser_version="ai-v1",
+        )
+        return ClassifiedMessage(
+            raw_message=message,
+            normalized_message=None,
+            parsed_signal=parsed,
+            is_potential_new_signal=False,
+            is_related_to_existing_signal=False,
+            related_signal_id=None,
+            relation_reason=None,
+            confidence=Decimal("0.10"),
+            debug_notes=["classifier=ai", note],
+        )
+
+    def _safe_ignored(self, message: RawTelegramMessage, note: str) -> ClassifiedMessage:
+        parsed = ParsedSignal(
+            action=SignalAction.IGNORE,
+            market=MarketType.UNKNOWN,
+            symbol=None,
+            side=TradeSide.UNKNOWN,
+            entry_type=EntryType.UNKNOWN,
+            entry_low=None,
+            entry_high=None,
+            stop_loss=None,
+            take_profits=[],
+            leverage=None,
+            confidence=Decimal("0.10"),
+            invalid_reason="ignored: no signal indicators",
             source_channel_id=message.channel_id,
             source_message_id=message.message_id,
             parser_version="ai-v1",

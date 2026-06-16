@@ -6,7 +6,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -140,14 +140,14 @@ class Settings(BaseSettings):
     AI_CLASSIFIER_VISION_MODEL: str = "gemini-3.1-flash-lite"
     AI_GATEWAY_ENABLED: bool = False
     AI_GATEWAY_BASE_URL: str = "http://127.0.0.1:8090"
-    AI_GATEWAY_TIMEOUT_SECONDS: int = 30
+    AI_GATEWAY_TIMEOUT_SECONDS: int = 60
     AI_GATEWAY_PROVIDER_PRIORITY: str = "gemini,groq"
     AI_GATEWAY_DEFAULT_MODEL: str = ""
     AI_GATEWAY_CLASSIFY_PATH: str = "/v1/chat/completions"
     AI_GATEWAY_AUTH_HEADER_NAME: str = "x-api-token"
     AI_GATEWAY_AUTH_TOKEN: SecretStr = Field(default=SecretStr(""))
     AI_GATEWAY_TRUST_ENV: bool = False
-    AI_GATEWAY_RETRY_ATTEMPTS: int = 3
+    AI_GATEWAY_RETRY_ATTEMPTS: int = 5
     AI_GATEWAY_RETRY_BACKOFF_SECONDS: float = 0.75
     AI_GATEWAY_RUNTIME_DIR: str = "runtime/ai_gateway"
     AI_GATEWAY_PID_FILE: str = "runtime/ai_gateway/ai_gateway.pid"
@@ -155,6 +155,37 @@ class Settings(BaseSettings):
     AI_GATEWAY_LOG_FILE: str = "runtime/ai_gateway/ai_gateway.log"
     AI_GATEWAY_APP_DIR: str = "external/Ajil_Unified_AI_Gateway"
     RUN_AI_GATEWAY_INTEGRATION_TESTS: int = 0
+
+    # Ajil Unified AI Gateway runtime passthrough
+    UAG_AUTH_TOKEN: SecretStr = Field(default=SecretStr(""))
+
+    @model_validator(mode="after")
+    def docker_url_overrides(self) -> Settings:
+        import os
+        # Check if running in Docker
+        if os.path.exists("/.dockerenv"):
+            # Simple override logic for common services
+            if "127.0.0.1" in self.AI_GATEWAY_BASE_URL or "localhost" in self.AI_GATEWAY_BASE_URL:
+                self.AI_GATEWAY_BASE_URL = "http://ai-gateway:8080"
+            if "localhost" in self.DATABASE_URL or "127.0.0.1" in self.DATABASE_URL:
+                self.DATABASE_URL = self.DATABASE_URL.replace(
+                    "localhost", "mysql"
+                ).replace("127.0.0.1", "mysql")
+            if "localhost" in self.REDIS_URL or "127.0.0.1" in self.REDIS_URL:
+                self.REDIS_URL = self.REDIS_URL.replace("localhost", "redis").replace(
+                    "127.0.0.1", "redis"
+                )
+        return self
+
+    @field_validator("AI_GATEWAY_AUTH_TOKEN", mode="after")
+    @classmethod
+    def fallback_ai_gateway_token(cls, value: SecretStr, info: ValidationInfo) -> SecretStr:
+        if value.get_secret_value():
+            return value
+        uag_token = info.data.get("UAG_AUTH_TOKEN")
+        if isinstance(uag_token, SecretStr) and uag_token.get_secret_value():
+            return uag_token
+        return value
     AI_CLASSIFIER_ENABLED: bool = False
     AI_CLASSIFIER_MIN_CONFIDENCE: Decimal = Decimal("0.70")
     AI_CLASSIFIER_USE_REGEX_FALLBACK: bool = False
@@ -187,6 +218,20 @@ class Settings(BaseSettings):
     REAL_BACKTEST_SEND_TO_ADMIN_BOT: bool = True
     REAL_BACKTEST_SEND_TO_LOG_CHANNEL: bool = True
     REAL_BACKTEST_LOG_PER_MESSAGE: bool = True
+    # When a clear follow-up directive (close / risk-free / SL-TP update) cannot
+    # be attached via AI id, reply, symbol, or single-active, fall back to the
+    # most-recently-updated open signal. The user requires that an explicit
+    # "سیو سود کنید" / "کلوز کنید" never be silently dropped, so this is on by
+    # default; every such attach is traced as related_resolution=most_recent_followup.
+    REAL_BACKTEST_FOLLOWUP_LAST_RESORT_ATTACH: bool = True
+    # Margin/notional risk cap only — clamps how much leverage the simulator will
+    # apply when sizing a position. It NEVER blocks a signal from opening; a signal
+    # whose leverage exceeds this is opened with leverage clamped to this ceiling.
+    BACKTEST_MAX_EFFECTIVE_LEVERAGE: int = 25
+    # When a backtest OPEN signal carries no stop_loss, the simulator synthesizes a
+    # stop this many percent away from entry (by side) so risk-per-trade sizing can
+    # still size the position. The signal opens and is tracked normally.
+    BACKTEST_DEFAULT_STOP_PCT: Decimal = Decimal("5")
     VERIFICATION_REPORT_DIR: str = "runtime/reports"
     VERIFICATION_WRITE_JSON: bool = True
     VERIFICATION_WRITE_MARKDOWN: bool = True

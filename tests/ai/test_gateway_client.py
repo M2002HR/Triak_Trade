@@ -320,6 +320,67 @@ def test_gateway_client_normalizes_textual_confidence_and_nullable_fields(
     assert str(result.confidence) == "0.85"
 
 
+def test_gateway_client_tolerates_string_provider_metadata(
+    context: AIMessageContext,
+) -> None:
+    # Regression: some providers return raw_provider_metadata as a string. The old
+    # code called dict("text") which raised ValueError and (with no regex fallback)
+    # aborted the whole backtest. The gateway must normalize it without raising.
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": """```json
+                    {
+                      "classification": "new signal",
+                      "reasoning_summary": "clear signal",
+                      "raw_provider_metadata": "gemini-3.1-flash-lite",
+                      "extracted_fields": {
+                        "symbol": "BTCUSDT",
+                        "direction": "LONG",
+                        "entry_price_min": 68000,
+                        "entry_price_max": 68200,
+                        "stop_loss": 67400,
+                        "take_profit": [69000, 70000]
+                      }
+                    }
+                    ```"""
+                }
+            }
+        ]
+    }
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+    result = client.classify_message(context)
+    assert result.classification == "NEW_SIGNAL"
+    assert result.symbol == "BTCUSDT"
+
+
+def test_gateway_client_coerces_thousands_separated_prices_and_leverage_range(
+    context: AIMessageContext,
+) -> None:
+    # Channels post prices with thousands separators and leverage as a range.
+    # These must coerce instead of failing schema validation (dropping the signal).
+    payload = _ok_payload()
+    payload["entry_low"] = "61,000"
+    payload["entry_high"] = "66,000"
+    payload["stop_loss"] = "58,500"
+    payload["leverage"] = "40-60"
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+    result = client.classify_message(context)
+    assert str(result.entry_low) == "61000"
+    assert str(result.entry_high) == "66000"
+    assert str(result.stop_loss) == "58500"
+    assert result.leverage == 40
+
+
 def test_gateway_client_splits_take_profit_string(context: AIMessageContext) -> None:
     payload = _ok_payload()
     payload["take_profits"] = "69000 / 70000 / 71500"
@@ -344,6 +405,7 @@ def test_optional_gateway_integration_guarded(context: AIMessageContext) -> None
     client = AjilGatewayClient(
         base_url=os.environ["AI_GATEWAY_BASE_URL"],
         timeout_seconds=10,
+        auth_token=os.getenv("AI_GATEWAY_AUTH_TOKEN", ""),
     )
     result = client.classify_message(context)
     assert result.confidence >= 0

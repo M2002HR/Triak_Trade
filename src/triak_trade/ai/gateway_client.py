@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -12,6 +14,8 @@ import httpx
 
 from triak_trade.ai.prompts import build_telegram_signal_prompt
 from triak_trade.ai.schemas import AIClassificationResult, AIMessageContext
+
+logger = logging.getLogger("triak_trade.ai.gateway_client")
 
 
 class AIGatewayError(Exception):
@@ -73,6 +77,7 @@ class AjilGatewayClient:
         last_error: Exception | None = None
         headers = self._build_headers()
         attempts = max(1, self.retry_attempts)
+        
         for attempt in range(1, attempts + 1):
             payload = self._build_payload(context, attempt=attempt)
             try:
@@ -85,12 +90,50 @@ class AjilGatewayClient:
                     response = client.post(self.classify_path, json=payload, headers=headers)
             except httpx.TimeoutException:
                 last_error = AIGatewayTimeoutError("AI gateway timeout")
-            except httpx.HTTPError:
-                last_error = AIGatewayHTTPError("AI gateway connection error")
+                logger.warning("AI Gateway timeout on attempt %s/%s", attempt, attempts)
+            except httpx.HTTPError as exc:
+                last_error = AIGatewayHTTPError(
+                    f"AI gateway connection error: {type(exc).__name__}"
+                )
+                logger.warning(
+                    "AI Gateway connection error on attempt %s/%s: %s", attempt, attempts, exc
+                )
             else:
-                if response.status_code >= 400:
+                if response.status_code == 429:
+                    last_error = AIGatewayHTTPError("AI gateway rate limited (429)")
+                    logger.warning("AI Gateway rate limited on attempt %s/%s", attempt, attempts)
+                    # Wait longer for rate limits
+                    time.sleep(min(30.0, (self.retry_backoff_seconds * 4) * (2 ** (attempt - 1))))
+                    continue
+                elif response.status_code >= 500:
+                    last_error = AIGatewayHTTPError(
+                        f"AI gateway server error ({response.status_code})"
+                    )
+                    logger.warning(
+                        "AI Gateway server error %s on attempt %s/%s",
+                        response.status_code,
+                        attempt,
+                        attempts,
+                    )
+                elif response.status_code >= 400:
                     last_error = AIGatewayHTTPError(
                         f"AI gateway HTTP status {response.status_code}"
+                    )
+                    # Don't retry 401/403/404 as they are likely permanent
+                    if response.status_code in {401, 403, 404}:
+                        logger.error(
+                            "AI Gateway permanent failure %s on attempt %s/%s: %s",
+                            response.status_code,
+                            attempt,
+                            attempts,
+                            response.text,
+                        )
+                        raise last_error
+                    logger.warning(
+                        "AI Gateway client error %s on attempt %s/%s",
+                        response.status_code,
+                        attempt,
+                        attempts,
                     )
                 else:
                     try:
@@ -99,17 +142,39 @@ class AjilGatewayClient:
                         last_error = AIGatewayResponseError(
                             "AI gateway returned malformed JSON"
                         )
+                        logger.warning(
+                            "AI Gateway returned malformed JSON on attempt %s/%s",
+                            attempt,
+                            attempts,
+                        )
                     else:
                         try:
-                            return self._parse_response_payload(data)
-                        except Exception:
+                            result = self._parse_response_payload(data)
+                            if attempt > 1:
+                                logger.info("AI Gateway succeeded on attempt %s", attempt)
+                            return result
+                        except Exception as exc:
                             last_error = AIGatewayResponseError(
-                                "AI gateway response schema validation failed"
+                                "AI gateway response schema validation failed: "
+                                f"{type(exc).__name__}"
                             )
+                            logger.warning(
+                                "AI Gateway schema validation failed on attempt %s/%s: %s",
+                                attempt,
+                                attempts,
+                                exc,
+                            )
+
             if attempt < attempts:
-                time.sleep(max(0.0, self.retry_backoff_seconds) * attempt)
+                # Exponential backoff with jitter
+                base_delay = max(0.1, self.retry_backoff_seconds)
+                delay = (base_delay * (2 ** (attempt - 1))) * (0.5 + random.random())
+                time.sleep(delay)
+        
         if last_error is None:
             raise AIGatewayResponseError("AI gateway classification failed without error detail")
+        
+        logger.error(f"AI Gateway exhausted all {attempts} attempts. Last error: {last_error}")
         raise last_error
 
     def _build_payload(self, context: AIMessageContext, *, attempt: int) -> dict[str, Any]:
@@ -402,8 +467,24 @@ class AjilGatewayClient:
             ),
             "risk_notes": self._normalize_string_list(payload.get("risk_notes")),
             "requires_admin_confirmation": requires_admin_confirmation,
-            "raw_provider_metadata": dict(payload.get("raw_provider_metadata") or {}),
+            "raw_provider_metadata": self._coerce_metadata(
+                payload.get("raw_provider_metadata")
+            ),
         }
+
+    @staticmethod
+    def _coerce_metadata(raw: Any) -> dict[str, Any]:
+        """Coerce provider metadata to a dict without ever raising.
+
+        Some providers return ``raw_provider_metadata`` as a string or list
+        instead of a mapping. ``dict("text")`` raises ``ValueError``; guarding
+        here keeps a single odd response from failing the whole classification.
+        """
+        if isinstance(raw, dict):
+            return dict(raw)
+        if raw is None:
+            return {}
+        return {"value": raw}
 
     @staticmethod
     def _normalize_classification(raw: Any) -> str:
