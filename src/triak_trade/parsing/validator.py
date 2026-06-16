@@ -37,12 +37,29 @@ class ParsedSignalValidator:
 
         return len(errors) == 0, errors
 
-    def validate_for_backtest(
+    def validate_for_backtest_open(
         self,
         signal: ParsedSignal,
         *,
         min_confidence: Decimal = Decimal("0.50"),
     ) -> tuple[bool, list[str]]:
+        """Permissive gate for the real backtest: open whatever the channel says.
+
+        The user requirement is that any message which says "open a signal" must
+        start being simulated. So we only reject signals that are structurally
+        *unusable* (cannot be sized or routed to market data):
+
+            - action must be OPEN
+            - symbol must be present
+            - side must be known (LONG/SHORT)
+            - entry must be resolvable (market, or a low/high bound)
+            - confidence must clear the floor
+
+        Missing take_profits, missing stop_loss, and leverage above any cap are
+        NOT rejections here — the simulator handles them (synthetic stop for
+        sizing, run-to-end for no TP, leverage clamped for margin). Directional
+        anomalies are returned as soft notes, not hard failures.
+        """
         if signal.action is SignalAction.IGNORE:
             return False, ["signal action is IGNORE"]
         if signal.action is SignalAction.UNKNOWN:
@@ -50,10 +67,17 @@ class ParsedSignalValidator:
         if signal.action is not SignalAction.OPEN:
             return False, [f"signal action is {signal.action.value}"]
 
-        errors = self._base_open_checks(signal, min_confidence=min_confidence)
-        if signal.stop_loss is None:
-            errors.append("missing stop_loss")
-        self._append_directional_checks(errors, signal)
+        errors: list[str] = []
+        if not signal.symbol:
+            errors.append("missing symbol")
+        if signal.side is TradeSide.UNKNOWN:
+            errors.append("missing side")
+        if signal.entry_type.value != "market" and not (signal.entry_low or signal.entry_high):
+            errors.append("missing entry")
+        if signal.confidence < min_confidence:
+            errors.append("confidence too low")
+        if signal.entry_low and signal.entry_high and signal.entry_low > signal.entry_high:
+            errors.append("invalid entry range")
         return len(errors) == 0, errors
 
     def _base_open_checks(

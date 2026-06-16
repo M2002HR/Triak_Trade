@@ -33,6 +33,7 @@ class _OpenPosition:
     notes: list[str]
     targets_hit: int
     manual_partial_exit: bool
+    effective_leverage: Decimal = Decimal("1")
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,8 @@ class SimulationSignalState:
     exit_price: Decimal | None
     targets_hit: int
     notes: list[str]
+    effective_leverage: Decimal = Decimal("1")
+    margin: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,8 @@ class BacktestSimulator:
         risk_per_trade_pct: Decimal,
         fill_policy: BacktestFillPolicy,
         active_signal_hours: int | None = None,
+        max_effective_leverage: Decimal | None = None,
+        default_stop_pct: Decimal = Decimal("5"),
     ) -> tuple[list[SimulatedTrade], Decimal]:
         trades, balance, _snapshots = self._simulate_internal(
             events=events,
@@ -94,6 +99,8 @@ class BacktestSimulator:
             fill_policy=fill_policy,
             active_signal_hours=active_signal_hours,
             capture_snapshots=False,
+            max_effective_leverage=max_effective_leverage,
+            default_stop_pct=default_stop_pct,
         )
         return trades, balance
 
@@ -106,6 +113,8 @@ class BacktestSimulator:
         risk_per_trade_pct: Decimal,
         fill_policy: BacktestFillPolicy,
         active_signal_hours: int | None = None,
+        max_effective_leverage: Decimal | None = None,
+        default_stop_pct: Decimal = Decimal("5"),
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         return self._simulate_internal(
             events=events,
@@ -115,6 +124,8 @@ class BacktestSimulator:
             fill_policy=fill_policy,
             active_signal_hours=active_signal_hours,
             capture_snapshots=True,
+            max_effective_leverage=max_effective_leverage,
+            default_stop_pct=default_stop_pct,
         )
 
     def _simulate_internal(
@@ -127,6 +138,8 @@ class BacktestSimulator:
         fill_policy: BacktestFillPolicy,
         active_signal_hours: int | None,
         capture_snapshots: bool,
+        max_effective_leverage: Decimal | None = None,
+        default_stop_pct: Decimal = Decimal("5"),
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         trades: list[SimulatedTrade] = []
         closed_trades_by_signal: dict[str, SimulatedTrade] = {}
@@ -151,11 +164,7 @@ class BacktestSimulator:
                 closed_trades_by_signal[trade.signal_id] = trade
                 balance += trade.pnl
             parsed = event.parsed_signal
-            if (
-                parsed.action is SignalAction.OPEN
-                and parsed.symbol
-                and parsed.stop_loss is not None
-            ):
+            if parsed.action is SignalAction.OPEN and parsed.symbol:
                 entry_price, entry_time = self._find_entry_execution(
                     parsed.entry_type,
                     parsed.entry_low,
@@ -198,11 +207,46 @@ class BacktestSimulator:
                         )
                     continue
 
+                notes: list[str] = []
+                # The channel may post a signal with no explicit stop_loss. We must
+                # still open and track it, so synthesize a stop a fixed percentage
+                # from entry (by side) purely for risk-per-trade sizing. A real
+                # stop_loss, when present, always takes precedence.
+                if parsed.stop_loss is not None:
+                    effective_stop = parsed.stop_loss
+                else:
+                    pct = max(default_stop_pct, Decimal("0")) / Decimal("100")
+                    if parsed.side is TradeSide.SHORT:
+                        effective_stop = entry_price * (Decimal("1") + pct)
+                    else:
+                        effective_stop = entry_price * (Decimal("1") - pct)
+                    notes.append(f"synthetic_stop_pct={default_stop_pct}")
                 risk_amount = (balance * risk_per_trade_pct) / Decimal("100")
-                stop_distance = abs(entry_price - parsed.stop_loss)
+                stop_distance = abs(entry_price - effective_stop)
                 if stop_distance <= Decimal("0"):
                     continue
                 qty = risk_amount / stop_distance
+                # Leverage caps how much notional the balance can support. Keep
+                # the risk-based quantity as primary sizing, but never let a
+                # position exceed balance * effective_leverage in notional.
+                signal_leverage = Decimal(event.leverage) if event.leverage else Decimal("1")
+                if max_effective_leverage is None:
+                    # Leverage modeling disabled: keep legacy risk-based sizing with
+                    # no margin cap, and report return-on-notional (leverage 1).
+                    effective_leverage = Decimal("1")
+                else:
+                    effective_leverage = min(
+                        max(signal_leverage, Decimal("1")),
+                        max(max_effective_leverage, Decimal("1")),
+                    )
+                    if entry_price > Decimal("0"):
+                        max_qty_by_margin = (balance * effective_leverage) / entry_price
+                        if qty > max_qty_by_margin:
+                            notes.append(
+                                f"quantity_capped_by_leverage; lev={effective_leverage}; "
+                                f"risk_qty={qty}; capped_qty={max_qty_by_margin}"
+                            )
+                            qty = max_qty_by_margin
                 open_positions[event.signal_id or f"sig_{len(open_positions)+1}"] = _OpenPosition(
                     trade_id=f"trade_{event.signal_id or len(open_positions)+1}",
                     signal_id=event.signal_id or "unknown",
@@ -210,7 +254,7 @@ class BacktestSimulator:
                     symbol=parsed.symbol,
                     side=parsed.side,
                     entry_price=entry_price,
-                    stop_loss=parsed.stop_loss,
+                    stop_loss=effective_stop,
                     take_profits=parsed.take_profits,
                     original_quantity=qty,
                     remaining_quantity=qty,
@@ -220,9 +264,10 @@ class BacktestSimulator:
                     exit_price=None,
                     exit_time=None,
                     status="open",
-                    notes=[],
+                    notes=notes,
                     targets_hit=0,
                     manual_partial_exit=False,
+                    effective_leverage=effective_leverage,
                 )
             elif event.related_signal_id in open_positions:
                 position = open_positions[event.related_signal_id]
@@ -391,17 +436,27 @@ class BacktestSimulator:
     ) -> tuple[int, list[SimulatedTrade]]:
         index = start_index
         resolved_trades: list[SimulatedTrade] = []
+
+        symbol_to_positions: dict[str, list[str]] = {}
+        for signal_id, pos in open_positions.items():
+            symbol_to_positions.setdefault(pos.symbol, []).append(signal_id)
+
         while index < len(candles):
             candle = candles[index]
             if stop_at is not None and candle.close_time > stop_at:
                 break
+            
+            relevant_signal_ids = symbol_to_positions.get(candle.symbol, [])
             closed_signal_ids: list[str] = []
-            for signal_id, position in list(open_positions.items()):
-                if (
-                    not same_market_symbol(position.symbol, candle.symbol)
-                    or candle.open_time < position.entry_time
-                ):
+            
+            for signal_id in relevant_signal_ids:
+                if signal_id not in open_positions:
                     continue
+                
+                position = open_positions[signal_id]
+                if candle.open_time < position.entry_time:
+                    continue
+
                 expiry_status = self._expire_position_if_needed(
                     position=position,
                     candle=candle,
@@ -411,13 +466,19 @@ class BacktestSimulator:
                     resolved_trades.append(self._finalize_position(position, status=expiry_status))
                     closed_signal_ids.append(signal_id)
                     continue
+                
                 status = self._apply_candle_to_position(position, candle, fill_policy)
                 if status is None:
                     continue
+                
                 resolved_trades.append(self._finalize_position(position, status=status))
                 closed_signal_ids.append(signal_id)
+
             for signal_id in closed_signal_ids:
                 del open_positions[signal_id]
+                if signal_id in relevant_signal_ids:
+                    relevant_signal_ids.remove(signal_id)
+            
             index += 1
         return index, resolved_trades
 
@@ -569,9 +630,14 @@ class BacktestSimulator:
     def _finalize_position(self, position: _OpenPosition, *, status: str) -> SimulatedTrade:
         position.status = status
         exposure = position.entry_price * position.original_quantity
+        # PnL percentage is return on committed margin (= notional / leverage),
+        # so a leveraged trade shows the amplified percentage return while the
+        # absolute dollar PnL is leverage-independent.
+        leverage = position.effective_leverage if position.effective_leverage > 0 else Decimal("1")
+        margin = exposure / leverage if exposure > Decimal("0") else Decimal("0")
         pnl_pct = (
-            (position.realized_pnl / exposure) * Decimal("100")
-            if exposure > Decimal("0")
+            (position.realized_pnl / margin) * Decimal("100")
+            if margin > Decimal("0")
             else Decimal("0")
         )
         return SimulatedTrade(
@@ -642,6 +708,12 @@ class BacktestSimulator:
             unrealized_pnl += unrealized
             notional_value = position.entry_price * position.original_quantity
             total_pnl = position.realized_pnl + unrealized
+            leverage = (
+                position.effective_leverage
+                if position.effective_leverage > 0
+                else Decimal("1")
+            )
+            margin = notional_value / leverage if notional_value > Decimal("0") else Decimal("0")
             signal_states[signal_id] = SimulationSignalState(
                 signal_id=signal_id,
                 symbol=position.symbol,
@@ -660,8 +732,8 @@ class BacktestSimulator:
                 realized_pnl=position.realized_pnl,
                 unrealized_pnl=unrealized,
                 total_pnl_pct=(
-                    (total_pnl / notional_value) * Decimal("100")
-                    if notional_value > Decimal("0")
+                    (total_pnl / margin) * Decimal("100")
+                    if margin > Decimal("0")
                     else Decimal("0")
                 ),
                 mark_price=mark_price,
@@ -670,6 +742,8 @@ class BacktestSimulator:
                 exit_price=position.exit_price,
                 targets_hit=position.targets_hit,
                 notes=list(position.notes),
+                effective_leverage=leverage,
+                margin=margin,
             )
 
         wins = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl > 0)

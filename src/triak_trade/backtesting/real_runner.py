@@ -23,9 +23,12 @@ from triak_trade.agents.classifier import (
 from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
+from triak_trade.backtesting.correlation import resolve_related_signal_id
 from triak_trade.backtesting.directives import (
+    apply_text_directive_action,
     build_ignored_signal,
     detect_move_stop_to_entry,
+    detect_tp_list_update,
     extract_close_fraction,
     normalize_related_signal_action,
 )
@@ -43,7 +46,7 @@ from triak_trade.config.settings import Settings
 from triak_trade.core.time import TEHRAN_TZ
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_signal_id
-from triak_trade.domain.models import RawTelegramMessage, SignalState
+from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
 from triak_trade.market_data.factory import build_backtest_market_data_provider
 from triak_trade.market_data.interfaces import MarketDataProvider
 from triak_trade.observability.events import build_message_link
@@ -200,6 +203,7 @@ class RealBacktestResult(BaseModel):
     invalid_signals: int
     ignored_messages: int
     ambiguous_messages: int
+    ai_failed_messages: int = 0
     symbols_found: list[str]
     candles_fetched: int
     trades_simulated: int
@@ -250,6 +254,7 @@ class RealBacktestRunner:
         self.validator = ParsedSignalValidator()
         self._log_lock = threading.Lock()
         self._last_log_send_failure_reason: str | None = None
+        self._log_sending_disabled_for_run = False
 
     def readiness(self) -> RealBacktestReadiness:
         issues: list[str] = []
@@ -307,6 +312,7 @@ class RealBacktestRunner:
         *,
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None = None,
     ) -> RealBacktestResult:
+        self._log_sending_disabled_for_run = False
         readiness = self.readiness()
         from_date, to_date = request.resolve_range()
         warnings: list[str] = []
@@ -410,6 +416,9 @@ class RealBacktestRunner:
             "invalid_signals": 0,
             "ignored_messages": 0,
             "ambiguous_messages": 0,
+            "ai_failed_messages": 0,
+            "trades_simulated": 0,
+            "trades_filled": 0,
         }
         self._emit_run_progress(
             progress_callback,
@@ -452,7 +461,7 @@ class RealBacktestRunner:
         valid_open_events = [
             event
             for event in open_events
-            if self.validator.validate_for_backtest(event.parsed_signal)[0]
+            if self.validator.validate_for_backtest_open(event.parsed_signal)[0]
         ]
         symbols = sorted({
             symbol
@@ -596,7 +605,9 @@ class RealBacktestRunner:
                 real_market_data_used = real_market_data_used or bool(prefetched)
                 candles.extend(prefetched)
                 for message_id in symbol_trace_map.get(symbol, []):
-                    message_trace = traces_by_message_id[message_id]
+                    message_trace = traces_by_message_id.get(message_id)
+                    if message_trace is None:
+                        continue
                     if message_trace.current_stage == "simulated":
                         self._set_trace_stage(
                             message_trace,
@@ -622,7 +633,9 @@ class RealBacktestRunner:
             last_error_type: str | None = None
             no_data_candidates: list[str] = []
             for message_id in symbol_trace_map.get(symbol, []):
-                message_trace = traces_by_message_id[message_id]
+                message_trace = traces_by_message_id.get(message_id)
+                if message_trace is None:
+                    continue
                 self._set_trace_stage(
                     message_trace,
                     "market_data",
@@ -655,7 +668,9 @@ class RealBacktestRunner:
             if last_error_type is not None and not fetched and not no_data_candidates:
                 skipped_reasons.append(f"{symbol}: candle fetch failed ({last_error_type})")
                 for message_id in symbol_trace_map.get(symbol, []):
-                    message_trace = traces_by_message_id[message_id]
+                    message_trace = traces_by_message_id.get(message_id)
+                    if message_trace is None:
+                        continue
                     message_trace.final_status = "market_data_unavailable"
                     message_trace.result_summary = (
                         f"Candle fetch failed for {symbol}: {last_error_type}"
@@ -692,7 +707,9 @@ class RealBacktestRunner:
                 real_market_data_used = True
                 candles.extend(fetched)
                 for message_id in symbol_trace_map.get(symbol, []):
-                    message_trace = traces_by_message_id[message_id]
+                    message_trace = traces_by_message_id.get(message_id)
+                    if message_trace is None:
+                        continue
                     if selected_symbol != symbol:
                         message_trace.debug_notes.append(
                             f"market_symbol_selected={selected_symbol}"
@@ -714,7 +731,9 @@ class RealBacktestRunner:
                 attempted = ", ".join(no_data_candidates or candidate_symbols)
                 skipped_reasons.append(f"{symbol}: no candle data returned (tried: {attempted})")
                 for message_id in symbol_trace_map.get(symbol, []):
-                    message_trace = traces_by_message_id[message_id]
+                    message_trace = traces_by_message_id.get(message_id)
+                    if message_trace is None:
+                        continue
                     message_trace.final_status = "market_data_unavailable"
                     message_trace.result_summary = (
                         f"No candle data returned for {symbol}. Tried: {attempted}"
@@ -839,8 +858,18 @@ class RealBacktestRunner:
             events=events,
             candles=candles,
             active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
+            max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
+            default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
         )
-        score = Decimal(report.warnings[0].split("=")[1]) if report.warnings else Decimal("0")
+        score = Decimal("0")
+        if report.warnings:
+            for warning in report.warnings:
+                if "channel_score=" in warning:
+                    try:
+                        score = Decimal(warning.split("=")[1])
+                        break
+                    except (IndexError, ValueError):
+                        continue
         trades_filled = sum(1 for trade in report.trades if trade.status != "not_filled")
         wins = sum(1 for trade in report.trades if trade.pnl > 0)
         losses = sum(1 for trade in report.trades if trade.pnl < 0)
@@ -901,6 +930,7 @@ class RealBacktestRunner:
             invalid_signals=invalid_signals,
             ignored_messages=ignored_messages,
             ambiguous_messages=ambiguous_messages,
+            ai_failed_messages=counts.get("ai_failed_messages", 0),
             symbols_found=symbols,
             candles_fetched=len(candles),
             trades_simulated=len(report.trades),
@@ -1087,6 +1117,8 @@ class RealBacktestRunner:
         warnings: list[str] | None,
         warning_message: str,
     ) -> bool:
+        if getattr(self, "_log_sending_disabled_for_run", False):
+            return False
         self._last_log_send_failure_reason = None
         attempts = max(1, self.settings.TELEGRAM_LOG_CHANNEL_SEND_RETRIES + 1)
         delay_seconds = max(0, self.settings.TELEGRAM_LOG_CHANNEL_RETRY_DELAY_SECONDS)
@@ -1105,6 +1137,8 @@ class RealBacktestRunner:
         reason = self._last_log_send_failure_reason or "unknown"
         if warnings is not None:
             self._append_warning(warnings, f"{warning_message} ({reason})")
+        # If any log send fails, disable later log sends for this run to avoid delays
+        self._log_sending_disabled_for_run = True
         return False
 
     @staticmethod
@@ -1268,6 +1302,11 @@ class RealBacktestRunner:
         signal_trace_map: dict[str, int] = {}
         event_index_by_signal_id: dict[str, int] = {}
         symbol_trace_map: dict[str, list[int]] = {}
+        # Cache each processed message's parsed signal + its raw message so a later
+        # follow-up that REPLIES to a parent which was not recognized as a signal can
+        # still promote that parent into a tracked signal (msg /6285 scenario).
+        parsed_by_message_id: dict[int, ParsedSignal] = {}
+        raw_by_message_id: dict[int, RawTelegramMessage] = {}
         sorted_messages = sorted(messages, key=lambda item: item.date)
         context.seed_message_catalog(sorted_messages)
 
@@ -1293,14 +1332,16 @@ class RealBacktestRunner:
                 counts=counts,
                 warnings=warnings,
             )
-            preprocess_stage = trace.stages[trace._stage_index["preprocess"]]
-            if preprocess_stage.status != "completed":
-                self._set_trace_stage(
-                    trace,
-                    "preprocess",
-                    status="completed",
-                    detail="Message payload prepared for classification.",
-                )
+            preprocess_index = trace._stage_index.get("preprocess")
+            if preprocess_index is not None:
+                preprocess_stage = trace.stages[preprocess_index]
+                if preprocess_stage.status != "completed":
+                    self._set_trace_stage(
+                        trace,
+                        "preprocess",
+                        status="completed",
+                        detail="Message payload prepared for classification.",
+                    )
             self._set_trace_stage(
                 trace,
                 "classified",
@@ -1381,9 +1422,73 @@ class RealBacktestRunner:
                 await self._maybe_send_message_log(request, trace, warnings)
                 continue
 
-            classified = classifier.classify(message, context)
+            try:
+                classified = classifier.classify(message, context)
+            except Exception as exc:
+                # Defense-in-depth: one bad
+                # message must never abort a multi-hundred-message backtest. The
+                # AI classifier is expected to return a safe UNKNOWN rather than
+                # raise, but we guard here too so any unexpected error is recorded
+                # against the message and the run continues.
+                counts["ai_failed_messages"] += 1
+                ai_failed_signal = build_ignored_signal(
+                    message,
+                    invalid_reason=f"ai_classification_error={type(exc).__name__}",
+                )
+                trace.classification = "ai_failed"
+                trace.parsed_action = ai_failed_signal.action.value
+                trace.confidence = "0"
+                trace.final_status = "ai_failed"
+                trace.result_summary = (
+                    f"AI classification failed ({type(exc).__name__}); "
+                    "message recorded as ai_failed and excluded from trading."
+                )
+                trace.debug_notes = ["classifier=ai", f"ai-error={type(exc).__name__}"]
+                self._set_trace_stage(
+                    trace,
+                    "classified",
+                    status="failed",
+                    detail=f"AI classification raised {type(exc).__name__}.",
+                )
+                self._mark_non_signal_trace(
+                    trace,
+                    "AI classification failed; message excluded from trading.",
+                )
+                self._append_warning(
+                    warnings,
+                    f"AI classification failed for message {message.message_id} "
+                    f"({type(exc).__name__}); recorded as ai_failed.",
+                )
+                events.append(
+                    BacktestEvent(
+                        timestamp=message.date,
+                        action=ai_failed_signal.action,
+                        signal_id=None,
+                        parsed_signal=ai_failed_signal,
+                        related_signal_id=None,
+                        debug_notes=list(trace.debug_notes),
+                        source_message_id=message.message_id,
+                        source_text=message.text,
+                        close_fraction=None,
+                        move_stop_to_entry=False,
+                    )
+                )
+                counts["classified_messages"] += 1
+                self._emit_message_progress(
+                    progress_callback,
+                    phase="classify_messages",
+                    summary=f"Message {message.message_id} AI classification failed.",
+                    counts=counts,
+                    trace=trace,
+                )
+                await self._maybe_send_message_log(request, trace, warnings)
+                continue
             parsed = classified.parsed_signal
+            parsed_by_message_id[message.message_id] = parsed
+            raw_by_message_id[message.message_id] = message
             signal_id: str | None = None
+            resolved_related_id: str | None = None
+            parsed_for_event = parsed
             if classified.is_potential_new_signal:
                 signal_id = make_signal_id(message.channel_id, message.message_id)
                 trace.signal_id = signal_id
@@ -1402,18 +1507,96 @@ class RealBacktestRunner:
                     ),
                     pending=True,
                 )
-            elif classified.related_signal_id is not None:
-                signal_id = classified.related_signal_id
-                trace.signal_id = signal_id
-                context.attach_message(signal_id, message)
-                context.merge_signal(signal_id, parsed, message.date)
-            parsed_for_event = parsed
-            if signal_id is not None and classified.related_signal_id is not None:
-                related_action = normalize_related_signal_action(parsed, is_related=True)
-                if related_action is not parsed.action:
-                    parsed_for_event = parsed.model_copy(update={"action": related_action})
+            else:
+                # Follow-up message. Decide the effective action FIRST (so a
+                # mislabeled risk-free / close still resolves), then correlate
+                # deterministically. The event must carry the RESOLVED signal id
+                # so it reaches the right open position in the simulator.
+                effective_action = normalize_related_signal_action(parsed, is_related=True)
+                effective_action = apply_text_directive_action(effective_action, message.text)
+                # A bare "Tp List" row of prices (often marked AMBIGUOUS by the AI)
+                # is a take-profit update for the active signal; recover it so the
+                # directive is applied instead of silently lost (msg /6285).
+                tp_list_values: list[Decimal] = []
+                if effective_action in {SignalAction.UNKNOWN, SignalAction.IGNORE}:
+                    tp_list_values = detect_tp_list_update(message.text)
+                    if tp_list_values:
+                        effective_action = SignalAction.UPDATE_TP
+                if effective_action is not parsed.action:
+                    update: dict[str, Any] = {"action": effective_action}
+                    if tp_list_values:
+                        update["take_profits"] = tp_list_values
+                    parsed_for_event = parsed.model_copy(update=update)
                     classified.debug_notes.append(
-                        f"normalized_follow_up_action={related_action.value}"
+                        f"normalized_follow_up_action={effective_action.value}"
+                    )
+                    if tp_list_values:
+                        classified.debug_notes.append(
+                            f"tp_list_directive={len(tp_list_values)}"
+                        )
+                # msg /6285: this is a reply to a message whose own signal was never
+                # tracked. If that parent parses as an openable signal, promote it now
+                # (register it + inject an OPEN event at the parent's timestamp) so the
+                # reply and any later updates correlate to a real, simulated position.
+                promoted_parent_id = await self._maybe_promote_reply_parent(
+                    message=message,
+                    context=context,
+                    parsed_by_message_id=parsed_by_message_id,
+                    raw_by_message_id=raw_by_message_id,
+                    events=events,
+                    event_index_by_signal_id=event_index_by_signal_id,
+                    signal_trace_map=signal_trace_map,
+                    traces_by_message_id=traces_by_message_id,
+                    symbol_trace_map=symbol_trace_map,
+                    counts=counts,
+                    request=request,
+                    prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                    progress_callback=progress_callback,
+                    warnings=warnings,
+                )
+                if promoted_parent_id is not None:
+                    classified.debug_notes.append(
+                        f"promoted_reply_parent={promoted_parent_id}"
+                    )
+                correlation = resolve_related_signal_id(
+                    context=context,
+                    parsed=parsed,
+                    raw_related_id=classified.related_signal_id,
+                    message=message,
+                    action=effective_action,
+                    allow_last_resort=(
+                        self.settings.REAL_BACKTEST_FOLLOWUP_LAST_RESORT_ATTACH
+                    ),
+                )
+                if correlation.note:
+                    classified.debug_notes.append(correlation.note)
+                if correlation.signal_id is not None:
+                    signal_id = correlation.signal_id
+                    resolved_related_id = correlation.signal_id
+                    trace.signal_id = signal_id
+                    context.attach_message(signal_id, message)
+                    context.merge_signal(signal_id, parsed, message.date)
+                    classified.debug_notes.append(
+                        f"related_resolution={correlation.method}"
+                    )
+                elif effective_action in {
+                    SignalAction.CLOSE,
+                    SignalAction.CANCEL,
+                    SignalAction.UPDATE_SL,
+                    SignalAction.UPDATE_TP,
+                    SignalAction.UPDATE_LEVERAGE,
+                    SignalAction.UPDATE_ENTRY,
+                }:
+                    # A clear follow-up directive that could not be attached to
+                    # any active signal must be surfaced, never silently lost.
+                    classified.debug_notes.append(
+                        f"followup_unattached={effective_action.value}"
+                    )
+                    self._append_warning(
+                        warnings,
+                        f"Follow-up directive '{effective_action.value}' in message "
+                        f"{message.message_id} could not be attached to any active "
+                        f"signal; it was not applied.",
                     )
             trace.classification = self._classify_label(classified)
             trace.parsed_action = parsed_for_event.action.value
@@ -1468,7 +1651,7 @@ class RealBacktestRunner:
                     detail="Checking whether the signal is structurally complete.",
                 )
                 counts["parsed_signals"] += 1
-                valid_for_backtest, errors = self.validator.validate_for_backtest(parsed)
+                valid_for_backtest, errors = self.validator.validate_for_backtest_open(parsed)
                 market_symbol = normalize_market_symbol(parsed.symbol) if parsed.symbol else None
                 if valid_for_backtest and market_symbol is not None:
                     counts["valid_signals"] += 1
@@ -1612,12 +1795,13 @@ class RealBacktestRunner:
                     action=parsed_for_event.action,
                     signal_id=signal_id if classified.is_potential_new_signal else None,
                     parsed_signal=parsed_for_event,
-                    related_signal_id=classified.related_signal_id,
+                    related_signal_id=resolved_related_id,
                     debug_notes=list(trace.debug_notes),
                     source_message_id=message.message_id,
                     source_text=message.text,
                     close_fraction=extract_close_fraction(message.text),
                     move_stop_to_entry=detect_move_stop_to_entry(message.text),
+                    leverage=parsed_for_event.leverage,
                 )
             )
             if signal_id is not None and classified.is_potential_new_signal:
@@ -1650,6 +1834,105 @@ class RealBacktestRunner:
             prefetched_candles_by_symbol,
         )
 
+    async def _maybe_promote_reply_parent(
+        self,
+        *,
+        message: RawTelegramMessage,
+        context: ChannelContext,
+        parsed_by_message_id: dict[int, ParsedSignal],
+        raw_by_message_id: dict[int, RawTelegramMessage],
+        events: list[BacktestEvent],
+        event_index_by_signal_id: dict[str, int],
+        signal_trace_map: dict[str, int],
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        symbol_trace_map: dict[str, list[int]],
+        counts: dict[str, int],
+        request: RealBacktestRunRequest,
+        prefetched_candles_by_symbol: dict[str, list[Any]],
+        progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
+        warnings: list[str],
+    ) -> str | None:
+        """Promote a reply parent that holds an openable signal but was never tracked.
+
+        When a follow-up replies to a message whose own OPEN signal was missed
+        (e.g. classified as ambiguous), register that parent as a real signal and
+        inject an OPEN event at the parent's timestamp. The simulator sorts events
+        by timestamp, so the late injection is replayed in the correct order, and
+        the current follow-up then correlates to a real, simulated position.
+        """
+        parent_id = message.reply_to_msg_id
+        if parent_id is None:
+            return None
+        parent_parsed = parsed_by_message_id.get(parent_id)
+        parent_raw = raw_by_message_id.get(parent_id)
+        if parent_parsed is None or parent_raw is None:
+            return None
+        if parent_parsed.action is not SignalAction.OPEN or not parent_parsed.symbol:
+            return None
+        # Already tracked (as its own signal or attached to one)? Nothing to do.
+        if parent_id in context.signal_by_message_id:
+            return None
+        signal_id = make_signal_id(parent_raw.channel_id, parent_id)
+        if context.get_signal(signal_id) is not None:
+            return None
+        valid_for_backtest, _errors = self.validator.validate_for_backtest_open(parent_parsed)
+        if not valid_for_backtest:
+            return None
+        base_trace = traces_by_message_id.get(parent_id)
+        if base_trace is None:
+            return None
+
+        context.add_signal(
+            SignalState(
+                signal_id=signal_id,
+                channel_id=parent_raw.channel_id,
+                status=SignalStatus.PENDING_CONSOLIDATION,
+                created_from_message_id=parent_id,
+                related_message_ids=[parent_id],
+                current_signal=parent_parsed,
+                version=1,
+                created_at=parent_raw.date,
+                updated_at=parent_raw.date,
+                expires_at=None,
+            ),
+            pending=True,
+        )
+        events.append(
+            BacktestEvent(
+                timestamp=parent_raw.date,
+                action=parent_parsed.action,
+                signal_id=signal_id,
+                parsed_signal=parent_parsed,
+                related_signal_id=None,
+                debug_notes=["promoted_from_reply"],
+                source_message_id=parent_id,
+                source_text=parent_raw.text,
+                close_fraction=extract_close_fraction(parent_raw.text),
+                move_stop_to_entry=detect_move_stop_to_entry(parent_raw.text),
+                leverage=parent_parsed.leverage,
+            )
+        )
+        event_index_by_signal_id[signal_id] = len(events) - 1
+        counts["parsed_signals"] += 1
+        await self._sync_signal_tracking(
+            request=request,
+            context=context,
+            signal_id=signal_id,
+            traces_by_message_id=traces_by_message_id,
+            signal_trace_map=signal_trace_map,
+            event_index_by_signal_id=event_index_by_signal_id,
+            symbol_trace_map=symbol_trace_map,
+            events=events,
+            prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+            progress_callback=progress_callback,
+            counts=counts,
+            warnings=warnings,
+        )
+        if signal_id in signal_trace_map:
+            counts["valid_signals"] += 1
+            return signal_id
+        return None
+
     @staticmethod
     def _message_has_processible_text(message: RawTelegramMessage) -> bool:
         return bool((message.text or "").strip())
@@ -1674,6 +1957,13 @@ class RealBacktestRunner:
         if signal_state is None or signal_state.current_signal is None:
             return
         merged_signal = signal_state.current_signal
+        # The base event for this signal IS the OPEN. context.merge_signal folds
+        # follow-up actions (update_sl / close / ...) into current_signal.action,
+        # which would otherwise overwrite the OPEN event's action when we write the
+        # enriched signal back below — making the simulator skip it ("no_trade").
+        # Keep the enriched entry/stop/tp/leverage but force the action to OPEN.
+        if merged_signal.action is not SignalAction.OPEN:
+            merged_signal = merged_signal.model_copy(update={"action": SignalAction.OPEN})
         base_message_id = signal_state.created_from_message_id
         base_trace = traces_by_message_id.get(base_message_id)
         if base_trace is None:
@@ -1692,7 +1982,7 @@ class RealBacktestRunner:
         if signal_id in signal_trace_map:
             return
 
-        valid_for_backtest, _errors = self.validator.validate_for_backtest(merged_signal)
+        valid_for_backtest, _errors = self.validator.validate_for_backtest_open(merged_signal)
         market_symbol = (
             normalize_market_symbol(merged_signal.symbol)
             if merged_signal.symbol is not None
@@ -1759,8 +2049,10 @@ class RealBacktestRunner:
             ),
         )
         symbol_trace_map.setdefault(selected_symbol, [])
-        if base_message_id not in symbol_trace_map[selected_symbol]:
-            symbol_trace_map[selected_symbol].append(base_message_id)
+        existing_ids = symbol_trace_map.get(selected_symbol, [])
+        if base_message_id not in existing_ids:
+            existing_ids.append(base_message_id)
+            symbol_trace_map[selected_symbol] = existing_ids
         signal_trace_map[signal_id] = base_message_id
         if base_index is not None and base_index < len(events):
             events[base_index] = events[base_index].model_copy(
@@ -1904,6 +2196,8 @@ class RealBacktestRunner:
             risk_per_trade_pct=request.risk_per_trade_pct,
             fill_policy=BacktestFillPolicy(self.settings.BACKTEST_DEFAULT_FILL_POLICY),
             active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
+            max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
+            default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
         )
         if not snapshots:
             return self._empty_live_metrics(), []
@@ -2053,13 +2347,18 @@ class RealBacktestRunner:
                     "unrealized_pnl": str(state.unrealized_pnl),
                     "total_pnl": str(state.realized_pnl + state.unrealized_pnl),
                     "total_pnl_pct": str(state.total_pnl_pct),
+                    "leverage": str(state.effective_leverage),
+                    "margin": str(state.margin),
                     "targets_hit": state.targets_hit,
                     "lifecycle": lifecycle,
                 }
             )
         return sorted(
             signals,
-            key=lambda item: (item["status_group"] != "active", str(item["entry_time"])),
+            key=lambda item: (
+                item.get("status_group") != "active",
+                str(item.get("entry_time") or ""),
+            ),
         )
 
     @staticmethod
@@ -2191,7 +2490,13 @@ class RealBacktestRunner:
         detail: str,
         advance_current: bool = True,
     ) -> None:
-        index = trace._stage_index[key]
+        if not trace._stage_index:
+            trace._stage_index = {s.key: i for i, s in enumerate(trace.stages)}
+
+        index = trace._stage_index.get(key)
+        if index is None:
+            return
+
         stage = trace.stages[index]
         now = datetime.now(timezone.utc)
         if status == "active" and stage.started_at is None:

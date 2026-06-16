@@ -22,6 +22,18 @@ _BREAKEVEN_MARKERS = (
     "ریسک فری",
     "سر به سر",
 )
+# Text that, on a follow-up message, unmistakably means "close / take profit
+# this position" even when the AI mislabels the action.
+_CLOSE_MARKERS = (
+    "سیو سود",
+    "سیوسود",
+    "ببندید",
+    "ببند",
+    "کلوز",
+    "close position",
+    "take profit now",
+    "تیک پروفیت",
+)
 
 
 def extract_close_fraction(text: str | None) -> Decimal | None:
@@ -43,6 +55,68 @@ def detect_move_stop_to_entry(text: str | None) -> bool:
         return False
     lowered = text.lower()
     return any(marker in lowered for marker in _BREAKEVEN_MARKERS)
+
+
+def detect_close_instruction(text: str | None) -> bool:
+    """True when a follow-up clearly instructs closing/taking profit."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _CLOSE_MARKERS)
+
+
+_TP_LIST_MARKERS = (
+    "tp list",
+    "tplist",
+    "tp:",
+    "take profit list",
+    "target list",
+    "targets",
+    "تارگت",
+    "اهداف",
+    "حد سود",
+)
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def detect_tp_list_update(text: str | None) -> list[Decimal]:
+    """Extract a take-profit ladder from a bare "Tp List" follow-up.
+
+    Channels often post just a row of prices with a "Tp List"/"تارگت" tag as an
+    update to an active signal. The AI frequently marks these AMBIGUOUS (unknown
+    action), which would drop the directive. When the text unmistakably carries a
+    target list with two or more prices, return them so the caller can apply an
+    UPDATE_TP instead of losing the message.
+    """
+    if not text:
+        return []
+    lowered = text.lower()
+    if not any(marker in lowered for marker in _TP_LIST_MARKERS):
+        return []
+    values = [Decimal(match) for match in _NUMBER_RE.findall(text.replace(",", ""))]
+    return values if len(values) >= 2 else []
+
+
+def apply_text_directive_action(action: SignalAction, text: str | None) -> SignalAction:
+    """Coerce a follow-up action from unmistakable text directives.
+
+    The AI sometimes returns ``UNKNOWN``/``IGNORE``/``OPEN`` for messages that
+    are plainly stop-to-entry or close instructions. When the action is not
+    already a more specific follow-up action, promote it from the text so the
+    directive reaches the simulator attached to the right signal.
+
+    Move-stop-to-entry takes precedence over close so a single "risk free, save
+    profit" message moves the stop rather than fully closing.
+    """
+    if action in {SignalAction.UPDATE_TP, SignalAction.UPDATE_LEVERAGE, SignalAction.CANCEL}:
+        return action
+    if detect_move_stop_to_entry(text):
+        return SignalAction.UPDATE_SL
+    if action is SignalAction.CLOSE:
+        return action
+    if detect_close_instruction(text):
+        return SignalAction.CLOSE
+    return action
 
 
 def build_ignored_signal(

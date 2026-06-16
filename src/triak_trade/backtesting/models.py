@@ -52,6 +52,16 @@ class BacktestEvent(BaseModel):
     source_text: str | None = None
     close_fraction: Decimal | None = None
     move_stop_to_entry: bool = False
+    leverage: int | None = None
+
+    @field_validator("leverage")
+    @classmethod
+    def validate_leverage(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("leverage must be positive")
+        return value
 
     @field_validator("close_fraction")
     @classmethod

@@ -136,14 +136,18 @@ class ChannelContext:
         ]
 
     def attach_message(self, signal_id: str, message: RawTelegramMessage) -> None:
-        signal = self.active_signals[signal_id]
+        signal = self.active_signals.get(signal_id)
+        if signal is None:
+            return
         if message.message_id not in signal.related_message_ids:
             signal.related_message_ids.append(message.message_id)
         signal.updated_at = message.date
         self.signal_by_message_id[message.message_id] = signal_id
 
     def merge_signal(self, signal_id: str, parsed: ParsedSignal, updated_at: datetime) -> None:
-        signal = self.active_signals[signal_id]
+        signal = self.active_signals.get(signal_id)
+        if signal is None:
+            return
         current = signal.current_signal
         if current is None:
             signal.current_signal = parsed

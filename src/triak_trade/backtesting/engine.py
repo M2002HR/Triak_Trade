@@ -54,6 +54,8 @@ class BacktestEngine:
         events: list[BacktestEvent],
         candles: list[Candle],
         active_signal_hours: int | None = None,
+        max_effective_leverage: Decimal | None = None,
+        default_stop_pct: Decimal = Decimal("5"),
     ) -> BacktestReport:
         conservative_trades, conservative_final = self.simulator.simulate(
             events=events,
@@ -62,6 +64,8 @@ class BacktestEngine:
             risk_per_trade_pct=request.risk_per_trade_pct,
             fill_policy=BacktestFillPolicy.CONSERVATIVE,
             active_signal_hours=active_signal_hours,
+            max_effective_leverage=max_effective_leverage,
+            default_stop_pct=default_stop_pct,
         )
         _optimistic_trades, optimistic_final = self.simulator.simulate(
             events=events,
@@ -70,6 +74,8 @@ class BacktestEngine:
             risk_per_trade_pct=request.risk_per_trade_pct,
             fill_policy=BacktestFillPolicy.OPTIMISTIC,
             active_signal_hours=active_signal_hours,
+            max_effective_leverage=max_effective_leverage,
+            default_stop_pct=default_stop_pct,
         )
         final_balance = (
             conservative_final

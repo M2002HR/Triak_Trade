@@ -705,6 +705,124 @@ def test_real_backtest_runner_activates_signal_after_follow_up_stop_loss(
     assert "signal_tracking_activated_from_follow_up" in originating.debug_notes
 
 
+def test_real_backtest_runner_close_without_reply_attaches_by_symbol(
+    tmp_path: Path,
+) -> None:
+    # A "close / save profit" follow-up with NO reply id must still attach to
+    # the only open signal for that symbol and close the position.
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=10,
+        text="HOMEUSDT LONG Entry: 1.00 - 1.10 SL: 0.95 TP: 1.20 / 1.30",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    close_msg = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=11,
+        text="سیو سود کنید",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, close_msg]}
+    )
+    provider = FakeMarketDataProvider(candles_by_symbol={"HOMEUSDT": _home_candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events: list[object] = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    # The close follow-up must have resolved to the HOME signal (by symbol),
+    # not been dropped, and must not leave an "unattached" warning. Progress
+    # events emit deep-copied trace snapshots, so take the LAST one for msg 11
+    # (after correlation has run), not the first (pre-resolution) snapshot.
+    close_traces = [
+        trace
+        for event in progress_events
+        if (trace := getattr(event, "trace", None)) is not None
+        and trace.message_id == 11
+    ]
+    assert close_traces
+    close_trace = close_traces[-1]
+    assert close_trace.signal_id is not None
+    assert any(
+        note.startswith("related_resolution=") for note in close_trace.debug_notes
+    )
+    assert not any("followup_unattached" in note for note in close_trace.debug_notes)
+
+
+def test_real_backtest_runner_exposes_leverage_in_live_signal(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=10,
+        text="HOMEUSDT LONG x10 Entry: 1.00 - 1.10 SL: 0.95 TP: 1.20 / 1.30",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first]}
+    )
+    provider = FakeMarketDataProvider(candles_by_symbol={"HOMEUSDT": _home_candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events: list[object] = []
+
+    runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    live_signal_events = [
+        event.live_signals for event in progress_events if getattr(event, "live_signals", None)
+    ]
+    assert live_signal_events
+    latest = live_signal_events[-1][0]
+    assert "leverage" in latest
+    assert "margin" in latest
+
+
 def test_real_backtest_runner_hydrates_caption_media_on_demand_only(tmp_path: Path) -> None:
     now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
     first = RawTelegramMessage(
@@ -984,6 +1102,330 @@ def test_real_backtest_runner_simulates_noisy_market_signal_immediately(tmp_path
         "open_until_end",
         "partial_tp_open_until_end",
     }
+
+
+class _PromotionClassifier:
+    """Classifies a reply parent as OPEN but NOT a new signal (msg 6285 case)."""
+
+    def classify(self, message, context):  # type: ignore[no-untyped-def]
+        from triak_trade.agents.classifier import ClassifiedMessage
+        from triak_trade.domain.enums import (
+            EntryType,
+            MarketType,
+            SignalAction,
+            TradeSide,
+        )
+        from triak_trade.domain.models import ParsedSignal
+
+        if message.message_id == 10:
+            parsed = ParsedSignal(
+                action=SignalAction.OPEN,
+                market=MarketType.FUTURES,
+                symbol="HOMEUSDT",
+                side=TradeSide.LONG,
+                entry_type=EntryType.LIMIT,
+                entry_low=Decimal("1.00"),
+                entry_high=Decimal("1.05"),
+                stop_loss=Decimal("0.95"),
+                take_profits=[Decimal("1.20")],
+                leverage=10,
+                confidence=Decimal("0.9"),
+                invalid_reason=None,
+                source_channel_id=message.channel_id,
+                source_message_id=message.message_id,
+                parser_version="ai-v1",
+            )
+            return ClassifiedMessage(
+                raw_message=message,
+                normalized_message=None,
+                parsed_signal=parsed,
+                is_potential_new_signal=False,
+                is_related_to_existing_signal=False,
+                related_signal_id=None,
+                relation_reason="ai-classified-not-new",
+                confidence=Decimal("0.9"),
+                debug_notes=["classifier=ai"],
+            )
+        parsed = ParsedSignal(
+            action=SignalAction.CLOSE,
+            market=MarketType.FUTURES,
+            symbol=None,
+            side=TradeSide.UNKNOWN,
+            entry_type=EntryType.UNKNOWN,
+            entry_low=None,
+            entry_high=None,
+            stop_loss=None,
+            take_profits=[],
+            leverage=None,
+            confidence=Decimal("0.8"),
+            invalid_reason=None,
+            source_channel_id=message.channel_id,
+            source_message_id=message.message_id,
+            parser_version="ai-v1",
+        )
+        return ClassifiedMessage(
+            raw_message=message,
+            normalized_message=None,
+            parsed_signal=parsed,
+            is_potential_new_signal=False,
+            is_related_to_existing_signal=True,
+            related_signal_id=None,
+            relation_reason="reply",
+            confidence=Decimal("0.8"),
+            debug_notes=["classifier=ai"],
+        )
+
+
+def test_real_backtest_runner_promotes_unrecognized_reply_parent(tmp_path: Path) -> None:
+    import asyncio
+
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    parent = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=10,
+        text="HOMEUSDT LONG signal",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    reply = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=11,
+        text="سیو سود کنید",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=10,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [parent, reply]}
+    )
+    provider = FakeMarketDataProvider(candles_by_symbol={"HOMEUSDT": _home_candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    request = RealBacktestRunRequest(
+        channel="https://t.me/Tofan_Trade",
+        from_date=now - timedelta(minutes=1),
+        to_date=now + timedelta(minutes=10),
+        interval="1m",
+        max_messages=100,
+        use_ai=True,
+        send_telegram_summary=False,
+        send_log_channel=False,
+        log_per_message=False,
+    )
+    counts = {
+        "total_messages": 2,
+        "caption_media_candidates": 0,
+        "classified_messages": 0,
+        "parsed_signals": 0,
+        "valid_signals": 0,
+        "invalid_signals": 0,
+        "ignored_messages": 0,
+        "ambiguous_messages": 0,
+        "ai_failed_messages": 0,
+        "trades_simulated": 0,
+        "trades_filled": 0,
+    }
+
+    (
+        events,
+        traces_by_message_id,
+        signal_trace_map,
+        _symbol_trace_map,
+        counts,
+        _prefetched,
+    ) = asyncio.run(
+        runner._build_events_with_traces(
+            request=request,
+            classifier=_PromotionClassifier(),
+            messages=[parent, reply],
+            progress_callback=None,
+            counts=counts,
+            warnings=[],
+            prefetched_candles_by_symbol={},
+        )
+    )
+
+    open_events = [
+        event
+        for event in events
+        if event.source_message_id == 10 and event.action.value == "open"
+    ]
+    assert open_events, "reply parent should have been promoted into an OPEN event"
+    promoted = open_events[0]
+    assert promoted.signal_id is not None
+    assert "promoted_from_reply" in promoted.debug_notes
+
+    reply_events = [event for event in events if event.source_message_id == 11]
+    assert reply_events
+    assert reply_events[-1].related_signal_id == promoted.signal_id
+
+    parent_trace = traces_by_message_id[10]
+    # The parent was promoted from "ambiguous/ignored" into a tracked, simulated
+    # signal (which the reply then closes), so it must no longer be ambiguous.
+    assert parent_trace.final_status not in {"ambiguous", "ignored", "queued"}
+    assert "signal_tracking_activated_from_follow_up" in parent_trace.debug_notes
+    assert promoted.signal_id in signal_trace_map
+
+
+class _OpenThenStopUpdateClassifier:
+    """OPEN signal followed by an update_sl follow-up (AI-style labelling)."""
+
+    def classify(self, message, context):  # type: ignore[no-untyped-def]
+        from triak_trade.agents.classifier import ClassifiedMessage
+        from triak_trade.domain.enums import (
+            EntryType,
+            MarketType,
+            SignalAction,
+            TradeSide,
+        )
+        from triak_trade.domain.models import ParsedSignal
+
+        if message.message_id == 20:
+            parsed = ParsedSignal(
+                action=SignalAction.OPEN,
+                market=MarketType.FUTURES,
+                symbol="HOMEUSDT",
+                side=TradeSide.LONG,
+                entry_type=EntryType.RANGE,
+                entry_low=Decimal("1.00"),
+                entry_high=Decimal("1.05"),
+                stop_loss=Decimal("0.95"),
+                take_profits=[Decimal("1.20")],
+                leverage=10,
+                confidence=Decimal("0.9"),
+                invalid_reason=None,
+                source_channel_id=message.channel_id,
+                source_message_id=message.message_id,
+                parser_version="ai-v1",
+            )
+            return ClassifiedMessage(
+                raw_message=message,
+                normalized_message=None,
+                parsed_signal=parsed,
+                is_potential_new_signal=True,
+                is_related_to_existing_signal=False,
+                related_signal_id=None,
+                relation_reason=None,
+                confidence=Decimal("0.9"),
+                debug_notes=["classifier=ai"],
+            )
+        parsed = ParsedSignal(
+            action=SignalAction.UPDATE_SL,
+            market=MarketType.FUTURES,
+            symbol="HOMEUSDT",
+            side=TradeSide.UNKNOWN,
+            entry_type=EntryType.UNKNOWN,
+            entry_low=None,
+            entry_high=None,
+            stop_loss=Decimal("0.97"),
+            take_profits=[],
+            leverage=None,
+            confidence=Decimal("0.85"),
+            invalid_reason=None,
+            source_channel_id=message.channel_id,
+            source_message_id=message.message_id,
+            parser_version="ai-v1",
+        )
+        return ClassifiedMessage(
+            raw_message=message,
+            normalized_message=None,
+            parsed_signal=parsed,
+            is_potential_new_signal=False,
+            is_related_to_existing_signal=True,
+            related_signal_id=None,
+            relation_reason="reply",
+            confidence=Decimal("0.85"),
+            debug_notes=["classifier=ai"],
+        )
+
+
+def test_followup_update_does_not_corrupt_base_open_event(tmp_path: Path) -> None:
+    # An update_sl follow-up must NOT overwrite the base OPEN event's action;
+    # otherwise the simulator skips it and the signal silently never trades.
+    import asyncio
+
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    open_msg = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=20,
+        text="HOMEUSDT LONG signal",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    sl_update = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=21,
+        text="استاپ 0.97",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=20,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [open_msg, sl_update]}
+    )
+    provider = FakeMarketDataProvider(candles_by_symbol={"HOMEUSDT": _home_candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    request = RealBacktestRunRequest(
+        channel="https://t.me/Tofan_Trade",
+        from_date=now - timedelta(minutes=1),
+        to_date=now + timedelta(minutes=10),
+        interval="1m",
+        max_messages=100,
+        use_ai=True,
+        send_telegram_summary=False,
+        send_log_channel=False,
+        log_per_message=False,
+    )
+    counts = {
+        "total_messages": 2,
+        "caption_media_candidates": 0,
+        "classified_messages": 0,
+        "parsed_signals": 0,
+        "valid_signals": 0,
+        "invalid_signals": 0,
+        "ignored_messages": 0,
+        "ambiguous_messages": 0,
+        "ai_failed_messages": 0,
+        "trades_simulated": 0,
+        "trades_filled": 0,
+    }
+
+    events, _traces, signal_trace_map, _sym, _counts, _pref = asyncio.run(
+        runner._build_events_with_traces(
+            request=request,
+            classifier=_OpenThenStopUpdateClassifier(),
+            messages=[open_msg, sl_update],
+            progress_callback=None,
+            counts=counts,
+            warnings=[],
+            prefetched_candles_by_symbol={},
+        )
+    )
+
+    open_events = [
+        event
+        for event in events
+        if event.source_message_id == 20 and event.signal_id is not None
+    ]
+    assert open_events
+    # Despite the update_sl follow-up merging into the signal, the base event
+    # must remain an OPEN so the simulator actually opens (and trades) it.
+    assert open_events[0].action.value == "open"
+    assert open_events[0].parsed_signal.action.value == "open"
+    assert open_events[0].signal_id in signal_trace_map
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:
