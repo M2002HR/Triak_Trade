@@ -41,15 +41,46 @@ def _load_and_apply_root_env() -> dict[str, str]:
     return root_env
 
 
-def _wait_for_tcp(host: str, port: int, *, timeout_seconds: int = 60) -> None:
+def _wait_for_tcp(host: str, port: int, *, timeout_seconds: int = 180) -> None:
     deadline = time.monotonic() + timeout_seconds
+    last_log = 0.0
     while time.monotonic() < deadline:
         try:
             with socket.create_connection((host, port), timeout=2):
                 return
         except OSError:
+            now = time.monotonic()
+            if now - last_log >= 15:
+                remaining = int(deadline - now)
+                print(f"waiting for tcp://{host}:{port} (~{remaining}s left)", flush=True)
+                last_log = now
             time.sleep(1)
     raise RuntimeError(f"timed out waiting for tcp://{host}:{port}")
+
+
+def _run_with_retries(
+    cmd: list[str],
+    *,
+    cwd: str,
+    attempts: int = 5,
+    delay_seconds: int = 5,
+) -> None:
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            subprocess.run(cmd, cwd=cwd, check=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            print(
+                "command failed "
+                f"(attempt {attempt}/{attempts}): {' '.join(cmd)}; "
+                f"retrying in {delay_seconds}s",
+                flush=True,
+            )
+            time.sleep(delay_seconds)
+    assert last_error is not None
+    raise last_error
 
 
 def _run_dashboard() -> int:
@@ -64,7 +95,7 @@ def _run_dashboard() -> int:
     gateway_host = gateway.hostname or "ai-gateway"
     gateway_port = gateway.port or 8080
     _wait_for_tcp(gateway_host, gateway_port)
-    subprocess.run(["alembic", "upgrade", "head"], cwd="/app", check=True)
+    _run_with_retries(["alembic", "upgrade", "head"], cwd="/app")
     cmd = [
         "triak-trade",
         "run-dashboard",

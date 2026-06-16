@@ -22,12 +22,12 @@ COPY scripts ./scripts
 RUN set -eux; \
     if [ -n "${PIP_INDEX_URL}" ]; then pip config set global.index-url "${PIP_INDEX_URL}"; fi; \
     if [ -n "${PIP_EXTRA_INDEX_URL}" ]; then pip config set global.extra-index-url "${PIP_EXTRA_INDEX_URL}"; fi; \
-    HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" ALL_PROXY="${ALL_PROXY}" NO_PROXY="${NO_PROXY}" \
+     \
     pip install --no-cache-dir --retries 20 \
         'setuptools>=69' \
         wheel \
         'httpx[socks]>=0.27.0'; \
-    HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" ALL_PROXY="${ALL_PROXY}" NO_PROXY="${NO_PROXY}" \
+     \
     pip install --no-cache-dir --retries 20 --no-build-isolation . \
     && python3 -c "import fastapi, httpx, redis, uvicorn; print('python_deps_ok')"
 

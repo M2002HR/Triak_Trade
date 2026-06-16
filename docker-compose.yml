@@ -59,11 +59,11 @@ services:
     ports:
       - "8090:8080"
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=8).read()"]
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 8
-      start_period: 20s
+      start_period: 30s
 
   dashboard:
     image: triak-trade:local
@@ -79,6 +79,8 @@ services:
         PIP_INDEX_URL: ${UAG_PIP_INDEX_URL:-}
         PIP_EXTRA_INDEX_URL: ${UAG_PIP_EXTRA_INDEX_URL:-}
     restart: unless-stopped
+    env_file:
+      - ./.env.local
     command: ["python3", "scripts/docker/run_service.py", "dashboard"]
     volumes:
       - ./.env.local:/app/.env.local:ro
