@@ -32,6 +32,11 @@ Or use the helper:
 ./scripts/stack_up.sh
 ```
 
+If Docker was interrupted previously and `docker compose up --build` reports a
+stale network/endpoint error such as `network ... does not exist`, prefer the
+helper above. It safely runs `docker compose down --remove-orphans` for this
+project before recreating the stack.
+
 This single command starts:
 - MySQL
 - Redis
