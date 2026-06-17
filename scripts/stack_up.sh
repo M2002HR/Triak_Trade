@@ -19,5 +19,5 @@ fi
 # Clean only this project's stopped resources before recreating the stack.
 docker compose down --remove-orphans || true
 
-docker compose up --build -d
+BUILDKIT_PROGRESS=plain docker compose up --build -d
 docker compose ps

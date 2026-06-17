@@ -35,7 +35,8 @@ Or use the helper:
 If Docker was interrupted previously and `docker compose up --build` reports a
 stale network/endpoint error such as `network ... does not exist`, prefer the
 helper above. It safely runs `docker compose down --remove-orphans` for this
-project before recreating the stack.
+project before recreating the stack, and forces plain BuildKit progress so the
+longer Python package install step does not look frozen.
 
 This single command starts:
 - MySQL
