@@ -9,6 +9,7 @@ document.documentElement.dataset.dashboardReady = "true";
   const bootstrap = JSON.parse(bootstrapNode.textContent || "{}");
   const state = {
     bootstrap,
+    savedChannels: Array.isArray(bootstrap.saved_channels) ? bootstrap.saved_channels : [],
     activeRunId: bootstrap.recent_runs?.[0]?.run_id || null,
     activeRun: bootstrap.recent_runs?.[0] || null,
     recentRuns: bootstrap.recent_runs || [],
@@ -27,6 +28,13 @@ document.documentElement.dataset.dashboardReady = "true";
   const nodes = {
     form: document.getElementById("backtest-live-form"),
     channel: document.getElementById("backtest-channel"),
+    savedChannelSelect: document.getElementById("backtest-saved-channel-select"),
+    saveChannelInput: document.getElementById("backtest-save-channel-input"),
+    saveChannelButton: document.getElementById("backtest-save-channel"),
+    applySavedChannelButton: document.getElementById("backtest-apply-saved-channel"),
+    removeChannelButton: document.getElementById("backtest-remove-channel"),
+    savedChannelList: document.getElementById("backtest-saved-channel-list"),
+    savedChannelStatus: document.getElementById("backtest-saved-channel-status"),
     fromDate: document.getElementById("backtest-from-date"),
     toDate: document.getElementById("backtest-to-date"),
     startMessageLink: document.getElementById("backtest-start-message-link"),
@@ -74,6 +82,7 @@ document.documentElement.dataset.dashboardReady = "true";
   seedDefaults();
   bindEvents();
   renderReadiness(bootstrap.readiness || {});
+  renderSavedChannels();
   renderRecentRuns(state.recentRuns);
   if (state.activeRun) {
     renderRun(state.activeRun);
@@ -94,8 +103,51 @@ document.documentElement.dataset.dashboardReady = "true";
     applyDateRange(bootstrap.default_from_date, bootstrap.default_to_date);
   }
 
+  function renderSavedChannels() {
+    if (nodes.savedChannelSelect) {
+      const currentValue = nodes.savedChannelSelect.value;
+      nodes.savedChannelSelect.innerHTML = '<option value="">Choose a saved channel to load...</option>';
+      state.savedChannels.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = item.channel_resolved;
+        option.textContent = `${item.label} · ${item.channel_resolved}`;
+        nodes.savedChannelSelect.appendChild(option);
+      });
+      if (state.savedChannels.some((item) => item.channel_resolved === currentValue)) {
+        nodes.savedChannelSelect.value = currentValue;
+      }
+    }
+    if (!nodes.savedChannelList) {
+      return;
+    }
+    if (!state.savedChannels.length) {
+      nodes.savedChannelList.innerHTML = '<p class="saved-channel-empty">No saved channels yet.</p>';
+      return;
+    }
+    nodes.savedChannelList.innerHTML = state.savedChannels
+      .map((item) => `
+        <div class="saved-channel-chip">
+          <strong>${escapeHtml(item.label || item.channel_resolved)}</strong>
+          <small>${escapeHtml(item.channel_resolved)}</small>
+        </div>
+      `)
+      .join("");
+  }
+
+  function setSavedChannelStatus(message, tone) {
+    if (!nodes.savedChannelStatus) {
+      return;
+    }
+    nodes.savedChannelStatus.textContent = message || "";
+    nodes.savedChannelStatus.className = tone ? `inline-status ${tone}` : "inline-status";
+  }
+
   function bindEvents() {
     nodes.form?.addEventListener("submit", handleSubmit);
+    nodes.saveChannelButton?.addEventListener("click", saveCurrentChannel);
+    nodes.applySavedChannelButton?.addEventListener("click", applySelectedSavedChannel);
+    nodes.removeChannelButton?.addEventListener("click", removeSelectedSavedChannel);
+    nodes.savedChannelSelect?.addEventListener("change", () => setSavedChannelStatus("", ""));
     document.querySelectorAll("[data-preset-hours]").forEach((button) => {
       button.addEventListener("click", () => {
         const hours = Number(button.getAttribute("data-preset-hours") || "24");
@@ -180,6 +232,98 @@ document.documentElement.dataset.dashboardReady = "true";
         closePanelModal();
       }
     });
+  }
+
+  async function saveCurrentChannel() {
+    const saveFieldChannel = nodes.saveChannelInput?.value.trim() || "";
+    const formChannel = nodes.channel?.value.trim() || "";
+    const channel = saveFieldChannel || formChannel;
+    if (!channel) {
+      setSavedChannelStatus("Enter a Telegram channel in the save field first.", "error");
+      return;
+    }
+    setSavedChannelStatus("Saving channel...", "working");
+    try {
+      const response = await fetch("/api/backtests/channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setSavedChannelStatus(data.detail || "Channel save failed.", "error");
+        return;
+      }
+      state.savedChannels = Array.isArray(data.channels) ? data.channels : [];
+      renderSavedChannels();
+      const savedChannel = state.savedChannels.find((item) => item.channel_input === channel)
+        || state.savedChannels.find((item) => item.channel_resolved === channel)
+        || state.savedChannels[0];
+      if (nodes.savedChannelSelect && savedChannel) {
+        nodes.savedChannelSelect.value = savedChannel.channel_resolved;
+      }
+      if (nodes.saveChannelInput && savedChannel) {
+        nodes.saveChannelInput.value = savedChannel.channel_resolved;
+      }
+      if (nodes.channel && savedChannel) {
+        nodes.channel.value = savedChannel.channel_resolved;
+      }
+      setSavedChannelStatus("Channel saved. You can now load it into the form anytime.", "success");
+    } catch (error) {
+      setSavedChannelStatus(
+        `Channel save failed: ${error instanceof Error ? error.message : "unknown error"}`,
+        "error",
+      );
+    }
+  }
+
+  function applySelectedSavedChannel() {
+    const selected = nodes.savedChannelSelect?.value;
+    if (!selected) {
+      setSavedChannelStatus("Choose a saved channel to load first.", "error");
+      return;
+    }
+    nodes.channel.value = selected;
+    if (nodes.saveChannelInput) {
+      nodes.saveChannelInput.value = selected;
+    }
+    nodes.channel.focus();
+    setSavedChannelStatus("Saved channel loaded into the backtest form.", "success");
+  }
+
+  async function removeSelectedSavedChannel() {
+    const selected = nodes.savedChannelSelect?.value;
+    if (!selected) {
+      setSavedChannelStatus("Choose a saved channel to remove first.", "error");
+      return;
+    }
+    setSavedChannelStatus("Removing channel...", "working");
+    try {
+      const response = await fetch("/api/backtests/channels", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel: selected }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setSavedChannelStatus(data.detail || "Channel removal failed.", "error");
+        return;
+      }
+      state.savedChannels = Array.isArray(data.channels) ? data.channels : [];
+      renderSavedChannels();
+      if (nodes.savedChannelSelect) {
+        nodes.savedChannelSelect.value = "";
+      }
+      if (nodes.saveChannelInput && nodes.saveChannelInput.value.trim() === selected) {
+        nodes.saveChannelInput.value = "";
+      }
+      setSavedChannelStatus("Saved channel removed.", "success");
+    } catch (error) {
+      setSavedChannelStatus(
+        `Channel removal failed: ${error instanceof Error ? error.message : "unknown error"}`,
+        "error",
+      );
+    }
   }
 
   function renderFilterBar() {

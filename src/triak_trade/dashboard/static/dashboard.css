@@ -252,6 +252,117 @@ pre {
   margin-bottom: 14px;
 }
 
+.subtle-panel {
+  background: rgba(247, 251, 249, 0.92);
+  border: 1px solid rgba(14, 124, 102, 0.12);
+}
+
+.saved-channel-panel {
+  padding: 18px;
+}
+
+.saved-channel-head h3 {
+  margin-bottom: 6px;
+}
+
+.saved-channel-guide {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0 16px;
+}
+
+.saved-channel-step,
+.saved-channel-entry {
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(14, 124, 102, 0.14);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.saved-channel-step strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.saved-channel-step span {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.saved-channel-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.secondary-save-button {
+  min-width: 150px;
+}
+
+.saved-channel-toolbar {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(260px, 1.5fr) minmax(220px, 1fr);
+  align-items: end;
+}
+
+.saved-channel-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.saved-channel-actions .ghost-button,
+.danger-outline {
+  min-width: 132px;
+}
+
+.danger-outline {
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--danger);
+  border: 1px solid rgba(180, 35, 24, 0.18);
+}
+
+.field-title {
+  display: block;
+  font-weight: 700;
+}
+
+.saved-channel-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.saved-channel-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(14, 124, 102, 0.14);
+  color: var(--ink);
+}
+
+.saved-channel-chip strong {
+  font-size: 0.94rem;
+}
+
+.saved-channel-chip small {
+  color: var(--muted);
+}
+
+.saved-channel-empty {
+  margin-top: 14px;
+  color: var(--muted);
+}
+
 .preset-cluster,
 .badge-row,
 .modal-meta {
@@ -942,6 +1053,27 @@ pre {
   .modal-grid,
   .stage-graph {
     grid-template-columns: 1fr;
+  }
+
+  .saved-channel-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .saved-channel-entry {
+    grid-template-columns: 1fr;
+  }
+
+  .saved-channel-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .saved-channel-actions {
+    justify-content: stretch;
+  }
+
+  .saved-channel-actions .ghost-button,
+  .danger-outline {
+    width: 100%;
   }
 
   .span-2 {

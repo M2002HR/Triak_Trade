@@ -16,6 +16,60 @@
   </div>
 
   <form id="backtest-live-form" class="backtest-form-grid">
+    <section class="panel subtle-panel span-2 saved-channel-panel">
+      <div class="section-head compact saved-channel-head">
+        <div>
+          <p class="eyebrow">Saved Channels</p>
+          <h3>Save Once, Reuse Anytime</h3>
+          <p class="subtle">Add a channel to your saved list once, then load it into the backtest form whenever you need it.</p>
+        </div>
+      </div>
+      <div class="saved-channel-guide" aria-label="Saved channel workflow">
+        <div class="saved-channel-step">
+          <strong>1. Add a channel</strong>
+          <span>Paste a Telegram username or full link in the save field.</span>
+        </div>
+        <div class="saved-channel-step">
+          <strong>2. Save it</strong>
+          <span>Use Save Channel to store it in your reusable channel list.</span>
+        </div>
+        <div class="saved-channel-step">
+          <strong>3. Load it later</strong>
+          <span>Select it from the library and load it into the backtest form.</span>
+        </div>
+      </div>
+      <div class="saved-channel-entry">
+        <label class="field">
+          <span class="field-title">Add Channel To Saved List</span>
+          <input
+            id="backtest-save-channel-input"
+            placeholder="@Crypto_Etehad or https://t.me/Crypto_Etehad"
+            autocomplete="off"
+          >
+          <span class="help-text">This field is only for saving channels. Starting a backtest still uses the main Telegram Channel field below.</span>
+        </label>
+        <button id="backtest-save-channel" type="button" class="button secondary-save-button">Save Channel</button>
+      </div>
+      <div class="saved-channel-toolbar">
+        <label class="field">
+          <span class="field-title">Saved Channel Library</span>
+          <select id="backtest-saved-channel-select" aria-label="Saved channel list">
+            <option value="">Choose a saved channel to load...</option>
+            {% for item in bootstrap.saved_channels %}
+            <option value="{{ item.channel_resolved }}">{{ item.label }} · {{ item.channel_resolved }}</option>
+            {% endfor %}
+          </select>
+          <span class="help-text">Choose a saved channel here, then load it into the form or remove it from the library.</span>
+        </label>
+        <div class="saved-channel-actions">
+          <button id="backtest-apply-saved-channel" type="button" class="ghost-button">Load Into Form</button>
+          <button id="backtest-remove-channel" type="button" class="ghost-button danger-outline">Remove From Saved</button>
+        </div>
+      </div>
+      <div id="backtest-saved-channel-list" class="saved-channel-list" aria-live="polite"></div>
+      <div id="backtest-saved-channel-status" class="inline-status" aria-live="polite"></div>
+    </section>
+
     <label class="field span-2">Telegram Channel
       <input
         id="backtest-channel"
