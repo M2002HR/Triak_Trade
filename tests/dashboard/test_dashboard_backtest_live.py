@@ -368,6 +368,54 @@ def test_backtest_start_api_rejects_missing_dates(tmp_path: Path, monkeypatch) -
     assert response.json()["detail"] == "from_date and to_date are required"
 
 
+def test_backtest_channel_api_saves_and_lists_channels(tmp_path: Path, monkeypatch) -> None:
+    client = build_client(tmp_path, monkeypatch)
+
+    saved = client.post(
+        "/api/backtests/channels",
+        headers=_headers(),
+        json={"channel": "@Crypto_Etehad"},
+    )
+    assert saved.status_code == 201
+    body = saved.json()
+    assert body["saved"] is True
+    assert any(
+        item["channel_resolved"] == "https://t.me/Crypto_Etehad"
+        for item in body["channels"]
+    )
+
+    listed = client.get("/api/backtests/channels", headers=_headers())
+    assert listed.status_code == 200
+    listed_body = listed.json()
+    assert any(
+        item["channel_resolved"] == "https://t.me/Crypto_Etehad"
+        for item in listed_body["channels"]
+    )
+
+
+def test_backtest_channel_api_removes_channels(tmp_path: Path, monkeypatch) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    client.post(
+        "/api/backtests/channels",
+        headers=_headers(),
+        json={"channel": "@Crypto_Etehad"},
+    )
+
+    removed = client.request(
+        "DELETE",
+        "/api/backtests/channels",
+        headers=_headers(),
+        json={"channel": "https://t.me/Crypto_Etehad"},
+    )
+    assert removed.status_code == 200
+    body = removed.json()
+    assert body["deleted"] is True
+    assert not any(
+        item["channel_resolved"] == "https://t.me/Crypto_Etehad"
+        for item in body["channels"]
+    )
+
+
 def test_backtest_rerun_api_starts_new_run_from_history(
     tmp_path: Path,
     monkeypatch,

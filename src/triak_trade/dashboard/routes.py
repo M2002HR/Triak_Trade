@@ -127,6 +127,35 @@ def build_router(
         auth.require_api(request)
         return JSONResponse(service.real_backtest_readiness())
 
+    @router.get("/api/backtests/channels")
+    async def list_backtest_channels(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        return JSONResponse({"channels": service.list_saved_channels()})
+
+    @router.post("/api/backtests/channels")
+    async def save_backtest_channel(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "invalid_payload"}, status_code=400)
+        try:
+            channels = service.save_backtest_channel(str(payload.get("channel") or ""))
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"saved": True, "channels": channels}, status_code=201)
+
+    @router.delete("/api/backtests/channels")
+    async def delete_backtest_channel(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "invalid_payload"}, status_code=400)
+        try:
+            channels = service.remove_backtest_channel(str(payload.get("channel") or ""))
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"deleted": True, "channels": channels})
+
     @router.get("/api/backtests/runs")
     async def list_backtest_runs(request: Request, limit: int = 20) -> JSONResponse:
         auth.require_api(request)

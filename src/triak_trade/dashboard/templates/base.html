@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }}</title>
     <link rel="stylesheet" href="/static/dashboard.css">
+    {% block extra_head %}{% endblock %}
   </head>
   <body>
     <div class="shell">
@@ -14,5 +15,6 @@
       </main>
     </div>
     <script src="/static/dashboard.js"></script>
+    {% block page_scripts %}{% endblock %}
   </body>
 </html>

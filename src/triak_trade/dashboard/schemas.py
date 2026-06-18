@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 def utc_now() -> datetime:
@@ -37,3 +37,14 @@ class DashboardRuntimeStatus(BaseModel):
     log_file: str | None = None
     last_error_type: str | None = None
     last_error_message_redacted: str | None = None
+
+
+class SavedChannelEntry(BaseModel):
+    channel_input: str
+    channel_resolved: str
+    label: str
+    created_at: datetime
+
+
+class SavedChannelsState(BaseModel):
+    channels: list[SavedChannelEntry] = Field(default_factory=list)

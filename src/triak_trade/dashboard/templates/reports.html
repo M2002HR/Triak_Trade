@@ -1,12 +1,109 @@
 {% extends "base.html" %}
+{% block extra_head %}
+<link rel="stylesheet" href="/static/reports.css">
+{% endblock %}
 {% block content %}
-<h1>Reports</h1>
-<section class="panel">
-  {% if latest %}
-    <h2>Latest Real Backtest Report</h2><p>{{ latest }}</p><pre>{{ preview }}</pre>
-  {% else %}
-    <p class="empty">No real backtest reports found.</p>
-  {% endif %}
+<section class="hero reports-hero">
+  <div>
+    <p class="eyebrow">Backtest Reports</p>
+    <h1>Rank, Compare, And Inspect Every Run</h1>
+    <p class="subtle hero-copy">
+      Explore historical backtests with sortable rankings, score breakdowns, equity curves,
+      symbol-level summaries, and full trade tables. This view is designed for channel evaluation,
+      regression hunting, and future ranking workflows.
+    </p>
+  </div>
 </section>
-<section class="panel"><h2>Files</h2>{% for file in files %}<p>{{ file }}</p>{% endfor %}</section>
+
+<script id="reports-bootstrap" type="application/json">{{ reports_bootstrap | tojson }}</script>
+
+{% if has_reports %}
+<section class="reports-shell" data-reports-explorer="true">
+  <div class="reports-main-column">
+    <section class="panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Library</p>
+          <h2>Report Overview</h2>
+        </div>
+      </div>
+      <div id="reports-summary-grid" class="reports-summary-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Controls</p>
+          <h2>Filter & Sort</h2>
+        </div>
+      </div>
+      <div class="reports-control-grid">
+        <label class="field">
+          Search Channel
+          <input id="reports-search" type="search" placeholder="Crypto_Etehad, Tofan_Trade, ..." />
+        </label>
+        <label class="field">
+          Sort By
+          <select id="reports-sort"></select>
+        </label>
+        <label class="field">
+          Direction
+          <select id="reports-order">
+            <option value="desc">Descending</option>
+            <option value="asc">Ascending</option>
+          </select>
+        </label>
+        <label class="field">
+          Status
+          <select id="reports-success-filter">
+            <option value="all">All Reports</option>
+            <option value="successful">Successful Only</option>
+            <option value="failed">Failed Only</option>
+          </select>
+        </label>
+      </div>
+      <div class="reports-filter-row">
+        <label class="reports-toggle">
+          <input id="reports-positive-only" type="checkbox" />
+          <span>Positive PnL only</span>
+        </label>
+        <label class="reports-toggle">
+          <input id="reports-ai-only" type="checkbox" />
+          <span>AI runs only</span>
+        </label>
+        <label class="reports-toggle">
+          <input id="reports-real-only" type="checkbox" />
+          <span>Real Telegram only</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Leaderboard</p>
+          <h2>Backtest Report Cards</h2>
+          <p id="reports-results-count" class="subtle">0 reports</p>
+        </div>
+      </div>
+      <div id="reports-list" class="reports-list"></div>
+    </section>
+  </div>
+
+  <div class="reports-side-column">
+    <section class="panel report-detail-panel">
+      <div id="report-detail" class="report-detail-empty">
+        Select a report to inspect score, metrics, charts, and every trade.
+      </div>
+    </section>
+  </div>
+</section>
+{% else %}
+<section class="panel">
+  <p class="empty">No real backtest reports found.</p>
+</section>
+{% endif %}
+{% endblock %}
+{% block page_scripts %}
+<script src="/static/reports.js"></script>
 {% endblock %}
