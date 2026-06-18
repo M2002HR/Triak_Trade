@@ -37,6 +37,8 @@ from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
 from triak_trade.backtesting.report import report_to_json, report_to_markdown_summary
 from triak_trade.backtesting.report_store import BacktestReportStore
 from triak_trade.backtesting.simulator import SimulationSnapshot
+from triak_trade.backtesting.strategies.base import TradeStrategy
+from triak_trade.backtesting.strategies.registry import load_strategy
 from triak_trade.backtesting.symbol_mapper import (
     market_symbol_candidates,
     normalize_market_symbol,
@@ -242,6 +244,7 @@ class RealBacktestRunner:
         market_data_provider: MarketDataProvider | None = None,
         report_store: BacktestReportStore | None = None,
         log_client: TelegramLogChannelClient | None = None,
+        strategy: TradeStrategy | None = None,
     ) -> None:
         self.settings = settings
         self.telegram_client = telegram_client or TelethonTelegramClient(settings)
@@ -255,6 +258,8 @@ class RealBacktestRunner:
         self._log_lock = threading.Lock()
         self._last_log_send_failure_reason: str | None = None
         self._log_sending_disabled_for_run = False
+        # Load strategy from config file; caller may also inject one directly.
+        self.strategy: TradeStrategy = strategy or load_strategy()
 
     def readiness(self) -> RealBacktestReadiness:
         issues: list[str] = []
@@ -432,7 +437,7 @@ class RealBacktestRunner:
             counts=counts,
         )
 
-        engine = BacktestEngine(classifier=selection.classifier)
+        engine = BacktestEngine(classifier=selection.classifier, strategy=self.strategy)
         self._emit_run_progress(
             progress_callback,
             phase="classify_messages",
@@ -1489,6 +1494,21 @@ class RealBacktestRunner:
             signal_id: str | None = None
             resolved_related_id: str | None = None
             parsed_for_event = parsed
+            # Guard: the AI sometimes classifies a reply/follow-up message as a
+            # new OPEN signal (e.g. when the update contains entry/SL/TP numbers).
+            # If this message is a Telegram reply to a message that already owns
+            # a live signal, reroute it as a follow-up regardless of what the AI
+            # returned.  This prevents orphan "new signal" entries that never open
+            # a position while the real instruction (move SL, close, etc.) is lost.
+            reply_owner = context.find_signal_by_message_reply(message.reply_to_msg_id)
+            if classified.is_potential_new_signal and reply_owner is not None:
+                classified.is_potential_new_signal = False
+                classified.is_related_to_existing_signal = True
+                if not classified.related_signal_id:
+                    classified.related_signal_id = reply_owner.signal_id
+                classified.debug_notes.append(
+                    f"rerouted_open_to_followup; reply_owner={reply_owner.signal_id}"
+                )
             if classified.is_potential_new_signal:
                 signal_id = make_signal_id(message.channel_id, message.message_id)
                 trace.signal_id = signal_id
@@ -2198,6 +2218,7 @@ class RealBacktestRunner:
             active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
             max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
             default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
+            strategy=self.strategy,
         )
         if not snapshots:
             return self._empty_live_metrics(), []

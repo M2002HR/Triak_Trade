@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timedelta
 
+from triak_trade.core.symbols import same_market_symbol
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
 
 
@@ -69,7 +70,8 @@ class ChannelContext:
         return [
             signal
             for signal in self.active_signals.values()
-            if signal.current_signal is not None and signal.current_signal.symbol == symbol
+            if signal.current_signal is not None
+            and same_market_symbol(signal.current_signal.symbol, symbol)
         ]
 
     def get_message(self, message_id: int | None) -> RawTelegramMessage | None:

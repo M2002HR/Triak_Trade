@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from triak_trade.backtesting.models import BacktestEvent
-from triak_trade.core.symbols import same_market_symbol
+from triak_trade.backtesting.strategies.base import TradeStrategy
+from triak_trade.core.symbols import canonical_market_symbol, same_market_symbol
 from triak_trade.domain.enums import BacktestFillPolicy, EntryType, SignalAction, TradeSide
 from triak_trade.domain.models import Candle, SimulatedTrade
 
@@ -90,6 +91,7 @@ class BacktestSimulator:
         active_signal_hours: int | None = None,
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
+        strategy: TradeStrategy | None = None,
     ) -> tuple[list[SimulatedTrade], Decimal]:
         trades, balance, _snapshots = self._simulate_internal(
             events=events,
@@ -101,6 +103,7 @@ class BacktestSimulator:
             capture_snapshots=False,
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
+            strategy=strategy,
         )
         return trades, balance
 
@@ -115,6 +118,7 @@ class BacktestSimulator:
         active_signal_hours: int | None = None,
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
+        strategy: TradeStrategy | None = None,
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         return self._simulate_internal(
             events=events,
@@ -126,6 +130,7 @@ class BacktestSimulator:
             capture_snapshots=True,
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
+            strategy=strategy,
         )
 
     def _simulate_internal(
@@ -140,6 +145,7 @@ class BacktestSimulator:
         capture_snapshots: bool,
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
+        strategy: TradeStrategy | None = None,
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         trades: list[SimulatedTrade] = []
         closed_trades_by_signal: dict[str, SimulatedTrade] = {}
@@ -158,6 +164,7 @@ class BacktestSimulator:
                 stop_at=event.timestamp,
                 fill_policy=fill_policy,
                 active_signal_hours=active_signal_hours,
+                strategy=strategy,
             )
             for trade in resolved_trades:
                 trades.append(trade)
@@ -209,11 +216,17 @@ class BacktestSimulator:
 
                 notes: list[str] = []
                 # The channel may post a signal with no explicit stop_loss. We must
-                # still open and track it, so synthesize a stop a fixed percentage
-                # from entry (by side) purely for risk-per-trade sizing. A real
-                # stop_loss, when present, always takes precedence.
+                # still open and track it, so synthesize a stop from the active
+                # strategy (if any) or a fixed percentage from entry for sizing.
+                # A real stop_loss, when present, always takes precedence.
                 if parsed.stop_loss is not None:
                     effective_stop = parsed.stop_loss
+                elif strategy is not None:
+                    effective_stop = strategy.get_synthetic_stop(
+                        side=parsed.side,
+                        entry_price=entry_price,
+                    )
+                    notes.append(f"synthetic_stop_strategy={strategy.name}")
                 else:
                     pct = max(default_stop_pct, Decimal("0")) / Decimal("100")
                     if parsed.side is TradeSide.SHORT:
@@ -221,6 +234,9 @@ class BacktestSimulator:
                     else:
                         effective_stop = entry_price * (Decimal("1") - pct)
                     notes.append(f"synthetic_stop_pct={default_stop_pct}")
+                # If balance is zero or negative, we can't size a new position.
+                if balance <= Decimal("0"):
+                    continue
                 risk_amount = (balance * risk_per_trade_pct) / Decimal("100")
                 stop_distance = abs(entry_price - effective_stop)
                 if stop_distance <= Decimal("0"):
@@ -247,6 +263,21 @@ class BacktestSimulator:
                                 f"risk_qty={qty}; capped_qty={max_qty_by_margin}"
                             )
                             qty = max_qty_by_margin
+                # Filter take-profits to only those on the correct side of
+                # entry.  A TP above entry for a SHORT (or below for a LONG)
+                # is a parser artefact; including it would trigger an
+                # accidental loss instead of a profit exit.
+                valid_tps = [
+                    tp for tp in parsed.take_profits
+                    if (
+                        parsed.side is TradeSide.LONG and tp > entry_price
+                    ) or (
+                        parsed.side is TradeSide.SHORT and tp < entry_price
+                    )
+                ]
+                if len(valid_tps) < len(parsed.take_profits):
+                    dropped = len(parsed.take_profits) - len(valid_tps)
+                    notes.append(f"tp_direction_filtered={dropped}")
                 open_positions[event.signal_id or f"sig_{len(open_positions)+1}"] = _OpenPosition(
                     trade_id=f"trade_{event.signal_id or len(open_positions)+1}",
                     signal_id=event.signal_id or "unknown",
@@ -255,7 +286,7 @@ class BacktestSimulator:
                     side=parsed.side,
                     entry_price=entry_price,
                     stop_loss=effective_stop,
-                    take_profits=parsed.take_profits,
+                    take_profits=valid_tps,
                     original_quantity=qty,
                     remaining_quantity=qty,
                     entry_time=entry_time,
@@ -348,6 +379,7 @@ class BacktestSimulator:
             stop_at=None,
             fill_policy=fill_policy,
             active_signal_hours=active_signal_hours,
+            strategy=strategy,
         )
         for trade in resolved_trades:
             trades.append(trade)
@@ -433,20 +465,27 @@ class BacktestSimulator:
         stop_at: datetime | None,
         fill_policy: BacktestFillPolicy,
         active_signal_hours: int | None,
+        strategy: TradeStrategy | None = None,
     ) -> tuple[int, list[SimulatedTrade]]:
         index = start_index
         resolved_trades: list[SimulatedTrade] = []
 
+        # Normalize symbols to canonical form so "BTC", "BTCUSDT", "BTCUSDT_PERP",
+        # etc. all map to the same bucket regardless of how the signal or candle
+        # source formatted them.  Positions are keyed by canonical symbol; lookup
+        # uses the candle's canonical symbol.
         symbol_to_positions: dict[str, list[str]] = {}
         for signal_id, pos in open_positions.items():
-            symbol_to_positions.setdefault(pos.symbol, []).append(signal_id)
+            key = canonical_market_symbol(pos.symbol) or pos.symbol
+            symbol_to_positions.setdefault(key, []).append(signal_id)
 
         while index < len(candles):
             candle = candles[index]
             if stop_at is not None and candle.close_time > stop_at:
                 break
-            
-            relevant_signal_ids = symbol_to_positions.get(candle.symbol, [])
+
+            candle_key = canonical_market_symbol(candle.symbol) or candle.symbol
+            relevant_signal_ids = symbol_to_positions.get(candle_key, [])
             closed_signal_ids: list[str] = []
             
             for signal_id in relevant_signal_ids:
@@ -467,7 +506,7 @@ class BacktestSimulator:
                     closed_signal_ids.append(signal_id)
                     continue
                 
-                status = self._apply_candle_to_position(position, candle, fill_policy)
+                status = self._apply_candle_to_position(position, candle, fill_policy, strategy)
                 if status is None:
                     continue
                 
@@ -508,6 +547,7 @@ class BacktestSimulator:
         position: _OpenPosition,
         candle: Candle,
         fill_policy: BacktestFillPolicy,
+        strategy: TradeStrategy | None = None,
     ) -> str | None:
         pending_tps = self._pending_take_profits(position)
         hit_sl = self._hit_sl(position, candle)
@@ -523,7 +563,7 @@ class BacktestSimulator:
                     "sl_hit_same_candle",
                 )
                 return self._sl_status(position, same_candle=True)
-            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values)
+            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values, strategy)
             if position.remaining_quantity > Decimal("0"):
                 self._close_fraction_of_position(
                     position,
@@ -536,7 +576,7 @@ class BacktestSimulator:
             return self._tp_status(position, same_candle=True)
 
         if hit_tp_values:
-            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values)
+            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values, strategy)
             if position.remaining_quantity <= Decimal("0"):
                 return self._tp_status(position, same_candle=False)
 
@@ -556,16 +596,29 @@ class BacktestSimulator:
         position: _OpenPosition,
         exit_time: datetime,
         tp_values: list[Decimal],
+        strategy: TradeStrategy | None = None,
     ) -> None:
         for tp in tp_values:
             if position.remaining_quantity <= Decimal("0"):
                 return
             remaining_targets = len(self._pending_take_profits(position))
-            fraction = (
-                Decimal("1")
-                if remaining_targets <= 1
-                else (Decimal("1") / Decimal(remaining_targets))
-            )
+
+            if strategy is not None:
+                action = strategy.get_target_hit_action(
+                    targets_hit_so_far=position.targets_hit,
+                    remaining_targets_including_this=remaining_targets,
+                )
+                fraction = action.close_fraction
+                if action.move_sl_to_entry and position.stop_loss != position.entry_price:
+                    position.stop_loss = position.entry_price
+                    position.notes.append("stop_loss_moved_to_entry_by_strategy")
+            else:
+                fraction = (
+                    Decimal("1")
+                    if remaining_targets <= 1
+                    else (Decimal("1") / Decimal(remaining_targets))
+                )
+
             self._close_fraction_of_position(
                 position,
                 exit_time,
@@ -650,10 +703,10 @@ class BacktestSimulator:
             exit_time=position.exit_time,
             entry_price=position.entry_price,
             exit_price=position.exit_price,
-            quantity=position.original_quantity,
+            quantity=max(position.original_quantity, Decimal("0")),
             pnl=position.realized_pnl,
             pnl_pct=pnl_pct,
-            fees=position.realized_fees,
+            fees=max(position.realized_fees, Decimal("0")),
             status=status,
             notes=list(position.notes),
         )

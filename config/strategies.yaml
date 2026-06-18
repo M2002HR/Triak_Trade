@@ -1,0 +1,38 @@
+# Trade Strategy Configuration
+# ==============================
+# This file controls how positions are managed during both backtesting
+# and live trading.  Set `active_strategy` to the key of the strategy
+# you want to use.
+
+active_strategy: default_risk_managed
+
+strategies:
+  default_risk_managed:
+    # --- No Stop Loss ---
+    # When a signal has no explicit stop loss, place a synthetic stop this
+    # many percent away from the entry price.
+    # 100% means: LONG stop at price 0 (never hit in practice),
+    #             SHORT stop at 2x entry price (wide but real protection).
+    no_sl_loss_pct: "100"
+
+    # --- Risk-Free After First Target ---
+    # When true: move the stop loss to the entry price (breakeven) as soon
+    # as the first take-profit target is hit.  This ensures a worst-case of
+    # breakeven once the trade moves in your favour.
+    risk_free_on_first_tp: true
+
+    # --- Partial Profit at Each Target ---
+    # Fraction of *remaining* position to close at each successive TP.
+    # The last value in this list is repeated for any TP beyond the list.
+    # The very last pending target ALWAYS closes 100% of remaining, so you
+    # never need to put 1.0 at the end.
+    #
+    # Defaults:
+    #   TP1 → 35% of position   (takes profit early, higher probability)
+    #   TP2 → 40% of remaining  (~26% of total position)
+    #   TP3 → 50% of remaining  (~20% of total position)
+    #   TP4+ → 100% of remaining (~20% of total position)
+    tp_close_fractions:
+      - "0.35"
+      - "0.40"
+      - "0.50"

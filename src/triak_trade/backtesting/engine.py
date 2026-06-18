@@ -12,16 +12,23 @@ from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
 from triak_trade.backtesting.report import report_to_json, report_to_telegram_summary
 from triak_trade.backtesting.scoring import ChannelScorer
 from triak_trade.backtesting.simulator import BacktestSimulator
+from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.backtesting.timeline import BacktestTimelineBuilder
 from triak_trade.domain.enums import BacktestFillPolicy
 from triak_trade.domain.models import BacktestReport, Candle, RawTelegramMessage
 
 
 class BacktestEngine:
-    def __init__(self, *, classifier: MessageClassifier | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        classifier: MessageClassifier | None = None,
+        strategy: TradeStrategy | None = None,
+    ) -> None:
         self.classifier = classifier or RegexMessageClassifier()
         self.simulator = BacktestSimulator()
         self.scorer = ChannelScorer()
+        self.strategy = strategy
 
     def run(self, request: BacktestRequest) -> BacktestReport:
         messages = fixture_messages(request.channel)
@@ -56,7 +63,9 @@ class BacktestEngine:
         active_signal_hours: int | None = None,
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
+        strategy: TradeStrategy | None = None,
     ) -> BacktestReport:
+        effective_strategy = strategy or self.strategy
         conservative_trades, conservative_final = self.simulator.simulate(
             events=events,
             candles=candles,
@@ -66,6 +75,7 @@ class BacktestEngine:
             active_signal_hours=active_signal_hours,
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
+            strategy=effective_strategy,
         )
         _optimistic_trades, optimistic_final = self.simulator.simulate(
             events=events,
@@ -76,11 +86,13 @@ class BacktestEngine:
             active_signal_hours=active_signal_hours,
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
+            strategy=effective_strategy,
         )
-        final_balance = (
+        final_balance = max(
             conservative_final
             if request.fill_policy is BacktestFillPolicy.CONSERVATIVE
-            else optimistic_final
+            else optimistic_final,
+            Decimal("0"),
         )
         total_pnl = final_balance - request.initial_balance
 
