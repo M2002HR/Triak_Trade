@@ -51,6 +51,7 @@ class BacktestEvent(BaseModel):
     source_message_id: int | None = None
     source_text: str | None = None
     close_fraction: Decimal | None = None
+    close_all: bool = False
     move_stop_to_entry: bool = False
     leverage: int | None = None
 

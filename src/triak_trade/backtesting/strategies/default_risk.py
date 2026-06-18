@@ -66,6 +66,23 @@ class DefaultRiskManagedStrategy:
     The very last pending target always closes 100 % regardless of this list.
     """
 
+    synthetic_tp_r_multiples: list[Decimal] = field(
+        default_factory=lambda: [
+            Decimal("1"),
+            Decimal("2"),
+            Decimal("3"),
+        ]
+    )
+    """
+    Risk-multiple ladder used when a signal omits explicit take-profit targets.
+
+    Example for a LONG:
+    - risk = entry - stop
+    - TP1 = entry + 1R
+    - TP2 = entry + 2R
+    - TP3 = entry + 3R
+    """
+
     # ------------------------------------------------------------------ #
     # Protocol implementation                                              #
     # ------------------------------------------------------------------ #
@@ -82,6 +99,29 @@ class DefaultRiskManagedStrategy:
         # LONG: stop below entry.  At 100 % this equals 0, which is valid —
         # crypto prices never reach zero in normal trading.
         return max(entry_price * (Decimal("1") - pct), Decimal("0"))
+
+    def get_synthetic_take_profits(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+    ) -> list[Decimal]:
+        risk_distance = abs(entry_price - stop_loss)
+        if risk_distance <= Decimal("0"):
+            return []
+        multiples = self.synthetic_tp_r_multiples or [Decimal("1"), Decimal("2"), Decimal("3")]
+        if side is TradeSide.SHORT:
+            return [
+                entry_price - (risk_distance * multiple)
+                for multiple in multiples
+                if multiple > Decimal("0")
+            ]
+        return [
+            entry_price + (risk_distance * multiple)
+            for multiple in multiples
+            if multiple > Decimal("0")
+        ]
 
     def get_target_hit_action(
         self,

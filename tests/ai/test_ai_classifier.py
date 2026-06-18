@@ -113,6 +113,26 @@ def test_ai_classifier_maps_ambiguous_to_unknown() -> None:
     assert result.parsed_signal.action is SignalAction.UNKNOWN
 
 
+def test_ai_classifier_skips_analysis_messages_before_ai_logic() -> None:
+    classifier = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(_result_payload("GENERAL_ANALYSIS", "ignore")),
+    )
+    result = classifier.classify(_raw("Analysis\nXLM / 4H"), _context())
+    assert result.parsed_signal.action is SignalAction.IGNORE
+    assert "classification_skipped=analysis_message" in result.debug_notes
+
+
+def test_ai_classifier_skips_hashtag_analysis_messages_before_ai_logic() -> None:
+    classifier = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(_result_payload("GENERAL_ANALYSIS", "ignore")),
+    )
+    result = classifier.classify(_raw("#Analysis\nBTC LONG update"), _context())
+    assert result.parsed_signal.action is SignalAction.IGNORE
+    assert "classification_skipped=analysis_message" in result.debug_notes
+
+
 def test_ai_classifier_downgrades_inconsistent_new_signal_to_unknown() -> None:
     payload = _result_payload("NEW_SIGNAL", "ignore")
     payload["symbol"] = None
@@ -265,3 +285,48 @@ def test_ai_classifier_sanitizes_noisy_take_profit_numbers() -> None:
         "8.226",
         "7.990",
     ]
+
+
+def test_ai_classifier_backfills_missing_stop_loss_from_formatted_message() -> None:
+    payload = _result_payload("NEW_SIGNAL", "open")
+    payload["symbol"] = "VELVETUSD"
+    payload["symbol_raw"] = "VELVET/USD"
+    payload["entry_type"] = "market"
+    payload["entry_low"] = None
+    payload["entry_high"] = None
+    payload["stop_loss"] = None
+    payload["take_profits"] = ["0.42", "0.4428", "0.67"]
+    payload["leverage"] = 20
+    classifier = AIMessageClassifier(
+        settings=Settings(_env_file=None),
+        gateway_client=_client(payload),
+    )
+    message = _raw(
+        """
+        **سیگنال فیوچرز اتحاد**🥇
+
+        VELVET/**USD ****🌪****
+
+        ****🌪****LONG **🥇**🌪****
+
+        **🥇**LEVERAGE: Cross
+        20X
+
+        Entry
+        MARKET
+
+        Targets
+        1 0.42
+        2 0.4428
+        3 0.67
+
+        STOPLOSS
+        ⚠️
+        🥇،0.386
+        """
+    )
+    result = classifier.classify(message, _context())
+    assert result.parsed_signal.action is SignalAction.OPEN
+    assert result.parsed_signal.entry_type.value == "market"
+    assert result.parsed_signal.stop_loss == Decimal("0.386")
+    assert "regex_supplement=stop_loss" in result.debug_notes

@@ -15,6 +15,8 @@ from triak_trade.ai.schemas import AIClassificationResult, AIMessageContext
 from triak_trade.config.settings import Settings
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal, RawTelegramMessage
+from triak_trade.parsing.normalizer import MessageNormalizer
+from triak_trade.parsing.regex_parser import RegexSignalParser
 from triak_trade.parsing.validator import ParsedSignalValidator
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
@@ -22,6 +24,8 @@ _RAW_URL_RE = re.compile(r"https?://\S+")
 _MAX_RECENT_MESSAGES = 8
 _MAX_ACTIVE_SIGNALS = 8
 _MAX_CONTEXT_TEXT_CHARS = 700
+_ANALYSIS_MARKERS = ("analysis",)
+_EXPLICIT_ANALYSIS_LINE_RE = re.compile(r"^\s*#?\s*analysis\b[\s:.-]*$", re.IGNORECASE)
 
 
 class AIMessageClassifier(MessageClassifier):
@@ -36,6 +40,8 @@ class AIMessageClassifier(MessageClassifier):
         self.gateway_client = gateway_client
         self.regex_fallback = regex_fallback
         self.validator = ParsedSignalValidator()
+        self.normalizer = MessageNormalizer()
+        self.regex_parser = RegexSignalParser()
 
     def _has_signal_indicators(self, text: str) -> bool:
         import sys
@@ -63,11 +69,50 @@ class AIMessageClassifier(MessageClassifier):
                 return True
         return False
 
+    @staticmethod
+    def _is_analysis_only_text(text: str) -> bool:
+        if any(
+            _EXPLICIT_ANALYSIS_LINE_RE.match(line.strip())
+            for line in text.splitlines()
+            if line.strip()
+        ):
+            return True
+        lowered = text.lower()
+        if not any(marker in lowered for marker in _ANALYSIS_MARKERS):
+            return False
+        non_analysis_keywords = (
+            "entry",
+            "target",
+            "targets",
+            "tp",
+            "sl",
+            "stop",
+            "leverage",
+            "buy",
+            "sell",
+            "long",
+            "short",
+            "market",
+            "limit",
+            "ورود",
+            "تارگت",
+            "حد ضرر",
+            "استاپ",
+            "لانگ",
+            "شورت",
+            "خرید",
+            "فروش",
+        )
+        return not any(keyword in lowered for keyword in non_analysis_keywords)
+
     def classify(self, message: RawTelegramMessage, context: ChannelContext) -> ClassifiedMessage:
         text = message.text or ""
         if not self._has_signal_indicators(text):
             return self._safe_ignored(message, "classification_skipped=no_signal_indicators")
+        if self._is_analysis_only_text(text):
+            return self._safe_ignored(message, "classification_skipped=analysis_message")
 
+        normalized = self.normalizer.normalize(message)
         ai_context = self._build_context(message, context)
         route = self.gateway_client.plan_for_context(ai_context)
 
@@ -104,9 +149,11 @@ class AIMessageClassifier(MessageClassifier):
             )
             return self._safe_unknown(message, f"ai-error={exc.__class__.__name__}")
 
-        parsed = self._sanitize_open_signal(
-            self._result_to_parsed_signal(result, message)
+        parsed, supplement_notes = self._supplement_structural_fields_from_regex(
+            self._result_to_parsed_signal(result, message),
+            normalized,
         )
+        parsed = self._sanitize_open_signal(parsed)
         valid, errors = self.validator.validate_for_proposal(
             parsed,
             max_leverage=self.settings.MAX_LEVERAGE,
@@ -128,13 +175,7 @@ class AIMessageClassifier(MessageClassifier):
 
         return ClassifiedMessage(
             raw_message=message,
-            normalized_message=NormalizedMessage(
-                raw=message,
-                normalized_text=message.text or "",
-                detected_symbols=[parsed.symbol] if parsed.symbol else [],
-                detected_keywords=[],
-                language_hint=None,
-            ),
+            normalized_message=normalized,
             parsed_signal=parsed,
             is_potential_new_signal=is_new,
             is_related_to_existing_signal=is_related,
@@ -154,6 +195,7 @@ class AIMessageClassifier(MessageClassifier):
                 f"confidence={result.confidence}",
                 f"validation_ok={valid}",
                 f"reasoning_summary={result.reasoning_summary}",
+                *supplement_notes,
                 *([f"leverage={parsed.leverage}"] if parsed.leverage is not None else []),
                 *[f"validation_error={e}" for e in errors],
             ],
@@ -263,6 +305,63 @@ class AIMessageClassifier(MessageClassifier):
         if not update:
             return parsed
         return parsed.model_copy(update=update)
+
+    def _supplement_structural_fields_from_regex(
+        self,
+        parsed: ParsedSignal,
+        normalized: NormalizedMessage,
+    ) -> tuple[ParsedSignal, list[str]]:
+        """Backfill obvious missing fields from the normalized source text.
+
+        The AI remains the primary classifier. This step only recovers
+        unambiguous structural fields when the model omits them, such as a clear
+        stop loss in a formatted signal message. It never overrides populated AI
+        fields and does not change the message action.
+        """
+        if parsed.action not in {
+            SignalAction.OPEN,
+            SignalAction.UPDATE_SL,
+            SignalAction.UPDATE_TP,
+            SignalAction.UPDATE_LEVERAGE,
+            SignalAction.UPDATE_ENTRY,
+        }:
+            return parsed, []
+
+        regex_parsed = self.regex_parser.parse(normalized)
+        updates: dict[str, object] = {}
+        notes: list[str] = []
+
+        def add_update(field: str, value: object) -> None:
+            if field in updates:
+                return
+            updates[field] = value
+            notes.append(f"regex_supplement={field}")
+
+        if parsed.symbol is None and regex_parsed.symbol is not None:
+            add_update("symbol", regex_parsed.symbol)
+        if parsed.side is TradeSide.UNKNOWN and regex_parsed.side is not TradeSide.UNKNOWN:
+            add_update("side", regex_parsed.side)
+        if parsed.market is MarketType.UNKNOWN and regex_parsed.market is not MarketType.UNKNOWN:
+            add_update("market", regex_parsed.market)
+        if (
+            parsed.entry_type is EntryType.UNKNOWN
+            and regex_parsed.entry_type is not EntryType.UNKNOWN
+        ):
+            add_update("entry_type", regex_parsed.entry_type)
+        if parsed.entry_low is None and regex_parsed.entry_low is not None:
+            add_update("entry_low", regex_parsed.entry_low)
+        if parsed.entry_high is None and regex_parsed.entry_high is not None:
+            add_update("entry_high", regex_parsed.entry_high)
+        if parsed.stop_loss is None and regex_parsed.stop_loss is not None:
+            add_update("stop_loss", regex_parsed.stop_loss)
+        if not parsed.take_profits and regex_parsed.take_profits:
+            add_update("take_profits", regex_parsed.take_profits)
+        if parsed.leverage is None and regex_parsed.leverage is not None:
+            add_update("leverage", regex_parsed.leverage)
+
+        if not updates:
+            return parsed, []
+        return parsed.model_copy(update=updates), notes
 
     def _sanitize_take_profits(self, parsed: ParsedSignal) -> list[Decimal]:
         take_profits: list[Decimal] = []

@@ -26,7 +26,12 @@ class TelegramClientInterface(Protocol):
         handler: Callable[[RawTelegramMessage], Awaitable[None]],
     ) -> None: ...
 
-    async def ensure_media_payload(self, message: RawTelegramMessage) -> RawTelegramMessage: ...
+    async def ensure_media_payload(
+        self,
+        message: RawTelegramMessage,
+        *,
+        allow_captionless: bool = False,
+    ) -> RawTelegramMessage: ...
 
 
 class FakeTelegramClient:
@@ -68,5 +73,10 @@ class FakeTelegramClient:
             if message.channel_id in allowed or not allowed:
                 await handler(message)
 
-    async def ensure_media_payload(self, message: RawTelegramMessage) -> RawTelegramMessage:
+    async def ensure_media_payload(
+        self,
+        message: RawTelegramMessage,
+        *,
+        allow_captionless: bool = False,
+    ) -> RawTelegramMessage:
         return message

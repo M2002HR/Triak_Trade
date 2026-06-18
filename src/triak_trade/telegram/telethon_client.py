@@ -137,13 +137,18 @@ class TelethonTelegramClient:
         async with client:
             await client.run_until_disconnected()
 
-    async def ensure_media_payload(self, message: RawTelegramMessage) -> RawTelegramMessage:
+    async def ensure_media_payload(
+        self,
+        message: RawTelegramMessage,
+        *,
+        allow_captionless: bool = False,
+    ) -> RawTelegramMessage:
         payload = dict(message.raw_payload)
         if not self.settings.TELEGRAM_MEDIA_DOWNLOAD_ENABLED:
             return message
         if not bool(payload.get("has_media")):
             return message
-        if not bool(payload.get("caption_present")):
+        if not bool(payload.get("caption_present")) and not allow_captionless:
             payload["media_download_skipped"] = "no_caption"
             return message.model_copy(update={"raw_payload": payload})
         if payload.get("image_data_urls"):
@@ -158,9 +163,19 @@ class TelethonTelegramClient:
         client = await self._ensure_client()
         is_connected = getattr(client, "is_connected", None)
         if callable(is_connected) and is_connected():
-            return await self._hydrate_media_payload(client, source_message, message)
+            return await self._hydrate_media_payload(
+                client,
+                source_message,
+                message,
+                allow_captionless=allow_captionless,
+            )
         async with client:
-            return await self._hydrate_media_payload(client, source_message, message)
+            return await self._hydrate_media_payload(
+                client,
+                source_message,
+                message,
+                allow_captionless=allow_captionless,
+            )
 
     def _cache_message(self, raw: RawTelegramMessage, source_message: Any) -> None:
         self._message_cache[(raw.channel_id, raw.message_id)] = source_message
@@ -170,13 +185,15 @@ class TelethonTelegramClient:
         client: Any,
         message: Any,
         raw: RawTelegramMessage,
+        *,
+        allow_captionless: bool = False,
     ) -> RawTelegramMessage:
         if not self.settings.TELEGRAM_MEDIA_DOWNLOAD_ENABLED:
             return raw
         payload = dict(raw.raw_payload)
         if not bool(payload.get("has_media")):
             return raw
-        if not bool(payload.get("caption_present")):
+        if not bool(payload.get("caption_present")) and not allow_captionless:
             payload["media_download_skipped"] = "no_caption"
             return raw.model_copy(update={"raw_payload": payload})
         has_photo = bool(payload.get("has_photo"))

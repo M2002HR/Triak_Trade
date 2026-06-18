@@ -51,6 +51,22 @@ class TradeStrategy(Protocol):
         """
         ...
 
+    def get_synthetic_take_profits(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+    ) -> list[Decimal]:
+        """
+        Return a fallback take-profit ladder when the signal has no explicit TP.
+
+        The returned values must be on the correct side of the entry:
+        - LONG: above entry_price
+        - SHORT: below entry_price
+        """
+        ...
+
     def get_target_hit_action(
         self,
         *,

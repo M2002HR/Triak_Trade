@@ -9,7 +9,11 @@ from typing import Any
 from triak_trade.agents.classifier import MessageClassifier, RegexMessageClassifier
 from triak_trade.backtesting.fixtures import fixture_candles, fixture_messages
 from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
-from triak_trade.backtesting.report import report_to_json, report_to_telegram_summary
+from triak_trade.backtesting.report import (
+    extract_channel_score,
+    report_to_json,
+    report_to_telegram_summary,
+)
 from triak_trade.backtesting.scoring import ChannelScorer
 from triak_trade.backtesting.simulator import BacktestSimulator
 from triak_trade.backtesting.strategies.base import TradeStrategy
@@ -96,7 +100,7 @@ class BacktestEngine:
         )
         total_pnl = final_balance - request.initial_balance
 
-        metrics, score = self.scorer.score(
+        metrics, score, _breakdown = self.scorer.score_with_breakdown(
             channel_id=request.channel,
             events=events,
             trades=conservative_trades,
@@ -105,6 +109,7 @@ class BacktestEngine:
             optimistic_pnl=optimistic_final - request.initial_balance,
             from_date=request.from_date,
             to_date=request.to_date,
+            initial_balance=request.initial_balance,
         )
         report = BacktestReport(
             channel_id=request.channel,
@@ -118,7 +123,7 @@ class BacktestEngine:
             generated_at=datetime.now(timezone.utc),
             warnings=[],
         )
-        report.warnings.append(f"score={score}")
+        report.warnings.append(f"channel_score={score}")
         return report
 
 
@@ -138,5 +143,5 @@ def run_fixture_backtest() -> tuple[dict[str, Any], str]:
     )
     engine = BacktestEngine()
     report = engine.run(request)
-    score = Decimal(report.warnings[0].split("=")[1]) if report.warnings else Decimal("0")
+    score = extract_channel_score(report.warnings)
     return report_to_json(report, score), report_to_telegram_summary(report, score)

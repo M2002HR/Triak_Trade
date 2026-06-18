@@ -304,7 +304,7 @@ def test_simulator_expires_open_signal_after_configured_hours() -> None:
     assert trades[0].exit_price == Decimal("101.25")
 
 
-def test_simulator_rejects_stale_market_entry_candle() -> None:
+def test_simulator_market_entry_uses_first_available_candle_after_signal() -> None:
     parsed = _parsed(SignalAction.OPEN)
     parsed.entry_type = EntryType.MARKET
     parsed.entry_low = None
@@ -327,8 +327,9 @@ def test_simulator_rejects_stale_market_entry_candle() -> None:
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
     )
 
-    assert trades[0].status == "not_filled"
-    assert trades[0].entry_time is None
+    assert trades[0].status != "not_filled"
+    assert trades[0].entry_time == stale_candle.open_time
+    assert trades[0].entry_price == stale_candle.open
 
 
 def test_simulator_ignores_followup_after_expiry_window() -> None:
@@ -415,7 +416,7 @@ def test_simulator_snapshots_include_not_filled_signals() -> None:
     signal.stop_loss = Decimal("98")
     signal.take_profits = [Decimal("104")]
     event = BacktestEvent(
-        timestamp=datetime(2026, 6, 1, 0, 0, 30, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
         action=SignalAction.OPEN,
         signal_id="s1",
         parsed_signal=signal,
@@ -423,13 +424,9 @@ def test_simulator_snapshots_include_not_filled_signals() -> None:
         debug_notes=[],
         source_message_id=1,
     )
-    candles = [
-        _candle(5, "104.5", "99.5", o="100", c="104"),
-    ]
-
     trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
         events=[event],
-        candles=candles,
+        candles=[],
         initial_balance=Decimal("100"),
         risk_per_trade_pct=Decimal("3"),
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
@@ -441,6 +438,115 @@ def test_simulator_snapshots_include_not_filled_signals() -> None:
     assert snapshots[0].closed_trades == 1
     assert "s1" in snapshots[0].signal_states
     assert snapshots[0].signal_states["s1"].status == "not_filled"
+
+
+def test_simulator_market_entry_matches_normalized_swap_symbol() -> None:
+    signal = _parsed(SignalAction.OPEN)
+    signal.entry_type = EntryType.MARKET
+    signal.entry_low = None
+    signal.entry_high = None
+    signal.symbol = "BTCUSD"
+    event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=signal,
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+
+    trades, _balance = BacktestSimulator().simulate(
+        events=[event],
+        candles=[_contract_candle(0, "104.5", "99.5", o="100", c="104")],
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("3"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert trades[0].status != "not_filled"
+    assert trades[0].entry_price == Decimal("100")
+
+
+def test_simulator_close_all_closes_every_open_position() -> None:
+    first = _parsed(SignalAction.OPEN)
+    first.symbol = "BTCUSDT"
+    first.entry_low = Decimal("100")
+    first.entry_high = Decimal("100")
+    first.stop_loss = Decimal("98")
+    first.take_profits = [Decimal("104")]
+    second = _parsed(SignalAction.OPEN)
+    second.symbol = "ETHUSDT"
+    second.entry_low = Decimal("50")
+    second.entry_high = Decimal("50")
+    second.stop_loss = Decimal("49")
+    second.take_profits = [Decimal("55")]
+
+    open_first = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=first,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    open_second = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, 10, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s2",
+        parsed_signal=second,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    close_all = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 1, tzinfo=timezone.utc),
+        action=SignalAction.CLOSE,
+        signal_id=None,
+        parsed_signal=_parsed(SignalAction.CLOSE),
+        related_signal_id=None,
+        debug_notes=[],
+        close_all=True,
+    )
+    candles = [
+        _candle(0, "101", "99", o="100", c="100.5"),
+        Candle(
+            symbol="ETHUSDT",
+            interval="1m",
+            open_time=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+            close_time=datetime(2026, 6, 1, 0, 1, tzinfo=timezone.utc),
+            open=Decimal("50"),
+            high=Decimal("51"),
+            low=Decimal("49.5"),
+            close=Decimal("50.5"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        ),
+        Candle(
+            symbol="ETHUSDT",
+            interval="1m",
+            open_time=datetime(2026, 6, 1, 0, 1, tzinfo=timezone.utc),
+            close_time=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+            open=Decimal("50.25"),
+            high=Decimal("50.5"),
+            low=Decimal("49.75"),
+            close=Decimal("50.1"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        ),
+        _candle(1, "102", "100", o="100.25", c="101"),
+    ]
+
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_first, open_second, close_all],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert len(trades) == 2
+    assert {trade.signal_id for trade in trades} == {"s1", "s2"}
+    assert all(trade.status == "closed" for trade in trades)
 
 
 def test_simulator_compounds_risk_from_realized_balance() -> None:

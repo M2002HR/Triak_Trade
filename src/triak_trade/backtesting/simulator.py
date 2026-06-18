@@ -278,6 +278,17 @@ class BacktestSimulator:
                 if len(valid_tps) < len(parsed.take_profits):
                     dropped = len(parsed.take_profits) - len(valid_tps)
                     notes.append(f"tp_direction_filtered={dropped}")
+                if not valid_tps and strategy is not None:
+                    valid_tps = strategy.get_synthetic_take_profits(
+                        side=parsed.side,
+                        entry_price=entry_price,
+                        stop_loss=effective_stop,
+                    )
+                    if valid_tps:
+                        notes.append(
+                            "synthetic_take_profits_strategy="
+                            + ",".join(str(item) for item in valid_tps)
+                        )
                 open_positions[event.signal_id or f"sig_{len(open_positions)+1}"] = _OpenPosition(
                     trade_id=f"trade_{event.signal_id or len(open_positions)+1}",
                     signal_id=event.signal_id or "unknown",
@@ -300,6 +311,36 @@ class BacktestSimulator:
                     manual_partial_exit=False,
                     effective_leverage=effective_leverage,
                 )
+            elif parsed.action is SignalAction.CLOSE and event.close_all and open_positions:
+                for signal_id in list(open_positions):
+                    position = open_positions[signal_id]
+                    close_price = (
+                        self._first_candle_open_after(
+                            event.timestamp,
+                            sorted_candles,
+                            position.symbol,
+                        )
+                        or position.entry_price
+                    )
+                    self._close_fraction_of_position(
+                        position,
+                        event.timestamp,
+                        close_price,
+                        Decimal("1"),
+                        "manual_close_all",
+                    )
+                    trade = self._finalize_position(
+                        position,
+                        status=(
+                            "closed"
+                            if position.targets_hit == 0
+                            else "partial_tp_then_close"
+                        ),
+                    )
+                    trades.append(trade)
+                    closed_trades_by_signal[trade.signal_id] = trade
+                    balance += trade.pnl
+                    del open_positions[signal_id]
             elif event.related_signal_id in open_positions:
                 position = open_positions[event.related_signal_id]
                 if parsed.action is SignalAction.CANCEL:
@@ -419,8 +460,6 @@ class BacktestSimulator:
         if next_candle is None:
             return None, None
         if entry_type is EntryType.MARKET:
-            if not self._market_entry_candle_is_aligned(signal_time, next_candle):
-                return None, None
             return next_candle.open, next_candle.open_time
         if entry_low is not None and entry_high is not None:
             midpoint = (entry_low + entry_high) / Decimal("2")
@@ -438,14 +477,6 @@ class BacktestSimulator:
                     return entry_low, candle.open_time
             return None, None
         return next_candle.open, next_candle.open_time
-
-    @staticmethod
-    def _market_entry_candle_is_aligned(signal_time: datetime, candle: Candle) -> bool:
-        candle_duration = candle.close_time - candle.open_time
-        if candle_duration <= timedelta(0):
-            candle_duration = timedelta(minutes=1)
-        max_delay = max(candle_duration * 2, timedelta(minutes=2))
-        return candle.open_time - signal_time <= max_delay
 
     def _first_candle_open_after(
         self,

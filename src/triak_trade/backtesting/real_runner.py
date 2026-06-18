@@ -27,6 +27,7 @@ from triak_trade.backtesting.correlation import resolve_related_signal_id
 from triak_trade.backtesting.directives import (
     apply_text_directive_action,
     build_ignored_signal,
+    detect_close_all_instruction,
     detect_move_stop_to_entry,
     detect_tp_list_update,
     extract_close_fraction,
@@ -34,7 +35,11 @@ from triak_trade.backtesting.directives import (
 )
 from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestEvent, BacktestRequest
-from triak_trade.backtesting.report import report_to_json, report_to_markdown_summary
+from triak_trade.backtesting.report import (
+    extract_channel_score,
+    report_to_json,
+    report_to_markdown_summary,
+)
 from triak_trade.backtesting.report_store import BacktestReportStore
 from triak_trade.backtesting.simulator import SimulationSnapshot
 from triak_trade.backtesting.strategies.base import TradeStrategy
@@ -56,6 +61,25 @@ from triak_trade.observability.telegram_log_channel import TelegramLogChannelCli
 from triak_trade.parsing.validator import ParsedSignalValidator
 from triak_trade.telegram.client import TelegramClientInterface
 from triak_trade.telegram.telethon_client import TelegramCredentialError, TelethonTelegramClient
+
+_RETRO_SIGNAL_TEXT_MARKERS = (
+    "target",
+    "targets",
+    "tp",
+    "stop",
+    "stoploss",
+    "sl",
+    "entry",
+    "entries",
+    "market",
+    "limit",
+    "leverage",
+    "تارگت",
+    "حد ضرر",
+    "استاپ",
+    "ورود",
+    "نقطه ورود",
+)
 
 
 class RealBacktestMessageStage(BaseModel):
@@ -866,15 +890,7 @@ class RealBacktestRunner:
             max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
             default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
         )
-        score = Decimal("0")
-        if report.warnings:
-            for warning in report.warnings:
-                if "channel_score=" in warning:
-                    try:
-                        score = Decimal(warning.split("=")[1])
-                        break
-                    except (IndexError, ValueError):
-                        continue
+        score = extract_channel_score(report.warnings)
         trades_filled = sum(1 for trade in report.trades if trade.status != "not_filled")
         wins = sum(1 for trade in report.trades if trade.pnl > 0)
         losses = sum(1 for trade in report.trades if trade.pnl < 0)
@@ -1332,6 +1348,7 @@ class RealBacktestRunner:
             )
             message = await self._prepare_message_for_classification(
                 message=message,
+                context=context,
                 trace=trace,
                 progress_callback=progress_callback,
                 counts=counts,
@@ -1494,6 +1511,11 @@ class RealBacktestRunner:
             signal_id: str | None = None
             resolved_related_id: str | None = None
             parsed_for_event = parsed
+            close_all = detect_close_all_instruction(message.text)
+            if close_all and parsed_for_event.action is not SignalAction.CLOSE:
+                parsed_for_event = parsed_for_event.model_copy(
+                    update={"action": SignalAction.CLOSE}
+                )
             # Guard: the AI sometimes classifies a reply/follow-up message as a
             # new OPEN signal (e.g. when the update contains entry/SL/TP numbers).
             # If this message is a Telegram reply to a message that already owns
@@ -1663,7 +1685,7 @@ class RealBacktestRunner:
                         trace.symbol = parsed_for_event.symbol
                         trace.side = parsed_for_event.side.value
 
-            if classified.is_potential_new_signal and parsed.action is SignalAction.OPEN:
+            if classified.is_potential_new_signal and parsed_for_event.action is SignalAction.OPEN:
                 self._set_trace_stage(
                     trace,
                     "validated",
@@ -1671,8 +1693,14 @@ class RealBacktestRunner:
                     detail="Checking whether the signal is structurally complete.",
                 )
                 counts["parsed_signals"] += 1
-                valid_for_backtest, errors = self.validator.validate_for_backtest_open(parsed)
-                market_symbol = normalize_market_symbol(parsed.symbol) if parsed.symbol else None
+                valid_for_backtest, errors = self.validator.validate_for_backtest_open(
+                    parsed_for_event
+                )
+                market_symbol = (
+                    normalize_market_symbol(parsed_for_event.symbol)
+                    if parsed_for_event.symbol
+                    else None
+                )
                 if valid_for_backtest and market_symbol is not None:
                     counts["valid_signals"] += 1
                     self._set_trace_stage(
@@ -1699,7 +1727,9 @@ class RealBacktestRunner:
                             prefetched_candles_by_symbol[selected_symbol] = prefetched_candles
 
                     if prefetched_candles is not None:
-                        parsed = parsed.model_copy(update={"symbol": selected_symbol})
+                        parsed_for_event = parsed_for_event.model_copy(
+                            update={"symbol": selected_symbol}
+                        )
                         trace.symbol = selected_symbol
                         trace.final_status = "simulation_tracking"
                         trace.result_summary = (
@@ -1820,6 +1850,7 @@ class RealBacktestRunner:
                     source_message_id=message.message_id,
                     source_text=message.text,
                     close_fraction=extract_close_fraction(message.text),
+                    close_all=close_all,
                     move_stop_to_entry=detect_move_stop_to_entry(message.text),
                     leverage=parsed_for_event.leverage,
                 )
@@ -2400,6 +2431,7 @@ class RealBacktestRunner:
         self,
         *,
         message: RawTelegramMessage,
+        context: ChannelContext,
         trace: RealBacktestMessageTrace,
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
@@ -2410,7 +2442,14 @@ class RealBacktestRunner:
             bool(payload.get("has_media")) and bool(payload.get("caption_present"))
         )
         if not needs_caption_media:
-            return message
+            return await self._maybe_attach_prior_captionless_media(
+                message=message,
+                context=context,
+                trace=trace,
+                progress_callback=progress_callback,
+                counts=counts,
+                warnings=warnings,
+            )
 
         self._emit_run_progress(
             progress_callback,
@@ -2478,7 +2517,147 @@ class RealBacktestRunner:
                 status="completed",
                 detail=f"Message {message.message_id} was ready without media download.",
             )
-        return hydrated
+        return await self._maybe_attach_prior_captionless_media(
+            message=hydrated,
+            context=context,
+            trace=trace,
+            progress_callback=progress_callback,
+            counts=counts,
+            warnings=warnings,
+        )
+
+    async def _maybe_attach_prior_captionless_media(
+        self,
+        *,
+        message: RawTelegramMessage,
+        context: ChannelContext,
+        trace: RealBacktestMessageTrace,
+        progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
+        counts: dict[str, int],
+        warnings: list[str],
+    ) -> RawTelegramMessage:
+        if not self._message_needs_retro_media_context(message):
+            return message
+        prior = self._find_recent_captionless_media_message(context=context, message=message)
+        if prior is None:
+            return message
+        prior_payload = prior.raw_payload
+        if prior_payload.get("image_data_urls"):
+            return self._attach_context_images(message, prior, trace)
+
+        self._emit_run_progress(
+            progress_callback,
+            phase="classify_messages",
+            status="running",
+            summary=(
+                f"Loading prior media context from message {prior.message_id} "
+                f"for message {message.message_id}."
+            ),
+            counts=counts,
+        )
+        self._set_trace_stage(
+            trace,
+            "preprocess",
+            status="active",
+            detail=(
+                f"Loading prior media context from message {prior.message_id} "
+                f"for message {message.message_id}."
+            ),
+        )
+        try:
+            hydrated_prior = await self.telegram_client.ensure_media_payload(
+                prior,
+                allow_captionless=True,
+            )
+        except Exception as exc:
+            self._append_warning(
+                warnings,
+                (
+                    f"Prior media context download failed for message {prior.message_id}; "
+                    f"continuing without retro image context ({type(exc).__name__})."
+                ),
+            )
+            self._set_trace_stage(
+                trace,
+                "preprocess",
+                status="completed",
+                detail=(
+                    f"Prior media context download failed for message {prior.message_id}; "
+                    f"continuing without retro image context ({type(exc).__name__})."
+                ),
+            )
+            return message
+
+        if not hydrated_prior.raw_payload.get("image_data_urls"):
+            self._set_trace_stage(
+                trace,
+                "preprocess",
+                status="completed",
+                detail=(
+                    f"Prior media context from message {prior.message_id} was unavailable."
+                ),
+            )
+            return message
+
+        return self._attach_context_images(message, hydrated_prior, trace)
+
+    @staticmethod
+    def _message_needs_retro_media_context(message: RawTelegramMessage) -> bool:
+        text = (message.text or "").strip().lower()
+        if not text:
+            return False
+        payload = message.raw_payload
+        if payload.get("image_data_urls"):
+            return False
+        if bool(payload.get("has_media")) and bool(payload.get("caption_present")):
+            return False
+        return any(marker in text for marker in _RETRO_SIGNAL_TEXT_MARKERS)
+
+    @staticmethod
+    def _find_recent_captionless_media_message(
+        *,
+        context: ChannelContext,
+        message: RawTelegramMessage,
+    ) -> RawTelegramMessage | None:
+        recent = list(context.recent_messages)
+        for candidate in reversed(recent[-3:]):
+            if candidate.message_id >= message.message_id:
+                continue
+            payload = candidate.raw_payload
+            if not bool(payload.get("has_media")):
+                continue
+            if bool(payload.get("caption_present")):
+                continue
+            if (candidate.text or "").strip():
+                continue
+            return candidate
+        return None
+
+    @staticmethod
+    def _attach_context_images(
+        message: RawTelegramMessage,
+        prior_media: RawTelegramMessage,
+        trace: RealBacktestMessageTrace,
+    ) -> RawTelegramMessage:
+        message_payload = dict(message.raw_payload)
+        context_images = prior_media.raw_payload.get("image_data_urls")
+        if not isinstance(context_images, list) or not context_images:
+            return message
+        merged_images = list(message_payload.get("image_data_urls") or [])
+        merged_images.extend(context_images)
+        message_payload["image_data_urls"] = merged_images
+        message_payload["context_image_message_ids"] = list(
+            dict.fromkeys(
+                [
+                    *(message_payload.get("context_image_message_ids") or []),
+                    prior_media.message_id,
+                ]
+            )
+        )
+        trace.debug_notes.append(
+            f"retro_media_context_from={prior_media.message_id}"
+        )
+        return message.model_copy(update={"raw_payload": message_payload})
 
     def _make_trace(self, message: RawTelegramMessage) -> RealBacktestMessageTrace:
         stages = [

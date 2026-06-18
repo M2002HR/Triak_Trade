@@ -13,7 +13,7 @@ strategies:
     # many percent away from the entry price.
     # 100% means: LONG stop at price 0 (never hit in practice),
     #             SHORT stop at 2x entry price (wide but real protection).
-    no_sl_loss_pct: "100"
+    no_sl_loss_pct: "70"
 
     # --- Risk-Free After First Target ---
     # When true: move the stop loss to the entry price (breakeven) as soon

@@ -34,6 +34,16 @@ _CLOSE_MARKERS = (
     "take profit now",
     "تیک پروفیت",
 )
+_CLOSE_ALL_MARKERS = (
+    "ببندید همه",
+    "ببند همه",
+    "همه سیگنال",
+    "همه پوزیشن",
+    "all signals",
+    "close all",
+    "close everything",
+    "close all positions",
+)
 
 
 def extract_close_fraction(text: str | None) -> Decimal | None:
@@ -63,6 +73,14 @@ def detect_close_instruction(text: str | None) -> bool:
         return False
     lowered = text.lower()
     return any(marker in lowered for marker in _CLOSE_MARKERS)
+
+
+def detect_close_all_instruction(text: str | None) -> bool:
+    """True when a follow-up clearly instructs closing all open signals."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _CLOSE_ALL_MARKERS)
 
 
 _TP_LIST_MARKERS = (

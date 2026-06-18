@@ -93,7 +93,11 @@ class RegexSignalParser:
             return SignalAction.IGNORE
         if "cancel" in lower or "\u0644\u063a\u0648" in lower:
             return SignalAction.CANCEL
-        if re.search(r"\bclose\b", lower) or "\u0628\u0633\u062a\u0646" in lower:
+        if (
+            re.search(r"\bclose\b", lower)
+            or "\u0628\u0633\u062a\u0646" in lower
+            or "\u0628\u0628\u0646\u062f" in lower
+        ):
             return SignalAction.CLOSE
         if any(
             token in lower

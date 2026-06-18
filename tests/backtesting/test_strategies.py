@@ -140,6 +140,30 @@ class TestGetTargetHitAction:
         assert action.close_fraction == Decimal("1") / Decimal("4")
 
 
+class TestSyntheticTakeProfits:
+    def test_long_synthetic_targets_use_r_multiples(self):
+        strategy = DefaultRiskManagedStrategy(
+            synthetic_tp_r_multiples=[Decimal("1"), Decimal("2"), Decimal("3")]
+        )
+        targets = strategy.get_synthetic_take_profits(
+            side=TradeSide.LONG,
+            entry_price=Decimal("100"),
+            stop_loss=Decimal("95"),
+        )
+        assert targets == [Decimal("105"), Decimal("110"), Decimal("115")]
+
+    def test_short_synthetic_targets_use_r_multiples(self):
+        strategy = DefaultRiskManagedStrategy(
+            synthetic_tp_r_multiples=[Decimal("1"), Decimal("2")]
+        )
+        targets = strategy.get_synthetic_take_profits(
+            side=TradeSide.SHORT,
+            entry_price=Decimal("100"),
+            stop_loss=Decimal("105"),
+        )
+        assert targets == [Decimal("95"), Decimal("90")]
+
+
 # ------------------------------------------------------------------ #
 # Protocol compliance                                                  #
 # ------------------------------------------------------------------ #

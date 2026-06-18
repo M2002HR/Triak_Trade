@@ -160,6 +160,59 @@ async def test_telethon_client_ensure_media_payload_skips_non_caption_media(
 
 
 @pytest.mark.asyncio
+async def test_telethon_client_ensure_media_payload_allows_captionless_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_API_ID=123,
+        TELEGRAM_API_HASH="hash",
+        TELEGRAM_MEDIA_DOWNLOAD_ENABLED=True,
+    )
+    client = TelethonTelegramClient(settings)
+
+    class SourceMessage:
+        pass
+
+    source = SourceMessage()
+    raw = RawTelegramMessage(
+        channel_id="c",
+        channel_username="u",
+        message_id=18,
+        text=None,
+        date=datetime.now(timezone.utc),
+        edited_at=None,
+        reply_to_msg_id=None,
+        raw_payload={
+            "has_media": True,
+            "caption_present": False,
+            "has_photo": True,
+            "mime_type": "image/jpeg",
+            "image_data_urls": [],
+        },
+    )
+    client._cache_message(raw, source)
+
+    class StubDownloader:
+        def is_connected(self) -> bool:
+            return True
+
+        async def download_media(self, message: object, file: object = bytes) -> bytes:
+            assert message is source
+            return b"fake-image-bytes"
+
+    async def _return_stub() -> StubDownloader:
+        return StubDownloader()
+
+    monkeypatch.setattr(client, "_ensure_client", _return_stub)
+
+    hydrated = await client.ensure_media_payload(raw, allow_captionless=True)
+
+    assert hydrated.raw_payload["media_downloaded"] is True
+    assert hydrated.raw_payload["image_data_urls"]
+
+
+@pytest.mark.asyncio
 async def test_telethon_client_ensure_media_payload_marks_download_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -38,7 +38,12 @@ class TrackingTelegramClient(FakeTelegramClient):
         super().__init__(*args, **kwargs)
         self.ensure_calls: list[int] = []
 
-    async def ensure_media_payload(self, message: RawTelegramMessage) -> RawTelegramMessage:
+    async def ensure_media_payload(
+        self,
+        message: RawTelegramMessage,
+        *,
+        allow_captionless: bool = False,
+    ) -> RawTelegramMessage:
         self.ensure_calls.append(message.message_id)
         payload = dict(message.raw_payload)
         payload["media_downloaded"] = True
