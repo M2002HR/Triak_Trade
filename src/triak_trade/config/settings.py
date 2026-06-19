@@ -122,6 +122,7 @@ class Settings(BaseSettings):
     DASHBOARD_STATUS_FILE: str = "runtime/dashboard/status.json"
     DASHBOARD_LOG_FILE: str = "runtime/dashboard/dashboard.log"
     DASHBOARD_AUTO_RELOAD: bool = False
+    ROOT_ENV_FILE: str = ".env.local"
     AUTO_MODE_ENABLED: bool = False
     AUTO_MODE_SCOPE: str = "demo_only"
     AUTO_MODE_REQUIRE_RISK_ENGINE: bool = True
@@ -138,6 +139,38 @@ class Settings(BaseSettings):
     AI_CLASSIFIER_TEXT_MODEL: str = "openai/gpt-oss-120b"
     AI_CLASSIFIER_VISION_PROVIDER: str = "gemini"
     AI_CLASSIFIER_VISION_MODEL: str = "gemini-3.1-flash-lite"
+    AI_CLASSIFIER_ENABLED: bool = False
+    AI_CLASSIFIER_MIN_CONFIDENCE: Decimal = Decimal("0.70")
+    AI_CLASSIFIER_USE_REGEX_FALLBACK: bool = False
+    AI_CLASSIFIER_STORE_PROMPT_TEXT: bool = False
+    AI_CLASSIFIER_STORE_RESPONSE_TEXT: bool = False
+    AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "short",
+            "long",
+            "buy",
+            "sell",
+            "entry",
+            "target",
+            "sl",
+            "tp",
+            "stop",
+            "leverage",
+            "market",
+            "limit",
+            "شورت",
+            "لانگ",
+            "خرید",
+            "فروش",
+            "ورود",
+            "تارگت",
+            "حد ضرر",
+            "استاپ",
+        ]
+    )
+    AI_CLASSIFIER_SKIP_KEYWORDS: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["analysis"]
+    )
     AI_GATEWAY_ENABLED: bool = False
     AI_GATEWAY_BASE_URL: str = "http://127.0.0.1:8090"
     AI_GATEWAY_TIMEOUT_SECONDS: int = 60
@@ -186,11 +219,7 @@ class Settings(BaseSettings):
         if isinstance(uag_token, SecretStr) and uag_token.get_secret_value():
             return uag_token
         return value
-    AI_CLASSIFIER_ENABLED: bool = False
-    AI_CLASSIFIER_MIN_CONFIDENCE: Decimal = Decimal("0.70")
-    AI_CLASSIFIER_USE_REGEX_FALLBACK: bool = False
-    AI_CLASSIFIER_STORE_PROMPT_TEXT: bool = False
-    AI_CLASSIFIER_STORE_RESPONSE_TEXT: bool = False
+
     AI_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
     TELEGRAM_MEDIA_DOWNLOAD_ENABLED: bool = True
     TELEGRAM_MEDIA_MAX_IMAGES: int = 1
@@ -198,6 +227,7 @@ class Settings(BaseSettings):
     BACKTEST_DEFAULT_INITIAL_BALANCE: Decimal = Decimal("100")
     BACKTEST_DEFAULT_RISK_PER_TRADE_PCT: Decimal = Decimal("3")
     BACKTEST_DEFAULT_INTERVAL: str = "1m"
+    BACKTEST_LIFECYCLE_REFRESH_INTERVAL: str = "5m"
     BACKTEST_DEFAULT_FILL_POLICY: str = "conservative"
     BACKTEST_MAX_MESSAGES: int = 5000
     BACKTEST_MAX_CANDLES: int = 200000
@@ -297,6 +327,22 @@ class Settings(BaseSettings):
             return []
         if isinstance(value, list):
             return [item.strip() for item in value if item.strip()]
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    @field_validator(
+        "AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS",
+        "AI_CLASSIFIER_SKIP_KEYWORDS",
+        mode="before",
+    )
+    @classmethod
+    def parse_ai_classifier_keyword_lists(
+        cls,
+        value: str | list[str] | None,
+    ) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [item.strip() for item in value if item and item.strip()]
         return [item.strip() for item in value.split(",") if item.strip()]
 
 

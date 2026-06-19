@@ -20,6 +20,7 @@ from triak_trade.backtesting.real_runner import (
     RealBacktestRunner,
     RealBacktestRunRequest,
 )
+from triak_trade.backtesting.strategies.registry import build_strategy_from_key
 from triak_trade.config.settings import Settings
 
 
@@ -43,6 +44,7 @@ class DashboardBacktestRun(BaseModel):
     max_messages: int
     initial_balance: Decimal = Decimal("100")
     risk_per_trade_pct: Decimal = Decimal("3")
+    strategy_key: str = "default_risk_managed"
     use_ai: bool
     send_log_channel: bool
     log_per_message: bool
@@ -185,6 +187,7 @@ class DashboardBacktestCoordinator:
         request: RealBacktestRunRequest,
         *,
         channel_input: str,
+        strategy_key: str = "default_risk_managed",
     ) -> DashboardBacktestRun:
         from_date, to_date = request.resolve_range()
         run = DashboardBacktestRun(
@@ -199,6 +202,7 @@ class DashboardBacktestCoordinator:
             max_messages=request.max_messages,
             initial_balance=request.initial_balance,
             risk_per_trade_pct=request.risk_per_trade_pct,
+            strategy_key=strategy_key,
             use_ai=request.use_ai,
             send_log_channel=request.send_log_channel,
             log_per_message=request.log_per_message,
@@ -269,7 +273,11 @@ class DashboardBacktestCoordinator:
             send_log_channel=previous.send_log_channel,
             log_per_message=previous.log_per_message,
         )
-        return self.start_run(request, channel_input=previous.channel_input)
+        return self.start_run(
+            request,
+            channel_input=previous.channel_input,
+            strategy_key=previous.strategy_key,
+        )
 
     def get_run(self, run_id: str) -> DashboardBacktestRun | None:
         return self.store.read(run_id)
@@ -278,10 +286,11 @@ class DashboardBacktestCoordinator:
         return self.store.list_runs(limit=limit)
 
     def _execute_run(self, run_id: str, request: RealBacktestRunRequest) -> None:
-        runner = self.runner_factory()
         run = self.store.read(run_id)
         if run is None:
             return
+        runner = self.runner_factory()
+        runner.strategy = build_strategy_from_key(run.strategy_key)
         if self._is_cancel_requested(run_id):
             self._mark_cancelled(run_id)
             return

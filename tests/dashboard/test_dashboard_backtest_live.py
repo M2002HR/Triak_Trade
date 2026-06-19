@@ -21,6 +21,7 @@ from triak_trade.dashboard.app import create_dashboard_app
 class FakeRunner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.strategy = None
 
     def readiness(self):
         class Readiness:
@@ -229,6 +230,7 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
             "to_date": "2026-06-04T00:00:00Z",
             "interval": "1m",
             "max_messages": 1000,
+            "strategy_key": "tp_trailing_risk_managed",
             "use_ai": False,
             "send_log_channel": True,
             "log_per_message": True,
@@ -251,6 +253,7 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
     assert loaded is not None
     assert loaded["status"] == "completed"
     assert loaded["channel_resolved"] == "https://t.me/Tofan_Trade"
+    assert loaded["strategy_key"] == "tp_trailing_risk_managed"
     assert loaded["messages"][0]["message_id"] == 501
     assert loaded["messages"][0]["classification"] == "new_signal"
     assert loaded["signals"][0]["signal_id"] == "sig_501"
@@ -413,6 +416,27 @@ def test_backtest_channel_api_removes_channels(tmp_path: Path, monkeypatch) -> N
     assert not any(
         item["channel_resolved"] == "https://t.me/Crypto_Etehad"
         for item in body["channels"]
+    )
+
+
+def test_backtest_channel_api_supports_query_token_auth(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+
+    saved = client.post(
+        "/api/backtests/channels?token=test-token",
+        json={"channel": "@Crypto_Etehad"},
+    )
+    assert saved.status_code == 201
+    assert saved.json()["saved"] is True
+
+    listed = client.get("/api/backtests/channels?token=test-token")
+    assert listed.status_code == 200
+    assert any(
+        item["channel_resolved"] == "https://t.me/Crypto_Etehad"
+        for item in listed.json()["channels"]
     )
 
 

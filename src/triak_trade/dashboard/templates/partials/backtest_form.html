@@ -138,6 +138,25 @@
       <span class="help-text">Used for compounding position sizing. Default: 3%.</span>
     </label>
 
+    <section class="panel subtle-panel span-2 strategy-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Strategy</p>
+          <h3>Choose Execution Strategy</h3>
+          <p class="subtle">Pick the strategy for this run and inspect its rules before you start the backtest.</p>
+        </div>
+      </div>
+      <div class="strategy-picker-grid">
+        <label class="field">
+          <span class="field-title">Backtest Strategy</span>
+          <select id="backtest-strategy-key" name="strategy_key"></select>
+          <span class="help-text">You can switch strategy per run without changing the global config file.</span>
+        </label>
+        <div id="backtest-strategy-summary" class="strategy-summary-card" aria-live="polite"></div>
+      </div>
+      <div id="backtest-strategy-parameters" class="strategy-parameter-grid" aria-live="polite"></div>
+    </section>
+
     <label class="toggle-card">
       <input
         id="backtest-use-ai"

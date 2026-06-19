@@ -27,6 +27,7 @@ def settings(tmp_path: Path) -> Settings:
         DASHBOARD_PID_FILE=str(runtime / "dashboard.pid"),
         DASHBOARD_STATUS_FILE=str(runtime / "status.json"),
         DASHBOARD_LOG_FILE=str(runtime / "dashboard.log"),
+        ROOT_ENV_FILE=str(tmp_path / ".env.local"),
     )
 
 
@@ -53,6 +54,57 @@ def test_settings_page_does_not_show_secrets(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "test-token" not in response.text
     assert "session-secret" not in response.text
+
+
+def test_ai_keyword_filters_persist_to_root_env_file(tmp_path: Path) -> None:
+    service = DashboardStateService(settings(tmp_path))
+
+    updated = service.set_ai_keyword_filters(
+        force_include_keywords=["Long", "ENTRY", "entry"],
+        skip_keywords=["Analysis", "#Analysis", "analysis"],
+    )
+
+    assert updated.force_include_keywords == ["Long", "ENTRY"]
+    assert updated.skip_keywords == ["Analysis", "#Analysis"]
+    env_text = (tmp_path / ".env.local").read_text(encoding="utf-8")
+    assert 'AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS="Long,ENTRY"' in env_text
+    assert 'AI_CLASSIFIER_SKIP_KEYWORDS="Analysis,#Analysis"' in env_text
+    assert service.settings.AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS == ["Long", "ENTRY"]
+    assert service.settings.AI_CLASSIFIER_SKIP_KEYWORDS == ["Analysis", "#Analysis"]
+
+
+def test_ai_keyword_filters_form_updates_settings_view(tmp_path: Path) -> None:
+    client = TestClient(create_dashboard_app(settings(tmp_path)))
+
+    response = client.post(
+        "/settings/ai-keyword-filters",
+        headers={"X-Triak-Admin-Token": "test-token"},
+        data={
+            "skip_keywords": "Analysis\n#Analysis",
+            "force_include_keywords": "Entry\nTarget",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/settings?tab=ai-keywords&saved=1"
+
+    page = client.get(response.headers["location"], headers={"X-Triak-Admin-Token": "test-token"})
+    assert page.status_code == 200
+    assert "AI keyword filters were saved" in page.text
+    assert "Analysis" in page.text
+    assert "Entry" in page.text
+
+
+def test_backtest_lifecycle_refresh_interval_persists_to_root_env_file(tmp_path: Path) -> None:
+    service = DashboardStateService(settings(tmp_path))
+
+    updated = service.set_backtest_lifecycle_refresh_interval("15m")
+
+    assert updated.refresh_interval == "15m"
+    env_text = (tmp_path / ".env.local").read_text(encoding="utf-8")
+    assert 'BACKTEST_LIFECYCLE_REFRESH_INTERVAL="15m"' in env_text
+    assert service.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL == "15m"
 
 
 def test_dashboard_runtime_duplicate_start_and_stop_safe(tmp_path: Path) -> None:

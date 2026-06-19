@@ -48,3 +48,23 @@ class SavedChannelEntry(BaseModel):
 
 class SavedChannelsState(BaseModel):
     channels: list[SavedChannelEntry] = Field(default_factory=list)
+
+
+class StrategyCatalogEntry(BaseModel):
+    key: str
+    name: str
+    class_name: str
+    active: bool = False
+    description: str
+    parameters: dict[str, object] = Field(default_factory=dict)
+
+
+class AIKeywordFilterConfig(BaseModel):
+    force_include_keywords: list[str] = Field(default_factory=list)
+    skip_keywords: list[str] = Field(default_factory=list)
+    config_path: str
+
+
+class BacktestLifecycleConfig(BaseModel):
+    refresh_interval: str
+    config_path: str

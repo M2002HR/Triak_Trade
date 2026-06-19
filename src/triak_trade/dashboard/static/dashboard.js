@@ -7,12 +7,13 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   const bootstrap = JSON.parse(bootstrapNode.textContent || "{}");
+  const initialRecentRuns = Array.isArray(bootstrap.recent_runs) ? bootstrap.recent_runs : [];
   const state = {
     bootstrap,
     savedChannels: Array.isArray(bootstrap.saved_channels) ? bootstrap.saved_channels : [],
-    activeRunId: bootstrap.recent_runs?.[0]?.run_id || null,
-    activeRun: bootstrap.recent_runs?.[0] || null,
-    recentRuns: bootstrap.recent_runs || [],
+    activeRunId: initialRecentRuns.length ? initialRecentRuns[0].run_id : null,
+    activeRun: initialRecentRuns.length ? initialRecentRuns[0] : null,
+    recentRuns: initialRecentRuns,
     selectedMessageId: null,
     selectedSignalId: null,
     modalOpen: false,
@@ -23,6 +24,7 @@ document.documentElement.dataset.dashboardReady = "true";
     listTimer: null,
     ws: null,
     wsReady: false,
+    charts: new Map(),
   };
 
   const nodes = {
@@ -42,6 +44,9 @@ document.documentElement.dataset.dashboardReady = "true";
     maxMessages: document.getElementById("backtest-max-messages"),
     initialBalance: document.getElementById("backtest-initial-balance"),
     riskPerTradePct: document.getElementById("backtest-risk-per-trade-pct"),
+    strategyKey: document.getElementById("backtest-strategy-key"),
+    strategySummary: document.getElementById("backtest-strategy-summary"),
+    strategyParameters: document.getElementById("backtest-strategy-parameters"),
     useAi: document.getElementById("backtest-use-ai"),
     sendLogChannel: document.getElementById("backtest-send-log-channel"),
     logPerMessage: document.getElementById("backtest-log-per-message"),
@@ -83,6 +88,7 @@ document.documentElement.dataset.dashboardReady = "true";
   bindEvents();
   renderReadiness(bootstrap.readiness || {});
   renderSavedChannels();
+  renderStrategies();
   renderRecentRuns(state.recentRuns);
   if (state.activeRun) {
     renderRun(state.activeRun);
@@ -97,6 +103,9 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.maxMessages.value = String(bootstrap.default_max_messages || 1000);
     nodes.initialBalance.value = String(bootstrap.default_initial_balance || "100");
     nodes.riskPerTradePct.value = String(bootstrap.default_risk_per_trade_pct || "3");
+    if (nodes.strategyKey) {
+      nodes.strategyKey.value = bootstrap.default_strategy_key || "default_risk_managed";
+    }
     nodes.useAi.checked = Boolean(bootstrap.default_use_ai);
     nodes.sendLogChannel.checked = Boolean(bootstrap.default_send_log_channel);
     nodes.logPerMessage.checked = Boolean(bootstrap.default_log_per_message);
@@ -143,11 +152,24 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   function bindEvents() {
-    nodes.form?.addEventListener("submit", handleSubmit);
-    nodes.saveChannelButton?.addEventListener("click", saveCurrentChannel);
-    nodes.applySavedChannelButton?.addEventListener("click", applySelectedSavedChannel);
-    nodes.removeChannelButton?.addEventListener("click", removeSelectedSavedChannel);
-    nodes.savedChannelSelect?.addEventListener("change", () => setSavedChannelStatus("", ""));
+    if (nodes.form) {
+      nodes.form.addEventListener("submit", handleSubmit);
+    }
+    if (nodes.saveChannelButton) {
+      nodes.saveChannelButton.addEventListener("click", saveCurrentChannel);
+    }
+    if (nodes.applySavedChannelButton) {
+      nodes.applySavedChannelButton.addEventListener("click", applySelectedSavedChannel);
+    }
+    if (nodes.removeChannelButton) {
+      nodes.removeChannelButton.addEventListener("click", removeSelectedSavedChannel);
+    }
+    if (nodes.savedChannelSelect) {
+      nodes.savedChannelSelect.addEventListener("change", () => setSavedChannelStatus("", ""));
+    }
+    if (nodes.strategyKey) {
+      nodes.strategyKey.addEventListener("change", renderSelectedStrategy);
+    }
     document.querySelectorAll("[data-preset-hours]").forEach((button) => {
       button.addEventListener("click", () => {
         const hours = Number(button.getAttribute("data-preset-hours") || "24");
@@ -156,27 +178,34 @@ document.documentElement.dataset.dashboardReady = "true";
         applyDateRange(start.toISOString(), end.toISOString());
       });
     });
-    nodes.messageFilterBar?.addEventListener("click", (event) => {
-      const target = event.target instanceof Element ? event.target.closest("[data-message-filter]") : null;
-      if (!target) {
-        return;
-      }
-      state.messageFilter = target.getAttribute("data-message-filter") || "all";
-      renderFilterBar();
-      renderMessages(state.activeRun?.messages || []);
-    });
-    nodes.messageStream?.addEventListener("click", (event) => {
-      const target = event.target instanceof Element ? event.target.closest("[data-message-id]") : null;
-      if (!target) {
-        return;
-      }
-      const messageId = Number(target.getAttribute("data-message-id") || "0");
-      state.selectedMessageId = messageId;
-      const trace = state.activeRun?.messages?.find((item) => item.message_id === messageId);
-      if (trace) {
-        openModal(trace);
-      }
-    });
+    if (nodes.messageFilterBar) {
+      nodes.messageFilterBar.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-message-filter]") : null;
+        if (!target) {
+          return;
+        }
+        state.messageFilter = target.getAttribute("data-message-filter") || "all";
+        renderFilterBar();
+        renderMessages((state.activeRun && state.activeRun.messages) || []);
+      });
+    }
+    if (nodes.messageStream) {
+      nodes.messageStream.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-message-id]") : null;
+        if (!target) {
+          return;
+        }
+        const messageId = Number(target.getAttribute("data-message-id") || "0");
+        state.selectedMessageId = messageId;
+        const traces = state.activeRun && Array.isArray(state.activeRun.messages)
+          ? state.activeRun.messages
+          : [];
+        const trace = traces.find((item) => item.message_id === messageId);
+        if (trace) {
+          openModal(trace);
+        }
+      });
+    }
     document.addEventListener("click", (event) => {
       const panelTarget = event.target instanceof Element ? event.target.closest("[data-open-panel-modal]") : null;
       if (panelTarget) {
@@ -234,9 +263,54 @@ document.documentElement.dataset.dashboardReady = "true";
     });
   }
 
+  function renderStrategies() {
+    if (!nodes.strategyKey) {
+      return;
+    }
+    const strategies = Array.isArray(bootstrap.available_strategies) ? bootstrap.available_strategies : [];
+    nodes.strategyKey.innerHTML = strategies
+      .map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.name)}</option>`)
+      .join("");
+    nodes.strategyKey.value = bootstrap.default_strategy_key || (strategies[0] && strategies[0].key) || "";
+    renderSelectedStrategy();
+  }
+
+  function renderSelectedStrategy() {
+    const strategies = Array.isArray(bootstrap.available_strategies) ? bootstrap.available_strategies : [];
+    const selectedKey = nodes.strategyKey ? nodes.strategyKey.value : "";
+    const selected = strategies.find((item) => item.key === selectedKey) || strategies[0];
+    if (!selected) {
+      if (nodes.strategySummary) {
+        nodes.strategySummary.textContent = "No strategy selected.";
+      }
+      if (nodes.strategyParameters) {
+        nodes.strategyParameters.innerHTML = "";
+      }
+      return;
+    }
+    if (nodes.strategySummary) {
+      nodes.strategySummary.innerHTML = `
+        <strong>${escapeHtml(selected.name || selected.key)}</strong>
+        <p>${escapeHtml(selected.description || "")}</p>
+        <small>Class: ${escapeHtml(selected.class_name || "")}</small>
+      `;
+    }
+    if (nodes.strategyParameters) {
+      const parameters = selected.parameters || {};
+      nodes.strategyParameters.innerHTML = Object.entries(parameters)
+        .map(([key, value]) => `
+          <div class="strategy-parameter-card">
+            <span>${escapeHtml(formatStrategyKey(key))}</span>
+            <strong>${escapeHtml(Array.isArray(value) ? value.join(", ") : String(value))}</strong>
+          </div>
+        `)
+        .join("");
+    }
+  }
+
   async function saveCurrentChannel() {
-    const saveFieldChannel = nodes.saveChannelInput?.value.trim() || "";
-    const formChannel = nodes.channel?.value.trim() || "";
+    const saveFieldChannel = nodes.saveChannelInput ? nodes.saveChannelInput.value.trim() : "";
+    const formChannel = nodes.channel ? nodes.channel.value.trim() : "";
     const channel = saveFieldChannel || formChannel;
     if (!channel) {
       setSavedChannelStatus("Enter a Telegram channel in the save field first.", "error");
@@ -244,7 +318,7 @@ document.documentElement.dataset.dashboardReady = "true";
     }
     setSavedChannelStatus("Saving channel...", "working");
     try {
-      const response = await fetch("/api/backtests/channels", {
+      const response = await fetch(withAuthPath("/api/backtests/channels"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ channel }),
@@ -278,7 +352,7 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   function applySelectedSavedChannel() {
-    const selected = nodes.savedChannelSelect?.value;
+    const selected = nodes.savedChannelSelect ? nodes.savedChannelSelect.value : "";
     if (!selected) {
       setSavedChannelStatus("Choose a saved channel to load first.", "error");
       return;
@@ -292,14 +366,14 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   async function removeSelectedSavedChannel() {
-    const selected = nodes.savedChannelSelect?.value;
+    const selected = nodes.savedChannelSelect ? nodes.savedChannelSelect.value : "";
     if (!selected) {
       setSavedChannelStatus("Choose a saved channel to remove first.", "error");
       return;
     }
     setSavedChannelStatus("Removing channel...", "working");
     try {
-      const response = await fetch("/api/backtests/channels", {
+      const response = await fetch(withAuthPath("/api/backtests/channels"), {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ channel: selected }),
@@ -327,7 +401,10 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   function renderFilterBar() {
-    nodes.messageFilterBar?.querySelectorAll("[data-message-filter]").forEach((button) => {
+    if (!nodes.messageFilterBar) {
+      return;
+    }
+    nodes.messageFilterBar.querySelectorAll("[data-message-filter]").forEach((button) => {
       const active = button.getAttribute("data-message-filter") === state.messageFilter;
       button.classList.toggle("active", active);
     });
@@ -342,10 +419,16 @@ document.documentElement.dataset.dashboardReady = "true";
       nodes.panelModalBody.innerHTML = buildRecentRunsMarkup(state.recentRuns, true);
     } else if (kind === "signals") {
       nodes.panelModalTitle.textContent = "Active & Inactive Signals";
-      nodes.panelModalBody.innerHTML = buildSignalsMarkup(state.activeRun?.signals || [], true);
+      nodes.panelModalBody.innerHTML = buildSignalsMarkup(
+        (state.activeRun && state.activeRun.signals) || [],
+        true,
+      );
     } else {
       nodes.panelModalTitle.textContent = "Run Feed";
-      nodes.panelModalBody.innerHTML = buildEventFeedMarkup(state.activeRun?.events || [], true);
+      nodes.panelModalBody.innerHTML = buildEventFeedMarkup(
+        (state.activeRun && state.activeRun.events) || [],
+        true,
+      );
     }
     syncBodyModalState();
   }
@@ -378,7 +461,7 @@ document.documentElement.dataset.dashboardReady = "true";
     setFormStatus("Starting real backtest worker...", "working");
     nodes.startButton.disabled = true;
     try {
-      const response = await fetch("/api/backtests/start", {
+      const response = await fetch(withAuthPath("/api/backtests/start"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -438,6 +521,9 @@ document.documentElement.dataset.dashboardReady = "true";
       max_messages: Number(nodes.maxMessages.value || "1000"),
       initial_balance: nodes.initialBalance.value.trim(),
       risk_per_trade_pct: nodes.riskPerTradePct.value.trim(),
+      strategy_key: (nodes.strategyKey ? nodes.strategyKey.value : "")
+        || bootstrap.default_strategy_key
+        || "default_risk_managed",
       use_ai: nodes.useAi.checked,
       send_log_channel: nodes.sendLogChannel.checked,
       log_per_message: nodes.logPerMessage.checked,
@@ -457,7 +543,9 @@ document.documentElement.dataset.dashboardReady = "true";
       return;
     }
     try {
-      const response = await fetch(`/api/backtests/runs/${state.activeRunId}`);
+      const response = await fetch(
+        withAuthPath(`/api/backtests/runs/${encodeURIComponent(state.activeRunId)}`),
+      );
       if (!response.ok) {
         return;
       }
@@ -479,7 +567,7 @@ document.documentElement.dataset.dashboardReady = "true";
       window.clearTimeout(state.listTimer);
     }
     try {
-      const response = await fetch("/api/backtests/runs?limit=8");
+      const response = await fetch(withAuthPath("/api/backtests/runs?limit=8"));
       if (response.ok) {
       const data = await response.json();
         state.recentRuns = data.runs || [];
@@ -528,13 +616,15 @@ document.documentElement.dataset.dashboardReady = "true";
     renderSignals(run.signals || []);
     renderRecentRuns(state.recentRuns);
     if (state.modalOpen && state.selectedMessageId) {
-      const trace = run.messages?.find((item) => item.message_id === state.selectedMessageId);
+      const runMessages = Array.isArray(run.messages) ? run.messages : [];
+      const trace = runMessages.find((item) => item.message_id === state.selectedMessageId);
       if (trace) {
         openModal(trace);
       }
     }
     if (state.panelModalOpen && state.activePanelModal === "signal-detail" && state.selectedSignalId) {
-      const signal = run.signals?.find((item) => item.signal_id === state.selectedSignalId);
+      const runSignals = Array.isArray(run.signals) ? run.signals : [];
+      const signal = runSignals.find((item) => item.signal_id === state.selectedSignalId);
       if (signal) {
         nodes.panelModalTitle.textContent = `${signal.symbol || "Signal"} Lifecycle`;
         nodes.panelModalBody.innerHTML = buildSignalDetailMarkup(signal);
@@ -548,13 +638,15 @@ document.documentElement.dataset.dashboardReady = "true";
     const startMessageSuffix = run.start_message_id
       ? ` • from message ${run.start_message_id}`
       : "";
-    nodes.runSubtitle.textContent = `${formatDate(run.from_date)} → ${formatDate(run.to_date)}${startMessageSuffix}`;
+    const strategySuffix = run.strategy_key ? ` • strategy ${run.strategy_key}` : "";
+    nodes.runSubtitle.textContent = `${formatDate(run.from_date)} → ${formatDate(run.to_date)}${startMessageSuffix}${strategySuffix}`;
     nodes.runPhasePill.textContent = run.current_phase_label;
     nodes.runPhasePill.className = `phase-pill phase-${run.status}`;
     renderRunActions(run);
     nodes.currentPhaseLabel.textContent = run.current_phase_label;
     nodes.currentPhaseSummary.textContent = run.current_phase_summary || "No summary yet.";
-    const currentTrace = run.messages?.find((item) => item.message_id === run.current_message_id);
+    const runMessages = Array.isArray(run.messages) ? run.messages : [];
+    const currentTrace = runMessages.find((item) => item.message_id === run.current_message_id);
     nodes.currentMessageLabel.textContent = currentTrace ? `Message ${currentTrace.message_id}` : "None";
     nodes.currentMessageSummary.textContent = currentTrace
       ? `${currentTrace.current_stage} • ${currentTrace.result_summary || currentTrace.preview_text || "Processing"}`
@@ -602,7 +694,7 @@ document.documentElement.dataset.dashboardReady = "true";
     const latest = events[events.length - 1];
     nodes.eventFeed.innerHTML = `
       <div class="preview-stack">
-        <strong>${escapeHtml(latest.phase.replaceAll("_", " "))}</strong>
+        <strong>${escapeHtml(replaceUnderscores(latest.phase))}</strong>
         <span>${escapeHtml(latest.summary)}</span>
         <small>${events.length} updates captured</small>
       </div>
@@ -626,7 +718,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.messageStream.innerHTML = messages
       .filter(matchesMessageFilter)
       .map((trace) => {
-        const active = state.activeRun?.current_message_id === trace.message_id;
+        const active = Boolean(state.activeRun && state.activeRun.current_message_id === trace.message_id);
         return `
           <button type="button" class="message-card ${active ? "active" : ""}" data-message-id="${escapeHtml(String(trace.message_id))}">
             <div class="message-card-top">
@@ -810,7 +902,10 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   function openSignalModal(signalId) {
-    const signal = state.activeRun?.signals?.find((item) => item.signal_id === signalId);
+    const signals = state.activeRun && Array.isArray(state.activeRun.signals)
+      ? state.activeRun.signals
+      : [];
+    const signal = signals.find((item) => item.signal_id === signalId);
     if (!signal) {
       return;
     }
@@ -820,6 +915,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.panelModal.hidden = false;
     nodes.panelModalTitle.textContent = `${signal.symbol || "Signal"} Lifecycle`;
     nodes.panelModalBody.innerHTML = buildSignalDetailMarkup(signal);
+    renderSignalLifecycleChart(signal);
     syncBodyModalState();
   }
 
@@ -853,6 +949,15 @@ document.documentElement.dataset.dashboardReady = "true";
           ${detailMetric("Realized PnL", signal.realized_pnl ?? "0", pnlClassName(signal.realized_pnl))}
           ${detailMetric("Unrealized PnL", signal.unrealized_pnl ?? "0", pnlClassName(signal.unrealized_pnl))}
         </div>
+        <section class="signal-detail-section">
+          <h3>Price Lifecycle Chart</h3>
+          <div class="signal-chart-meta">
+            <span>Time: Tehran</span>
+            <span>Candles: 5m</span>
+            <span>Last refresh: ${formatTehranDate(signal.last_checkpoint_at_tehran || signal.last_checkpoint_at)}</span>
+          </div>
+          <div id="signal-lifecycle-chart" class="signal-lifecycle-chart"></div>
+        </section>
         <section class="signal-detail-section">
           <h3>Take Profits</h3>
           <div class="target-pill-row">
@@ -896,7 +1001,11 @@ document.documentElement.dataset.dashboardReady = "true";
 
   function buildLifecycleMarkup(signal) {
     const lifecycle = Array.isArray(signal.lifecycle) ? signal.lifecycle : [];
-    const started = [`created_at=${signal.entry_time_tehran || signal.entry_time}`];
+    const started = [{
+      label: "Signal created",
+      detail: `created_at=${signal.entry_time_tehran || signal.entry_time}`,
+      timestamp_tehran: signal.entry_time_tehran || signal.entry_time,
+    }];
     const items = [...started, ...lifecycle];
     if (!items.length) {
       return '<div class="empty-state-box">No lifecycle events yet.</div>';
@@ -907,12 +1016,106 @@ document.documentElement.dataset.dashboardReady = "true";
           .map((item, index) => `
             <article class="lifecycle-item ${index === items.length - 1 ? "current" : ""}">
               <span>${index + 1}</span>
-              <p>${escapeHtml(String(item))}</p>
+              <div>
+                <strong>${escapeHtml(String(item.label || "Lifecycle update"))}</strong>
+                <p>${escapeHtml(String(item.detail || item))}</p>
+                <small>${escapeHtml(formatTehranDate(item.timestamp_tehran || item.timestamp || signal.entry_time_tehran || signal.entry_time))}</small>
+              </div>
             </article>
           `)
           .join("")}
       </div>
     `;
+  }
+
+  function ensureChart(id) {
+    const el = document.getElementById(id);
+    if (!el || typeof echarts === "undefined") {
+      return null;
+    }
+    const existing = state.charts.get(id);
+    if (existing) {
+      return existing;
+    }
+    const chart = echarts.init(el);
+    state.charts.set(id, chart);
+    return chart;
+  }
+
+  function renderSignalLifecycleChart(signal) {
+    const chart = ensureChart("signal-lifecycle-chart");
+    if (!chart) {
+      return;
+    }
+    const chartData = signal.chart || {};
+    const candles = Array.isArray(chartData.candles) ? chartData.candles : [];
+    const stopLossHistory = Array.isArray(chartData.stop_loss_history) ? chartData.stop_loss_history : [];
+    const takeProfitHistory = Array.isArray(chartData.take_profit_history) ? chartData.take_profit_history : [];
+    if (!candles.length) {
+      chart.clear();
+      return;
+    }
+    const xAxis = candles.map((item) => formatTehranDate(item.timestamp_tehran));
+    const series = [
+      {
+        name: "Price",
+        type: "candlestick",
+        data: candles.map((item) => [
+          Number(item.open),
+          Number(item.close),
+          Number(item.low),
+          Number(item.high),
+        ]),
+        itemStyle: {
+          color: "#0e7c66",
+          color0: "#d14343",
+          borderColor: "#0e7c66",
+          borderColor0: "#d14343",
+        },
+      },
+      ...buildLevelHistorySeries(stopLossHistory, xAxis, "#d14343", "dashed"),
+      ...buildLevelHistorySeries(takeProfitHistory, xAxis, "#b7791f", "solid"),
+    ];
+    chart.setOption(
+      {
+        animation: false,
+        grid: { left: 56, right: 24, top: 30, bottom: 64 },
+        legend: { top: 0 },
+        tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
+        xAxis: {
+          type: "category",
+          data: xAxis,
+          axisLabel: { rotate: 25, color: "#39524b" },
+        },
+        yAxis: {
+          scale: true,
+          axisLabel: { color: "#39524b" },
+        },
+        dataZoom: [{ type: "inside" }, { type: "slider", height: 24, bottom: 12 }],
+        series,
+      },
+      { notMerge: true, lazyUpdate: true },
+    );
+  }
+
+  function buildLevelHistorySeries(history, xAxis, color, styleType) {
+    return history.map((item) => {
+      const start = formatTehranDate(item.started_at_tehran || item.started_at);
+      const end = item.ended_at_tehran || item.ended_at
+        ? formatTehranDate(item.ended_at_tehran || item.ended_at)
+        : xAxis[xAxis.length - 1];
+      return {
+        name: `${item.label} ${item.value}`,
+        type: "line",
+        symbol: "none",
+        lineStyle: {
+          color,
+          type: styleType,
+          width: item.ended_at ? 2 : 3,
+        },
+        data: xAxis.map((label) => (label >= start && label <= end ? Number(item.value) : null)),
+      };
+    });
   }
 
   function upsertRun(run) {
@@ -947,7 +1150,7 @@ document.documentElement.dataset.dashboardReady = "true";
     }
     setFormStatus("Requesting backtest stop...", "working");
     try {
-      const response = await fetch(`/api/backtests/runs/${encodeURIComponent(runId)}/stop`, {
+      const response = await fetch(withAuthPath(`/api/backtests/runs/${encodeURIComponent(runId)}/stop`), {
         method: "POST",
       });
       const data = await response.json();
@@ -980,7 +1183,7 @@ document.documentElement.dataset.dashboardReady = "true";
     }
     setFormStatus("Starting rerun from saved backtest parameters...", "working");
     try {
-      const response = await fetch(`/api/backtests/runs/${encodeURIComponent(runId)}/rerun`, {
+      const response = await fetch(withAuthPath(`/api/backtests/runs/${encodeURIComponent(runId)}/rerun`), {
         method: "POST",
       });
       const data = await response.json();
@@ -1008,7 +1211,7 @@ document.documentElement.dataset.dashboardReady = "true";
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws/backtests`;
+    const wsUrl = `${protocol}//${window.location.host}${withAuthPath("/ws/backtests")}`;
     try {
       state.ws = new WebSocket(wsUrl);
     } catch (_error) {
@@ -1143,11 +1346,11 @@ document.documentElement.dataset.dashboardReady = "true";
 
   function escapeHtml(value) {
     return String(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#39;");
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function matchesMessageFilter(trace) {
@@ -1184,7 +1387,7 @@ document.documentElement.dataset.dashboardReady = "true";
           .map((event) => `
             <article class="event-item event-${escapeHtml(event.status)}">
               <div class="event-line">
-                <strong>${escapeHtml(event.phase.replaceAll("_", " "))}</strong>
+                <strong>${escapeHtml(replaceUnderscores(event.phase))}</strong>
                 <span>${formatDate(event.at)}</span>
               </div>
               <p>${escapeHtml(event.summary)}</p>
@@ -1208,6 +1411,7 @@ document.documentElement.dataset.dashboardReady = "true";
               <button type="button" class="recent-run-select" data-run-id="${escapeHtml(run.run_id)}">
                 <strong>${escapeHtml(run.channel_input || run.channel_resolved)}</strong>
                 <span>${escapeHtml(run.current_phase_label || run.current_phase || run.status)}</span>
+                <small>${escapeHtml(run.strategy_key || "default_risk_managed")}</small>
                 <small>${formatDate(run.created_at)}</small>
               </button>
               <div class="recent-run-actions">
@@ -1223,5 +1427,32 @@ document.documentElement.dataset.dashboardReady = "true";
           .join("")}
       </div>
     `;
+  }
+
+  function formatStrategyKey(value) {
+    return String(value || "")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  function replaceUnderscores(value) {
+    return String(value || "").replace(/_/g, " ");
+  }
+
+  function getAuthToken() {
+    const search = new URLSearchParams(window.location.search || "");
+    return search.get("token") || "";
+  }
+
+  function withAuthPath(path) {
+    const token = getAuthToken();
+    if (!token) {
+      return path;
+    }
+    const url = new URL(path, window.location.origin);
+    if (!url.searchParams.get("token")) {
+      url.searchParams.set("token", token);
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
   }
 })();

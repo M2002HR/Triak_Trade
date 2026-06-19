@@ -14,6 +14,10 @@ from triak_trade.backtesting import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestRequest
 from triak_trade.backtesting.report import extract_channel_score, report_to_json
+from triak_trade.backtesting.strategies.registry import (
+    build_strategy_from_key,
+    list_available_strategies,
+)
 from triak_trade.config.settings import Settings
 from triak_trade.core.time import parse_user_datetime_to_utc
 from triak_trade.dashboard.backtest_runtime import (
@@ -21,11 +25,15 @@ from triak_trade.dashboard.backtest_runtime import (
     normalize_channel_reference,
     parse_telegram_message_link,
 )
+from triak_trade.dashboard.env_config import RootEnvConfigEditor
 from triak_trade.dashboard.schemas import (
+    AIKeywordFilterConfig,
     AutoModeState,
+    BacktestLifecycleConfig,
     KillSwitchState,
     SavedChannelEntry,
     SavedChannelsState,
+    StrategyCatalogEntry,
     utc_now,
 )
 from triak_trade.domain.enums import BacktestFillPolicy
@@ -36,9 +44,15 @@ class DashboardStateService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.state_dir = Path(settings.DASHBOARD_RUNTIME_DIR) / "state"
+        configured_root_env = Path(settings.ROOT_ENV_FILE)
+        if configured_root_env.is_absolute():
+            self.root_env_file = configured_root_env
+        else:
+            self.root_env_file = Path(__file__).resolve().parents[3] / configured_root_env
         self.auto_mode_file = self.state_dir / "auto_mode.json"
         self.kill_switch_file = self.state_dir / "kill_switch.json"
         self.saved_channels_file = self.state_dir / "saved_channels.json"
+        self.root_env_editor = RootEnvConfigEditor(self.root_env_file)
 
     def get_auto_mode(self) -> AutoModeState:
         if self.auto_mode_file.exists():
@@ -143,11 +157,83 @@ class DashboardStateService:
         self._write(self.saved_channels_file, updated.model_dump(mode="json"))
         return updated
 
+    def get_ai_keyword_filters(self) -> AIKeywordFilterConfig:
+        return AIKeywordFilterConfig(
+            force_include_keywords=self._normalize_keywords(
+                self.settings.AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS
+            ),
+            skip_keywords=self._normalize_keywords(
+                self.settings.AI_CLASSIFIER_SKIP_KEYWORDS
+            ),
+            config_path=str(self.root_env_file),
+        )
+
+    def set_ai_keyword_filters(
+        self,
+        *,
+        force_include_keywords: list[str],
+        skip_keywords: list[str],
+    ) -> AIKeywordFilterConfig:
+        normalized_force = self._normalize_keywords(force_include_keywords)
+        normalized_skip = self._normalize_keywords(skip_keywords)
+        self.root_env_editor.update_values(
+            {
+                "AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS": ",".join(normalized_force),
+                "AI_CLASSIFIER_SKIP_KEYWORDS": ",".join(normalized_skip),
+            }
+        )
+        self.settings.AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS = normalized_force
+        self.settings.AI_CLASSIFIER_SKIP_KEYWORDS = normalized_skip
+        return self.get_ai_keyword_filters()
+
+    def get_backtest_lifecycle_config(self) -> BacktestLifecycleConfig:
+        return BacktestLifecycleConfig(
+            refresh_interval=self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL,
+            config_path=str(self.root_env_file),
+        )
+
+    def set_backtest_lifecycle_refresh_interval(
+        self,
+        refresh_interval: str,
+    ) -> BacktestLifecycleConfig:
+        interval = refresh_interval.strip().lower()
+        self.root_env_editor.update_values(
+            {"BACKTEST_LIFECYCLE_REFRESH_INTERVAL": interval}
+        )
+        self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL = interval
+        return self.get_backtest_lifecycle_config()
+
     @staticmethod
     def _channel_label(channel_reference: str) -> str:
         if channel_reference.startswith("https://t.me/"):
             return f"@{channel_reference.rsplit('/', 1)[-1]}"
         return channel_reference
+
+    @staticmethod
+    def parse_keyword_text(value: str) -> list[str]:
+        if not value.strip():
+            return []
+        pieces = [
+            item.strip()
+            for chunk in value.splitlines()
+            for item in chunk.split(",")
+        ]
+        return [item for item in pieces if item]
+
+    @staticmethod
+    def _normalize_keywords(values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            stripped = item.strip()
+            if not stripped:
+                continue
+            folded = stripped.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            normalized.append(stripped)
+        return normalized
 
     def _write(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,9 +301,18 @@ class DashboardService:
         now = datetime.now(timezone.utc)
         recent_runs = [run.model_dump(mode="json") for run in self.backtests.list_runs(limit=8)]
         saved_channels = self.state.get_saved_channels()
+        strategies = [
+            StrategyCatalogEntry.model_validate(item).model_dump(mode="json")
+            for item in list_available_strategies()
+        ]
+        default_strategy_key = next(
+            (item["key"] for item in strategies if item.get("active")),
+            "default_risk_managed",
+        )
         return {
             "default_channel": self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
             "default_interval": self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
+            "default_lifecycle_refresh_interval": self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL,
             "default_max_messages": self.settings.REAL_BACKTEST_MAX_MESSAGES,
             "default_initial_balance": str(self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE),
             "default_risk_per_trade_pct": str(
@@ -230,6 +325,8 @@ class DashboardService:
             ),
             "default_send_log_channel": self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
             "default_log_per_message": True,
+            "default_strategy_key": default_strategy_key,
+            "available_strategies": strategies,
             "default_from_date": (now - timedelta(hours=24)).isoformat(),
             "default_to_date": now.isoformat(),
             "readiness": self.real_backtest_readiness(),
@@ -302,7 +399,15 @@ class DashboardService:
             ),
             log_per_message=bool(payload.get("log_per_message", True)),
         )
-        run = self.backtests.start_run(request, channel_input=channel_input)
+        strategy_key = str(
+            payload.get("strategy_key") or self.backtest_bootstrap()["default_strategy_key"]
+        )
+        build_strategy_from_key(strategy_key)
+        run = self.backtests.start_run(
+            request,
+            channel_input=channel_input,
+            strategy_key=strategy_key,
+        )
         return {
             "started": True,
             "blocked": False,
@@ -556,6 +661,7 @@ class DashboardService:
         session_secret = self.settings.DASHBOARD_SESSION_SECRET.get_secret_value()
         auto_mode = self.state.get_auto_mode().model_dump(mode="json")
         kill_switch = self.state.get_kill_switch().model_dump(mode="json")
+        ai_keyword_filters = self.state.get_ai_keyword_filters().model_dump(mode="json")
         return {
             "app_name": self.settings.APP_NAME,
             "app_env": self.settings.APP_ENV,
@@ -572,6 +678,10 @@ class DashboardService:
             "toobit_base_url": self.settings.TOOBIT_BASE_URL,
             "auto_mode": auto_mode,
             "kill_switch": kill_switch,
+            "ai_keyword_filters": ai_keyword_filters,
+            "backtest_lifecycle": self.state.get_backtest_lifecycle_config().model_dump(
+                mode="json"
+            ),
         }
 
     def _toobit_configured(self) -> bool:

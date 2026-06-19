@@ -264,14 +264,25 @@ def build_router(
         )
 
     @router.get("/settings", response_class=HTMLResponse)
-    async def settings_page(request: Request) -> Response:
+    async def settings_page(
+        request: Request,
+        tab: str = "controls",
+        saved: str = "",
+    ) -> Response:
         redirect = auth.redirect_if_needed(request)
         if redirect is not None:
             return redirect
         return templates.TemplateResponse(
             request,
             "settings.html",
-            context(request, {"settings_view": service.safe_settings()}),
+            context(
+                request,
+                {
+                    "settings_view": service.safe_settings(),
+                    "active_tab": tab,
+                    "settings_saved": saved == "1",
+                },
+            ),
         )
 
     @router.post("/settings/auto-mode")
@@ -301,6 +312,35 @@ def build_router(
             reason=form.get("reason", ""),
         )
         return RedirectResponse(url="/settings", status_code=303)
+
+    @router.post("/settings/ai-keyword-filters")
+    async def update_ai_keyword_filters(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        form = {key: str(value) for key, value in (await request.form()).items()}
+        force_include_keywords = service.state.parse_keyword_text(
+            form.get("force_include_keywords", "")
+        )
+        skip_keywords = service.state.parse_keyword_text(
+            form.get("skip_keywords", "")
+        )
+        service.state.set_ai_keyword_filters(
+            force_include_keywords=force_include_keywords,
+            skip_keywords=skip_keywords,
+        )
+        return RedirectResponse(url="/settings?tab=ai-keywords&saved=1", status_code=303)
+
+    @router.post("/settings/backtest-lifecycle")
+    async def update_backtest_lifecycle_settings(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        form = {key: str(value) for key, value in (await request.form()).items()}
+        service.state.set_backtest_lifecycle_refresh_interval(
+            form.get("refresh_interval", "")
+        )
+        return RedirectResponse(url="/settings?tab=controls&saved=1", status_code=303)
 
     @router.get("/status")
     async def status(request: Request) -> JSONResponse:

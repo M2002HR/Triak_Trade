@@ -24,8 +24,6 @@ _RAW_URL_RE = re.compile(r"https?://\S+")
 _MAX_RECENT_MESSAGES = 8
 _MAX_ACTIVE_SIGNALS = 8
 _MAX_CONTEXT_TEXT_CHARS = 700
-_ANALYSIS_MARKERS = ("analysis",)
-_EXPLICIT_ANALYSIS_LINE_RE = re.compile(r"^\s*#?\s*analysis\b[\s:.-]*$", re.IGNORECASE)
 
 
 class AIMessageClassifier(MessageClassifier):
@@ -42,75 +40,44 @@ class AIMessageClassifier(MessageClassifier):
         self.validator = ParsedSignalValidator()
         self.normalizer = MessageNormalizer()
         self.regex_parser = RegexSignalParser()
+        self.force_include_keywords = self._normalize_keywords(
+            settings.AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS
+        )
+        self.skip_keywords = self._normalize_keywords(settings.AI_CLASSIFIER_SKIP_KEYWORDS)
 
-    def _has_signal_indicators(self, text: str) -> bool:
+    def _has_force_include_keyword(self, text: str) -> bool:
         import sys
         if "pytest" in sys.modules or self.settings.APP_ENV == "test":
             return True
         if not text:
             return False
-        if re.search(r"\d", text):
+        if not self.force_include_keywords:
             return True
-        keywords = [
-            "short", "long", "buy", "sell", "entry", "target", "sl", "tp",
-            "stop", "loss", "take", "profit", "leverage", "lever", "spot",
-            "futures", "limit", "market", "call", "put", "zone", "position",
-            "margin", "risk", "free", "close", "update", "move", "cancel",
-            "trailing", "hit", "reached", "open", "opened",
-            "شورت", "لانگ", "خرید", "فروش", "ورود", "تارگت", "استاپ",
-            "حد سود", "حد ضرر", "لوریج", "اهرم", "اسپات", "فیوچرز", "پوزیشن",
-            "مارجین", "نقطه", "حدضرر", "حدسود", "سیگنال", "ریسک", "فری", "سیو",
-            "سود", "ببندید", "ببند", "بسته", "کنسل", "لغو", "بروزرسانی",
-            "تغییر", "آپدیت", "فعال", "شد", "خروج",
-        ]
-        text_lower = text.lower()
-        for kw in keywords:
-            if kw in text_lower:
-                return True
-        return False
+        lowered = text.casefold()
+        return any(keyword in lowered for keyword in self.force_include_keywords)
 
-    @staticmethod
-    def _is_analysis_only_text(text: str) -> bool:
-        if any(
-            _EXPLICIT_ANALYSIS_LINE_RE.match(line.strip())
-            for line in text.splitlines()
-            if line.strip()
-        ):
-            return True
-        lowered = text.lower()
-        if not any(marker in lowered for marker in _ANALYSIS_MARKERS):
-            return False
-        non_analysis_keywords = (
-            "entry",
-            "target",
-            "targets",
-            "tp",
-            "sl",
-            "stop",
-            "leverage",
-            "buy",
-            "sell",
-            "long",
-            "short",
-            "market",
-            "limit",
-            "ورود",
-            "تارگت",
-            "حد ضرر",
-            "استاپ",
-            "لانگ",
-            "شورت",
-            "خرید",
-            "فروش",
-        )
-        return not any(keyword in lowered for keyword in non_analysis_keywords)
+    def _matched_skip_keyword(self, text: str) -> str | None:
+        if not text or not self.skip_keywords:
+            return None
+        lowered = text.casefold()
+        for keyword in self.skip_keywords:
+            if keyword in lowered:
+                return keyword
+        return None
 
     def classify(self, message: RawTelegramMessage, context: ChannelContext) -> ClassifiedMessage:
         text = message.text or ""
-        if not self._has_signal_indicators(text):
-            return self._safe_ignored(message, "classification_skipped=no_signal_indicators")
-        if self._is_analysis_only_text(text):
-            return self._safe_ignored(message, "classification_skipped=analysis_message")
+        skip_keyword = self._matched_skip_keyword(text)
+        if skip_keyword is not None:
+            return self._safe_ignored(
+                message,
+                f"classification_skipped=skip_keyword:{skip_keyword}",
+            )
+        if not self._has_force_include_keyword(text):
+            return self._safe_ignored(
+                message,
+                "classification_skipped=missing_force_include_keyword",
+            )
 
         normalized = self.normalizer.normalize(message)
         ai_context = self._build_context(message, context)
@@ -272,7 +239,7 @@ class AIMessageClassifier(MessageClassifier):
             take_profits=[],
             leverage=None,
             confidence=Decimal("0.10"),
-            invalid_reason="ignored: no signal indicators",
+            invalid_reason="ignored by pre-ai filter",
             source_channel_id=message.channel_id,
             source_message_id=message.message_id,
             parser_version="ai-v1",
@@ -524,6 +491,21 @@ class AIMessageClassifier(MessageClassifier):
                     }
                 )
         return images
+
+    @staticmethod
+    def _normalize_keywords(values: list[str]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            stripped = item.strip()
+            if not stripped:
+                continue
+            folded = stripped.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            normalized.append(folded)
+        return tuple(normalized)
 
     @staticmethod
     def _map_action(result: AIClassificationResult) -> SignalAction:

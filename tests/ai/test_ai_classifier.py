@@ -120,7 +120,7 @@ def test_ai_classifier_skips_analysis_messages_before_ai_logic() -> None:
     )
     result = classifier.classify(_raw("Analysis\nXLM / 4H"), _context())
     assert result.parsed_signal.action is SignalAction.IGNORE
-    assert "classification_skipped=analysis_message" in result.debug_notes
+    assert "classification_skipped=skip_keyword:analysis" in result.debug_notes
 
 
 def test_ai_classifier_skips_hashtag_analysis_messages_before_ai_logic() -> None:
@@ -130,7 +130,43 @@ def test_ai_classifier_skips_hashtag_analysis_messages_before_ai_logic() -> None
     )
     result = classifier.classify(_raw("#Analysis\nBTC LONG update"), _context())
     assert result.parsed_signal.action is SignalAction.IGNORE
-    assert "classification_skipped=analysis_message" in result.debug_notes
+    assert "classification_skipped=skip_keyword:analysis" in result.debug_notes
+
+
+def test_ai_classifier_skip_keywords_are_case_insensitive_and_win_over_include() -> None:
+    classifier = AIMessageClassifier(
+        settings=Settings(
+            _env_file=None,
+            AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS=["entry", "long"],
+            AI_CLASSIFIER_SKIP_KEYWORDS=["AnALySis"],
+        ),
+        gateway_client=_client(_result_payload("NEW_SIGNAL", "open")),
+    )
+    result = classifier.classify(_raw("ENTRY setup\n#analysis"), _context())
+    assert result.parsed_signal.action is SignalAction.IGNORE
+    assert "classification_skipped=skip_keyword:analysis" in result.debug_notes
+
+
+def test_ai_classifier_requires_force_include_keyword_outside_test_bypass() -> None:
+    import sys
+
+    classifier = AIMessageClassifier(
+        settings=Settings(
+            _env_file=None,
+            APP_ENV="dev",
+            AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS=["entry", "target"],
+            AI_CLASSIFIER_SKIP_KEYWORDS=[],
+        ),
+        gateway_client=_client(_result_payload("NEW_SIGNAL", "open")),
+    )
+    pytest_module = sys.modules.pop("pytest", None)
+    try:
+        result = classifier.classify(_raw("general chat without trigger words"), _context())
+    finally:
+        if pytest_module is not None:
+            sys.modules["pytest"] = pytest_module
+    assert result.parsed_signal.action is SignalAction.IGNORE
+    assert "classification_skipped=missing_force_include_keyword" in result.debug_notes
 
 
 def test_ai_classifier_downgrades_inconsistent_new_signal_to_unknown() -> None:

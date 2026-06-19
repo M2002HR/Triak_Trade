@@ -1,6 +1,86 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Safe Settings</h1>
+<section class="hero">
+  <p class="eyebrow">Settings</p>
+  <h1>Safe Settings</h1>
+  <p class="subtle">
+    Manage runtime-safe dashboard controls and the pre-AI keyword gates that decide which messages
+    should be skipped before any AI classification starts.
+  </p>
+</section>
+
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Control Tabs</p>
+      <h2>Choose A Settings Area</h2>
+    </div>
+  </div>
+  <div class="filter-pill-row">
+    <a href="/settings?tab=controls" class="filter-pill {% if active_tab != 'ai-keywords' %}active{% endif %}">Runtime Controls</a>
+    <a href="/settings?tab=ai-keywords" class="filter-pill {% if active_tab == 'ai-keywords' %}active{% endif %}">AI Keyword Filters</a>
+  </div>
+</section>
+
+{% if active_tab == "ai-keywords" %}
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">AI Prefilter</p>
+      <h2>AI Keyword Filters</h2>
+      <p class="subtle">
+        These filters are checked before a message is sent to AI. Matching is case-insensitive.
+        Skip keywords always win. If a skip keyword is found, the message is ignored immediately.
+      </p>
+    </div>
+  </div>
+  {% if settings_saved %}
+  <div class="issue ok">AI keyword filters were saved and are active for the next runs.</div>
+  {% endif %}
+  <form method="post" action="/settings/ai-keyword-filters" class="grid-two">
+    <label class="field">
+      <span class="field-title">Skip Keywords</span>
+      <textarea
+        name="skip_keywords"
+        rows="12"
+        placeholder="analysis&#10;#analysis&#10;advertisement"
+      >{{ settings_view.ai_keyword_filters.skip_keywords | join('\n') }}</textarea>
+      <span class="help-text">
+        If any of these words appear in the message, it is skipped before AI.
+      </span>
+    </label>
+    <label class="field">
+      <span class="field-title">Force Include Keywords</span>
+      <textarea
+        name="force_include_keywords"
+        rows="12"
+        placeholder="long&#10;short&#10;entry&#10;target"
+      >{{ settings_view.ai_keyword_filters.force_include_keywords | join('\n') }}</textarea>
+      <span class="help-text">
+        A message enters AI only if at least one of these words appears and no skip keyword matched.
+      </span>
+    </label>
+    <div class="panel subtle-panel">
+      <strong>Config File</strong>
+      <p class="subtle">{{ settings_view.ai_keyword_filters.config_path }}</p>
+      <p class="help-text">
+        The panel updates the root runtime config so the rules remain stable across restarts.
+      </p>
+    </div>
+    <div class="panel subtle-panel">
+      <strong>Rule Order</strong>
+      <p class="subtle">1. Skip keyword match</p>
+      <p class="subtle">2. Force-include keyword match</p>
+      <p class="help-text">
+        If force-include is empty, everything not skipped can pass this gate.
+      </p>
+    </div>
+    <div class="action-row span-2">
+      <button type="submit">Save AI Keyword Filters</button>
+    </div>
+  </form>
+</section>
+{% else %}
 <section class="grid-two">
   <form method="post" action="/settings/auto-mode" class="panel">
     <h2>Auto Mode</h2>
@@ -17,5 +97,42 @@
     <button>Update Kill Switch</button>
   </form>
 </section>
+
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Backtest Lifecycle</p>
+      <h2>Signal Refresh Cadence</h2>
+      <p class="subtle">
+        Controls how often signal lifecycle state and chart checkpoints are refreshed during replay.
+        This uses backtest time, not real waiting time.
+      </p>
+    </div>
+  </div>
+  {% if settings_saved %}
+  <div class="issue ok">Backtest lifecycle settings were saved for the next runs.</div>
+  {% endif %}
+  <form method="post" action="/settings/backtest-lifecycle" class="grid-two">
+    <label class="field">
+      <span class="field-title">Refresh Interval</span>
+      <select name="refresh_interval">
+        {% for interval in ["1m", "3m", "5m", "15m", "30m", "1h"] %}
+        <option value="{{ interval }}" {% if settings_view.backtest_lifecycle.refresh_interval == interval %}selected{% endif %}>{{ interval }}</option>
+        {% endfor %}
+      </select>
+      <span class="help-text">Default is 5m. Every checkpoint updates live PnL, lifecycle state, and chart history in virtual backtest time.</span>
+    </label>
+    <div class="panel subtle-panel">
+      <strong>Config File</strong>
+      <p class="subtle">{{ settings_view.backtest_lifecycle.config_path }}</p>
+      <p class="help-text">Stored in root runtime config so dashboard and replay engine stay aligned.</p>
+    </div>
+    <div class="action-row span-2">
+      <button type="submit">Save Lifecycle Refresh</button>
+    </div>
+  </form>
+</section>
+{% endif %}
+
 <section class="panel"><pre>{{ settings_view }}</pre></section>
 {% endblock %}

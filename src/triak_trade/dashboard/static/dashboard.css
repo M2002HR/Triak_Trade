@@ -205,13 +205,20 @@ button:disabled {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   padding: 12px 13px;
   border: 1px solid var(--line);
   border-radius: 12px;
   margin-top: 8px;
   background: rgba(255, 255, 255, 0.92);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 180px;
+  font: inherit;
 }
 
 .checkbox {
@@ -363,6 +370,52 @@ pre {
   color: var(--muted);
 }
 
+.strategy-panel {
+  padding: 18px;
+}
+
+.strategy-picker-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(280px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.strategy-summary-card,
+.strategy-parameter-card {
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(14, 124, 102, 0.14);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.strategy-summary-card strong,
+.strategy-parameter-card strong {
+  display: block;
+}
+
+.strategy-summary-card p {
+  margin: 8px 0;
+  color: var(--muted);
+}
+
+.strategy-summary-card small {
+  color: var(--muted);
+}
+
+.strategy-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.strategy-parameter-card span {
+  color: var(--muted);
+  display: block;
+  margin-bottom: 6px;
+}
+
 .preset-cluster,
 .badge-row,
 .modal-meta {
@@ -390,6 +443,7 @@ pre {
   background: rgba(255, 255, 255, 0.88);
   color: var(--accent-strong);
   border: 1px solid rgba(14, 124, 102, 0.16);
+  text-decoration: none;
 }
 
 .filter-pill.active {
@@ -779,6 +833,22 @@ pre {
   background: rgba(255, 255, 255, 0.86);
 }
 
+.signal-chart-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.signal-lifecycle-chart {
+  width: 100%;
+  height: 360px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(242, 248, 246, 0.95), rgba(233, 243, 240, 0.9));
+}
+
 .target-pill-row {
   display: flex;
   flex-wrap: wrap;
@@ -824,6 +894,17 @@ pre {
 .lifecycle-item p {
   margin: 4px 0 0;
   overflow-wrap: anywhere;
+}
+
+.lifecycle-item strong {
+  display: block;
+  color: #17342d;
+}
+
+.lifecycle-item small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
 }
 
 .message-badges {
@@ -1064,6 +1145,10 @@ pre {
   }
 
   .saved-channel-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .strategy-picker-grid {
     grid-template-columns: 1fr;
   }
 

@@ -18,6 +18,7 @@ def settings(tmp_path: Path) -> Settings:
         DASHBOARD_PID_FILE=str(runtime / "dashboard.pid"),
         DASHBOARD_STATUS_FILE=str(runtime / "status.json"),
         DASHBOARD_LOG_FILE=str(runtime / "dashboard.log"),
+        ROOT_ENV_FILE=str(tmp_path / ".env.local"),
         VERIFICATION_REPORT_DIR=str(tmp_path / "reports"),
         REAL_BACKTEST_REPORT_DIR=str(tmp_path / "backtests"),
     )
@@ -48,6 +49,8 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     assert "Saved Channels" in response.text
     assert "Save Once, Reuse Anytime" in response.text
     assert "Add Channel To Saved List" in response.text
+    assert "Choose Execution Strategy" in response.text
+    assert 'id="backtest-strategy-key"' in response.text
     assert "Load Into Form" in response.text
     assert 'id="backtest-saved-channel-select"' in response.text
     assert 'id="backtest-save-channel-input"' in response.text
@@ -94,3 +97,19 @@ def test_login_page_renders(tmp_path: Path) -> None:
 def test_status_json_unauthorized_is_not_redirected(tmp_path: Path) -> None:
     response = client(tmp_path).get("/status", follow_redirects=False)
     assert response.status_code == 401
+
+
+def test_settings_page_renders_ai_keyword_filters_tab(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/settings?tab=ai-keywords", headers=headers())
+    assert response.status_code == 200
+    assert "AI Keyword Filters" in response.text
+    assert "Skip Keywords" in response.text
+    assert "Force Include Keywords" in response.text
+
+
+def test_settings_page_renders_backtest_lifecycle_controls(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/settings", headers=headers())
+    assert response.status_code == 200
+    assert "Signal Refresh Cadence" in response.text
+    assert "Refresh Interval" in response.text
+    assert "5m" in response.text

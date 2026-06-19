@@ -32,6 +32,9 @@ def _settings(tmp_path: Path) -> Settings:
 
 
 class FakeRunner:
+    def __init__(self) -> None:
+        self.strategy = None
+
     def readiness(self):
         class Readiness:
             def model_dump(self, mode: str = "json") -> dict[str, object]:
@@ -279,6 +282,7 @@ def test_dashboard_backtest_store_round_trip(tmp_path: Path) -> None:
             log_per_message=True,
         ),
         channel_input="@Tofan_Trade",
+        strategy_key="tp_trailing_risk_managed",
     )
     assert store.read(run.run_id) is not None
 
@@ -302,6 +306,7 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
             log_per_message=True,
         ),
         channel_input="@Tofan_Trade",
+        strategy_key="tp_trailing_risk_managed",
     )
 
     for _ in range(50):
@@ -313,6 +318,7 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     loaded = coordinator.get_run(run.run_id)
     assert loaded is not None
     assert loaded.status == "completed"
+    assert loaded.strategy_key == "tp_trailing_risk_managed"
     assert loaded.total_messages == 1
     assert loaded.valid_signals == 1
     assert loaded.current_phase in {"complete", "classify_messages", "report"}
@@ -352,6 +358,7 @@ def test_dashboard_backtest_coordinator_notifies_on_updates(tmp_path: Path) -> N
             log_per_message=True,
         ),
         channel_input="@Tofan_Trade",
+        strategy_key="tp_trailing_risk_managed",
     )
 
     for _ in range(50):
@@ -741,4 +748,5 @@ def test_dashboard_backtest_coordinator_reruns_saved_parameters(tmp_path: Path) 
     assert rerun.start_message_link == "https://t.me/Tofan_Trade/5880"
     assert rerun.start_message_id == 5880
     assert rerun.max_messages == 25
+    assert rerun.strategy_key == "default_risk_managed"
     assert rerun.use_ai is True
