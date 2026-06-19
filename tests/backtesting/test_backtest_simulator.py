@@ -440,6 +440,40 @@ def test_simulator_snapshots_include_not_filled_signals() -> None:
     assert snapshots[0].signal_states["s1"].status == "not_filled"
 
 
+def test_simulator_builds_virtual_interval_snapshots_and_price_history() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(5, "103", "100.5", o="100.5", c="102.5"),
+        _candle(10, "104", "101", o="102.5", c="103.5"),
+    ]
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        snapshot_interval=timedelta(minutes=5),
+    )
+
+    interval_snapshots = [item for item in snapshots if item.checkpoint_kind == "interval"]
+    assert interval_snapshots
+    assert interval_snapshots[0].timestamp == datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc)
+    state = interval_snapshots[-1].signal_states["s1"]
+    assert state.price_history is not None
+    assert len(state.price_history) >= 2
+    assert state.stop_loss_history is not None
+    assert state.stop_loss_history[0].value == Decimal("98")
+
+
 def test_simulator_market_entry_matches_normalized_swap_symbol() -> None:
     signal = _parsed(SignalAction.OPEN)
     signal.entry_type = EntryType.MARKET

@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from triak_trade.backtesting import BacktestEngine, BacktestRequest
+from triak_trade.backtesting.strategies.default_risk import DefaultRiskManagedStrategy
+from triak_trade.backtesting.strategies.registry import load_strategy
 from triak_trade.domain.enums import BacktestFillPolicy
 
 
@@ -24,3 +26,9 @@ def test_backtest_engine_run_fixture_path() -> None:
     report = BacktestEngine().run(req)
     assert report.channel_id == "https://t.me/Tofan_Trade"
     assert report.final_balance >= Decimal("0")
+
+
+def test_backtest_engine_loads_strategy_from_config_by_default() -> None:
+    engine = BacktestEngine()
+    assert isinstance(engine.strategy, DefaultRiskManagedStrategy)
+    assert engine.strategy.no_sl_loss_pct == load_strategy().no_sl_loss_pct

@@ -94,7 +94,7 @@ class DefaultRiskManagedStrategy:
         entry_price: Decimal,
     ) -> Decimal:
         pct = max(self.no_sl_loss_pct, Decimal("0")) / Decimal("100")
-        if side is TradeSide.SHORT:
+        if side.is_short:
             return entry_price * (Decimal("1") + pct)
         # LONG: stop below entry.  At 100 % this equals 0, which is valid —
         # crypto prices never reach zero in normal trading.
@@ -111,7 +111,7 @@ class DefaultRiskManagedStrategy:
         if risk_distance <= Decimal("0"):
             return []
         multiples = self.synthetic_tp_r_multiples or [Decimal("1"), Decimal("2"), Decimal("3")]
-        if side is TradeSide.SHORT:
+        if side.is_short:
             return [
                 entry_price - (risk_distance * multiple)
                 for multiple in multiples
@@ -128,6 +128,8 @@ class DefaultRiskManagedStrategy:
         *,
         targets_hit_so_far: int,
         remaining_targets_including_this: int,
+        entry_price: Decimal,
+        take_profits: list[Decimal],
     ) -> TargetHitAction:
         is_last = remaining_targets_including_this <= 1
         move_sl = self.risk_free_on_first_tp and targets_hit_so_far == 0

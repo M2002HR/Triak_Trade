@@ -41,7 +41,11 @@ from triak_trade.backtesting.report import (
     report_to_markdown_summary,
 )
 from triak_trade.backtesting.report_store import BacktestReportStore
-from triak_trade.backtesting.simulator import SimulationSnapshot
+from triak_trade.backtesting.simulator import (
+    PriceLevelSpan,
+    SignalPricePoint,
+    SimulationSnapshot,
+)
 from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.backtesting.strategies.registry import load_strategy
 from triak_trade.backtesting.symbol_mapper import (
@@ -56,6 +60,7 @@ from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
 from triak_trade.market_data.factory import build_backtest_market_data_provider
 from triak_trade.market_data.interfaces import MarketDataProvider
+from triak_trade.market_data.intervals import interval_to_seconds
 from triak_trade.observability.events import build_message_link
 from triak_trade.observability.telegram_log_channel import TelegramLogChannelClient
 from triak_trade.parsing.validator import ParsedSignalValidator
@@ -282,8 +287,15 @@ class RealBacktestRunner:
         self._log_lock = threading.Lock()
         self._last_log_send_failure_reason: str | None = None
         self._log_sending_disabled_for_run = False
+        self._strategy_override = strategy
         # Load strategy from config file; caller may also inject one directly.
         self.strategy: TradeStrategy = strategy or load_strategy()
+
+    def _active_strategy(self) -> TradeStrategy:
+        if self._strategy_override is not None:
+            return self._strategy_override
+        self.strategy = load_strategy()
+        return self.strategy
 
     def readiness(self) -> RealBacktestReadiness:
         issues: list[str] = []
@@ -461,7 +473,8 @@ class RealBacktestRunner:
             counts=counts,
         )
 
-        engine = BacktestEngine(classifier=selection.classifier, strategy=self.strategy)
+        active_strategy = self._active_strategy()
+        engine = BacktestEngine(classifier=selection.classifier, strategy=active_strategy)
         self._emit_run_progress(
             progress_callback,
             phase="classify_messages",
@@ -1532,6 +1545,27 @@ class RealBacktestRunner:
                     f"rerouted_open_to_followup; reply_owner={reply_owner.signal_id}"
                 )
             if classified.is_potential_new_signal:
+                symbol_reuse_owner = self._find_reusable_open_signal_for_symbol(
+                    context=context,
+                    parsed=parsed_for_event,
+                    message=message,
+                )
+                if symbol_reuse_owner is not None:
+                    classified.is_potential_new_signal = False
+                    classified.is_related_to_existing_signal = True
+                    classified.related_signal_id = symbol_reuse_owner.signal_id
+                    classified.debug_notes.append(
+                        f"rerouted_open_to_followup; symbol_owner={symbol_reuse_owner.signal_id}"
+                    )
+                    parsed_for_event = parsed_for_event.model_copy(
+                        update={"action": SignalAction.UPDATE_TP}
+                    )
+                    if parsed_for_event.stop_loss is None and not parsed_for_event.take_profits:
+                        parsed_for_event = parsed_for_event.model_copy(
+                            update={"action": SignalAction.UPDATE_ENTRY}
+                        )
+                    trace.debug_notes = list(classified.debug_notes)
+            if classified.is_potential_new_signal:
                 signal_id = make_signal_id(message.channel_id, message.message_id)
                 trace.signal_id = signal_id
                 context.add_signal(
@@ -1884,6 +1918,33 @@ class RealBacktestRunner:
             counts,
             prefetched_candles_by_symbol,
         )
+
+    def _find_reusable_open_signal_for_symbol(
+        self,
+        *,
+        context: ChannelContext,
+        parsed: ParsedSignal,
+        message: RawTelegramMessage,
+    ) -> SignalState | None:
+        if parsed.action is not SignalAction.OPEN or parsed.symbol is None:
+            return None
+        candidates = [
+            signal
+            for signal in context.find_signals_by_symbol(parsed.symbol)
+            if signal.current_signal is not None
+            and signal.created_from_message_id != message.message_id
+            and signal.status not in {
+                SignalStatus.CLOSED,
+                SignalStatus.CANCELLED,
+                SignalStatus.EXPIRED,
+                SignalStatus.REJECTED,
+                SignalStatus.INVALID,
+            }
+            and self.validator.validate_for_backtest_open(signal.current_signal)[0]
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda signal: signal.updated_at)
 
     async def _maybe_promote_reply_parent(
         self,
@@ -2239,7 +2300,11 @@ class RealBacktestRunner:
         if not events or not available_candles or not signal_trace_map:
             return self._empty_live_metrics(), []
 
+        active_strategy = self._active_strategy()
         simulator = BacktestEngine(classifier=RegexMessageClassifier()).simulator
+        refresh_interval = timedelta(
+            seconds=interval_to_seconds(self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL)
+        )
         _trades, _balance, snapshots = simulator.simulate_with_snapshots(
             events=events,
             candles=available_candles,
@@ -2249,17 +2314,27 @@ class RealBacktestRunner:
             active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
             max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
             default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
-            strategy=self.strategy,
+            strategy=active_strategy,
+            snapshot_interval=refresh_interval,
         )
         if not snapshots:
             return self._empty_live_metrics(), []
         snapshot = snapshots[-1]
+        interval_snapshots = [item for item in snapshots if item.checkpoint_kind == "interval"]
         counts["trades_simulated"] = len(snapshot.signal_states)
         counts["trades_filled"] = sum(
             1 for state in snapshot.signal_states.values() if state.status != "not_filled"
         )
         metrics = self._live_metrics_from_snapshot(snapshot)
         live_signals = self._live_signals_from_snapshot(snapshot)
+        self._emit_interval_snapshots(
+            snapshots=interval_snapshots,
+            latest_snapshot=snapshot,
+            counts=counts,
+            progress_callback=progress_callback,
+            live_metrics=metrics,
+            current_message_id=current_message_id,
+        )
         self._apply_snapshot_to_traces(
             snapshot=snapshot,
             traces_by_message_id=traces_by_message_id,
@@ -2271,6 +2346,34 @@ class RealBacktestRunner:
             live_signals=live_signals,
         )
         return metrics, live_signals
+
+    def _emit_interval_snapshots(
+        self,
+        *,
+        snapshots: list[SimulationSnapshot],
+        latest_snapshot: SimulationSnapshot,
+        counts: dict[str, int],
+        progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
+        live_metrics: dict[str, str],
+        current_message_id: int,
+    ) -> None:
+        if progress_callback is None:
+            return
+        for snapshot in snapshots:
+            self._emit_run_progress(
+                progress_callback,
+                phase="simulate",
+                status="running",
+                summary=(
+                    "Virtual lifecycle refresh checkpoint at "
+                    f"{snapshot.timestamp.astimezone(TEHRAN_TZ).isoformat()}"
+                ),
+                counts=counts,
+                live_metrics=self._live_metrics_from_snapshot(snapshot),
+                live_signals=self._live_signals_from_snapshot(snapshot),
+                event_timestamp=snapshot.timestamp,
+                current_message_id=current_message_id,
+            )
 
     def _apply_snapshot_to_traces(
         self,
@@ -2364,12 +2467,7 @@ class RealBacktestRunner:
     def _live_signals_from_snapshot(snapshot: SimulationSnapshot) -> list[dict[str, Any]]:
         signals: list[dict[str, Any]] = []
         for state in snapshot.signal_states.values():
-            lifecycle: list[str] = []
-            if state.targets_hit:
-                lifecycle.append(f"targets_hit={state.targets_hit}")
-            lifecycle.extend(state.notes)
-            if state.exit_time is not None:
-                lifecycle.append(f"exit_time={state.exit_time.isoformat()}")
+            lifecycle = RealBacktestRunner._signal_lifecycle_events(state)
             signals.append(
                 {
                     "signal_id": state.signal_id,
@@ -2403,6 +2501,22 @@ class RealBacktestRunner:
                     "margin": str(state.margin),
                     "targets_hit": state.targets_hit,
                     "lifecycle": lifecycle,
+                    "chart": {
+                        "timezone": "Asia/Tehran",
+                        "interval": "5m",
+                        "candles": RealBacktestRunner._signal_chart_candles(state),
+                        "stop_loss_history": RealBacktestRunner._level_history_payload(
+                            state.stop_loss_history
+                        ),
+                        "take_profit_history": RealBacktestRunner._level_history_payload(
+                            state.take_profit_history
+                        ),
+                    },
+                    "last_checkpoint_at": snapshot.timestamp.isoformat(),
+                    "last_checkpoint_at_tehran": snapshot.timestamp.astimezone(
+                        TEHRAN_TZ
+                    ).isoformat(),
+                    "checkpoint_kind": snapshot.checkpoint_kind,
                 }
             )
         return sorted(
@@ -2412,6 +2526,102 @@ class RealBacktestRunner:
                 str(item.get("entry_time") or ""),
             ),
         )
+
+    @staticmethod
+    def _signal_lifecycle_events(state: Any) -> list[dict[str, str]]:
+        lifecycle: list[dict[str, str]] = [
+            {
+                "kind": "created",
+                "label": "Signal created",
+                "timestamp": state.entry_time.isoformat(),
+                "timestamp_tehran": state.entry_time.astimezone(TEHRAN_TZ).isoformat(),
+                "detail": "Lifecycle tracking started.",
+            }
+        ]
+        if state.targets_hit:
+            lifecycle.append(
+                {
+                    "kind": "targets_hit",
+                    "label": "Targets hit",
+                    "timestamp": state.entry_time.isoformat(),
+                    "timestamp_tehran": state.entry_time.astimezone(TEHRAN_TZ).isoformat(),
+                    "detail": f"targets_hit={state.targets_hit}",
+                }
+            )
+        for note in state.notes:
+            lifecycle.append(
+                {
+                    "kind": "note",
+                    "label": "Lifecycle update",
+                    "timestamp": state.entry_time.isoformat(),
+                    "timestamp_tehran": state.entry_time.astimezone(TEHRAN_TZ).isoformat(),
+                    "detail": str(note),
+                }
+            )
+        if state.exit_time is not None:
+            lifecycle.append(
+                {
+                    "kind": "exit",
+                    "label": "Signal closed",
+                    "timestamp": state.exit_time.isoformat(),
+                    "timestamp_tehran": state.exit_time.astimezone(TEHRAN_TZ).isoformat(),
+                    "detail": (
+                        f"exit_price={state.exit_price}"
+                        if state.exit_price is not None
+                        else "Signal exited."
+                    ),
+                }
+            )
+        return lifecycle
+
+    @staticmethod
+    def _signal_chart_candles(state: Any) -> list[dict[str, str | None]]:
+        history = state.price_history or []
+        candles: list[dict[str, Any]] = []
+        for point in history:
+            if not isinstance(point, SignalPricePoint):
+                continue
+            candles.append(
+                {
+                    "timestamp": point.candle_open_time.isoformat(),
+                    "timestamp_tehran": point.candle_open_time.astimezone(
+                        TEHRAN_TZ
+                    ).isoformat(),
+                    "close_timestamp": point.candle_close_time.isoformat(),
+                    "close_timestamp_tehran": point.candle_close_time.astimezone(
+                        TEHRAN_TZ
+                    ).isoformat(),
+                    "open": str(point.open),
+                    "high": str(point.high),
+                    "low": str(point.low),
+                    "close": str(point.close),
+                    "mark_price": str(point.mark_price),
+                    "stop_loss": str(point.stop_loss) if point.stop_loss is not None else None,
+                    "take_profits": [str(item) for item in point.take_profits],
+                }
+            )
+        return candles
+
+    @staticmethod
+    def _level_history_payload(
+        history: list[PriceLevelSpan] | None,
+    ) -> list[dict[str, str | None]]:
+        payload: list[dict[str, str | None]] = []
+        for item in history or []:
+            payload.append(
+                {
+                    "kind": item.kind,
+                    "label": item.label,
+                    "value": str(item.value),
+                    "started_at": item.started_at.isoformat(),
+                    "started_at_tehran": item.started_at.astimezone(TEHRAN_TZ).isoformat(),
+                    "ended_at": item.ended_at.isoformat() if item.ended_at else None,
+                    "ended_at_tehran": (
+                        item.ended_at.astimezone(TEHRAN_TZ).isoformat() if item.ended_at else None
+                    ),
+                }
+            )
+        return payload
 
     @staticmethod
     def _empty_live_metrics() -> dict[str, str]:
@@ -2752,16 +2962,19 @@ class RealBacktestRunner:
         counts: dict[str, int] | None = None,
         live_metrics: dict[str, str] | None = None,
         live_signals: list[dict[str, Any]] | None = None,
+        event_timestamp: datetime | None = None,
+        current_message_id: int | None = None,
     ) -> None:
         if progress_callback is None:
             return
         progress_callback(
             RealBacktestProgressEvent(
                 event_type="run",
-                timestamp=datetime.now(timezone.utc),
+                timestamp=event_timestamp or datetime.now(timezone.utc),
                 phase=phase,
                 status=status,
                 summary=summary,
+                current_message_id=current_message_id,
                 counts=counts or {},
                 live_metrics=live_metrics,
                 live_signals=live_signals,

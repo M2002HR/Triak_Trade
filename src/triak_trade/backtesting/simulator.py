@@ -13,6 +13,30 @@ from triak_trade.domain.enums import BacktestFillPolicy, EntryType, SignalAction
 from triak_trade.domain.models import Candle, SimulatedTrade
 
 
+@dataclass(frozen=True)
+class PriceLevelSpan:
+    kind: str
+    label: str
+    value: Decimal
+    started_at: datetime
+    ended_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class SignalPricePoint:
+    timestamp: datetime
+    candle_open_time: datetime
+    candle_close_time: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    stop_loss: Decimal | None
+    take_profits: list[Decimal]
+    mark_price: Decimal
+    source_message_id: int | None = None
+
+
 @dataclass
 class _OpenPosition:
     trade_id: str
@@ -61,6 +85,9 @@ class SimulationSignalState:
     notes: list[str]
     effective_leverage: Decimal = Decimal("1")
     margin: Decimal = Decimal("0")
+    price_history: list[SignalPricePoint] | None = None
+    stop_loss_history: list[PriceLevelSpan] | None = None
+    take_profit_history: list[PriceLevelSpan] | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +104,7 @@ class SimulationSnapshot:
     realized_balance: Decimal
     current_balance: Decimal
     signal_states: dict[str, SimulationSignalState]
+    checkpoint_kind: str = "message"
 
 
 class BacktestSimulator:
@@ -119,6 +147,7 @@ class BacktestSimulator:
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
+        snapshot_interval: timedelta | None = None,
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         return self._simulate_internal(
             events=events,
@@ -131,6 +160,7 @@ class BacktestSimulator:
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
             strategy=strategy,
+            snapshot_interval=snapshot_interval,
         )
 
     def _simulate_internal(
@@ -146,6 +176,7 @@ class BacktestSimulator:
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
+        snapshot_interval: timedelta | None = None,
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         trades: list[SimulatedTrade] = []
         closed_trades_by_signal: dict[str, SimulatedTrade] = {}
@@ -154,6 +185,14 @@ class BacktestSimulator:
         balance = initial_balance
         sorted_events = sorted(events, key=lambda item: item.timestamp)
         sorted_candles = sorted(candles, key=lambda item: item.open_time)
+        signal_price_history: dict[str, list[SignalPricePoint]] = {}
+        stop_loss_history: dict[str, list[PriceLevelSpan]] = {}
+        take_profit_history: dict[str, list[PriceLevelSpan]] = {}
+        next_snapshot_at = self._initial_snapshot_anchor(
+            candles=sorted_candles,
+            events=sorted_events,
+            snapshot_interval=snapshot_interval,
+        )
         candle_index = 0
 
         for event in sorted_events:
@@ -165,7 +204,22 @@ class BacktestSimulator:
                 fill_policy=fill_policy,
                 active_signal_hours=active_signal_hours,
                 strategy=strategy,
+                capture_snapshots=capture_snapshots,
+                snapshots=snapshots,
+                closed_trades_by_signal=closed_trades_by_signal,
+                initial_balance=initial_balance,
+                signal_price_history=signal_price_history,
+                stop_loss_history=stop_loss_history,
+                take_profit_history=take_profit_history,
+                next_snapshot_at=next_snapshot_at,
+                snapshot_interval=snapshot_interval,
             )
+            if capture_snapshots and snapshot_interval is not None:
+                next_snapshot_at = self._advance_snapshot_anchor(
+                    next_snapshot_at,
+                    snapshots,
+                    snapshot_interval,
+                )
             for trade in resolved_trades:
                 trades.append(trade)
                 closed_trades_by_signal[trade.signal_id] = trade
@@ -210,6 +264,10 @@ class BacktestSimulator:
                                 candles=sorted_candles,
                                 processed_candle_count=candle_index,
                                 initial_balance=initial_balance,
+                                signal_price_history=signal_price_history,
+                                stop_loss_history=stop_loss_history,
+                                take_profit_history=take_profit_history,
+                                checkpoint_kind="message",
                             )
                         )
                     continue
@@ -229,7 +287,7 @@ class BacktestSimulator:
                     notes.append(f"synthetic_stop_strategy={strategy.name}")
                 else:
                     pct = max(default_stop_pct, Decimal("0")) / Decimal("100")
-                    if parsed.side is TradeSide.SHORT:
+                    if parsed.side.is_short:
                         effective_stop = entry_price * (Decimal("1") + pct)
                     else:
                         effective_stop = entry_price * (Decimal("1") - pct)
@@ -270,9 +328,9 @@ class BacktestSimulator:
                 valid_tps = [
                     tp for tp in parsed.take_profits
                     if (
-                        parsed.side is TradeSide.LONG and tp > entry_price
+                        parsed.side.is_long and tp > entry_price
                     ) or (
-                        parsed.side is TradeSide.SHORT and tp < entry_price
+                        parsed.side.is_short and tp < entry_price
                     )
                 ]
                 if len(valid_tps) < len(parsed.take_profits):
@@ -310,6 +368,14 @@ class BacktestSimulator:
                     targets_hit=0,
                     manual_partial_exit=False,
                     effective_leverage=effective_leverage,
+                )
+                self._set_signal_level_history(
+                    stop_loss_history=stop_loss_history,
+                    take_profit_history=take_profit_history,
+                    signal_id=event.signal_id or "unknown",
+                    timestamp=entry_time,
+                    stop_loss=effective_stop,
+                    take_profits=valid_tps,
                 )
             elif parsed.action is SignalAction.CLOSE and event.close_all and open_positions:
                 for signal_id in list(open_positions):
@@ -389,9 +455,21 @@ class BacktestSimulator:
                 elif parsed.action is SignalAction.UPDATE_SL and event.move_stop_to_entry:
                     position.stop_loss = position.entry_price
                     position.notes.append("stop_loss_moved_to_entry")
+                    self._replace_stop_loss_history(
+                        stop_loss_history=stop_loss_history,
+                        signal_id=event.related_signal_id,
+                        timestamp=event.timestamp,
+                        stop_loss=position.stop_loss,
+                    )
                 elif parsed.action is SignalAction.UPDATE_SL and parsed.stop_loss is not None:
                     position.stop_loss = parsed.stop_loss
                     position.notes.append(f"stop_loss_updated={parsed.stop_loss}")
+                    self._replace_stop_loss_history(
+                        stop_loss_history=stop_loss_history,
+                        signal_id=event.related_signal_id,
+                        timestamp=event.timestamp,
+                        stop_loss=parsed.stop_loss,
+                    )
                 elif parsed.action is SignalAction.UPDATE_TP and parsed.take_profits:
                     position.take_profits = (
                         position.take_profits[: position.targets_hit] + parsed.take_profits
@@ -399,6 +477,12 @@ class BacktestSimulator:
                     position.notes.append(
                         "take_profits_updated="
                         + ",".join(str(item) for item in parsed.take_profits)
+                    )
+                    self._replace_take_profit_history(
+                        take_profit_history=take_profit_history,
+                        signal_id=event.related_signal_id,
+                        timestamp=event.timestamp,
+                        take_profits=position.take_profits,
                     )
             if capture_snapshots:
                 snapshots.append(
@@ -410,6 +494,10 @@ class BacktestSimulator:
                         candles=sorted_candles,
                         processed_candle_count=candle_index,
                         initial_balance=initial_balance,
+                        signal_price_history=signal_price_history,
+                        stop_loss_history=stop_loss_history,
+                        take_profit_history=take_profit_history,
+                        checkpoint_kind="message",
                     )
                 )
 
@@ -421,6 +509,15 @@ class BacktestSimulator:
             fill_policy=fill_policy,
             active_signal_hours=active_signal_hours,
             strategy=strategy,
+            capture_snapshots=capture_snapshots,
+            snapshots=snapshots,
+            closed_trades_by_signal=closed_trades_by_signal,
+            initial_balance=initial_balance,
+            signal_price_history=signal_price_history,
+            stop_loss_history=stop_loss_history,
+            take_profit_history=take_profit_history,
+            next_snapshot_at=next_snapshot_at,
+            snapshot_interval=snapshot_interval,
         )
         for trade in resolved_trades:
             trades.append(trade)
@@ -497,6 +594,15 @@ class BacktestSimulator:
         fill_policy: BacktestFillPolicy,
         active_signal_hours: int | None,
         strategy: TradeStrategy | None = None,
+        capture_snapshots: bool = False,
+        snapshots: list[SimulationSnapshot] | None = None,
+        closed_trades_by_signal: dict[str, SimulatedTrade] | None = None,
+        initial_balance: Decimal | None = None,
+        signal_price_history: dict[str, list[SignalPricePoint]] | None = None,
+        stop_loss_history: dict[str, list[PriceLevelSpan]] | None = None,
+        take_profit_history: dict[str, list[PriceLevelSpan]] | None = None,
+        next_snapshot_at: datetime | None = None,
+        snapshot_interval: timedelta | None = None,
     ) -> tuple[int, list[SimulatedTrade]]:
         index = start_index
         resolved_trades: list[SimulatedTrade] = []
@@ -527,27 +633,75 @@ class BacktestSimulator:
                 if candle.open_time < position.entry_time:
                     continue
 
+                if signal_price_history is not None:
+                    self._append_signal_price_point(
+                        signal_price_history=signal_price_history,
+                        signal_id=signal_id,
+                        candle=candle,
+                        position=position,
+                    )
                 expiry_status = self._expire_position_if_needed(
                     position=position,
                     candle=candle,
                     active_signal_hours=active_signal_hours,
                 )
                 if expiry_status is not None:
-                    resolved_trades.append(self._finalize_position(position, status=expiry_status))
+                    trade = self._finalize_position(position, status=expiry_status)
+                    resolved_trades.append(trade)
+                    if closed_trades_by_signal is not None:
+                        closed_trades_by_signal[trade.signal_id] = trade
                     closed_signal_ids.append(signal_id)
                     continue
                 
-                status = self._apply_candle_to_position(position, candle, fill_policy, strategy)
+                status = self._apply_candle_to_position(
+                    position,
+                    candle,
+                    fill_policy,
+                    strategy,
+                    stop_loss_history,
+                )
                 if status is None:
                     continue
                 
-                resolved_trades.append(self._finalize_position(position, status=status))
+                trade = self._finalize_position(position, status=status)
+                resolved_trades.append(trade)
+                if closed_trades_by_signal is not None:
+                    closed_trades_by_signal[trade.signal_id] = trade
                 closed_signal_ids.append(signal_id)
 
             for signal_id in closed_signal_ids:
                 del open_positions[signal_id]
                 if signal_id in relevant_signal_ids:
                     relevant_signal_ids.remove(signal_id)
+
+            if (
+                capture_snapshots
+                and snapshots is not None
+                and closed_trades_by_signal is not None
+                and initial_balance is not None
+                and signal_price_history is not None
+                and stop_loss_history is not None
+                and take_profit_history is not None
+                and next_snapshot_at is not None
+                and snapshot_interval is not None
+            ):
+                while candle.close_time >= next_snapshot_at:
+                    snapshots.append(
+                        self._build_snapshot(
+                            timestamp=next_snapshot_at,
+                            source_message_id=None,
+                            open_positions=open_positions,
+                            closed_trades_by_signal=closed_trades_by_signal,
+                            candles=candles,
+                            processed_candle_count=index + 1,
+                            initial_balance=initial_balance,
+                            signal_price_history=signal_price_history,
+                            stop_loss_history=stop_loss_history,
+                            take_profit_history=take_profit_history,
+                            checkpoint_kind="interval",
+                        )
+                    )
+                    next_snapshot_at = next_snapshot_at + snapshot_interval
             
             index += 1
         return index, resolved_trades
@@ -579,6 +733,7 @@ class BacktestSimulator:
         candle: Candle,
         fill_policy: BacktestFillPolicy,
         strategy: TradeStrategy | None = None,
+        stop_loss_history: dict[str, list[PriceLevelSpan]] | None = None,
     ) -> str | None:
         pending_tps = self._pending_take_profits(position)
         hit_sl = self._hit_sl(position, candle)
@@ -594,7 +749,13 @@ class BacktestSimulator:
                     "sl_hit_same_candle",
                 )
                 return self._sl_status(position, same_candle=True)
-            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values, strategy)
+            self._apply_take_profit_hits(
+                position,
+                candle.close_time,
+                hit_tp_values,
+                strategy,
+                stop_loss_history,
+            )
             if position.remaining_quantity > Decimal("0"):
                 self._close_fraction_of_position(
                     position,
@@ -607,7 +768,13 @@ class BacktestSimulator:
             return self._tp_status(position, same_candle=True)
 
         if hit_tp_values:
-            self._apply_take_profit_hits(position, candle.close_time, hit_tp_values, strategy)
+            self._apply_take_profit_hits(
+                position,
+                candle.close_time,
+                hit_tp_values,
+                strategy,
+                stop_loss_history,
+            )
             if position.remaining_quantity <= Decimal("0"):
                 return self._tp_status(position, same_candle=False)
 
@@ -628,6 +795,7 @@ class BacktestSimulator:
         exit_time: datetime,
         tp_values: list[Decimal],
         strategy: TradeStrategy | None = None,
+        stop_loss_history: dict[str, list[PriceLevelSpan]] | None = None,
     ) -> None:
         for tp in tp_values:
             if position.remaining_quantity <= Decimal("0"):
@@ -638,11 +806,32 @@ class BacktestSimulator:
                 action = strategy.get_target_hit_action(
                     targets_hit_so_far=position.targets_hit,
                     remaining_targets_including_this=remaining_targets,
+                    entry_price=position.entry_price,
+                    take_profits=list(position.take_profits),
                 )
                 fraction = action.close_fraction
-                if action.move_sl_to_entry and position.stop_loss != position.entry_price:
+                if action.new_stop_loss is not None and position.stop_loss != action.new_stop_loss:
+                    position.stop_loss = action.new_stop_loss
+                    position.notes.append(
+                        f"stop_loss_moved_to_target_by_strategy={action.new_stop_loss}"
+                    )
+                    if stop_loss_history is not None:
+                        self._replace_stop_loss_history(
+                            stop_loss_history=stop_loss_history,
+                            signal_id=position.signal_id,
+                            timestamp=exit_time,
+                            stop_loss=action.new_stop_loss,
+                        )
+                elif action.move_sl_to_entry and position.stop_loss != position.entry_price:
                     position.stop_loss = position.entry_price
                     position.notes.append("stop_loss_moved_to_entry_by_strategy")
+                    if stop_loss_history is not None:
+                        self._replace_stop_loss_history(
+                            stop_loss_history=stop_loss_history,
+                            signal_id=position.signal_id,
+                            timestamp=exit_time,
+                            stop_loss=position.entry_price,
+                        )
             else:
                 fraction = (
                     Decimal("1")
@@ -752,6 +941,10 @@ class BacktestSimulator:
         candles: list[Candle],
         processed_candle_count: int,
         initial_balance: Decimal,
+        signal_price_history: dict[str, list[SignalPricePoint]],
+        stop_loss_history: dict[str, list[PriceLevelSpan]],
+        take_profit_history: dict[str, list[PriceLevelSpan]],
+        checkpoint_kind: str,
     ) -> SimulationSnapshot:
         realized_pnl = sum(
             (trade.pnl for trade in closed_trades_by_signal.values()),
@@ -784,6 +977,9 @@ class BacktestSimulator:
                 exit_price=trade.exit_price,
                 targets_hit=0,
                 notes=list(trade.notes),
+                price_history=list(signal_price_history.get(signal_id, [])),
+                stop_loss_history=list(stop_loss_history.get(signal_id, [])),
+                take_profit_history=list(take_profit_history.get(signal_id, [])),
             )
 
         for signal_id, position in open_positions.items():
@@ -828,6 +1024,9 @@ class BacktestSimulator:
                 notes=list(position.notes),
                 effective_leverage=leverage,
                 margin=margin,
+                price_history=list(signal_price_history.get(signal_id, [])),
+                stop_loss_history=list(stop_loss_history.get(signal_id, [])),
+                take_profit_history=list(take_profit_history.get(signal_id, [])),
             )
 
         wins = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl > 0)
@@ -847,7 +1046,161 @@ class BacktestSimulator:
             realized_balance=realized_balance,
             current_balance=current_balance,
             signal_states=signal_states,
+            checkpoint_kind=checkpoint_kind,
         )
+
+    def _append_signal_price_point(
+        self,
+        *,
+        signal_price_history: dict[str, list[SignalPricePoint]],
+        signal_id: str,
+        candle: Candle,
+        position: _OpenPosition,
+    ) -> None:
+        history = signal_price_history.setdefault(signal_id, [])
+        if history and history[-1].candle_open_time == candle.open_time:
+            return
+        history.append(
+            SignalPricePoint(
+                timestamp=candle.close_time,
+                candle_open_time=candle.open_time,
+                candle_close_time=candle.close_time,
+                open=candle.open,
+                high=candle.high,
+                low=candle.low,
+                close=candle.close,
+                stop_loss=position.stop_loss,
+                take_profits=list(position.take_profits),
+                mark_price=candle.close,
+            )
+        )
+
+    def _replace_stop_loss_history(
+        self,
+        *,
+        stop_loss_history: dict[str, list[PriceLevelSpan]],
+        signal_id: str | None,
+        timestamp: datetime,
+        stop_loss: Decimal | None,
+    ) -> None:
+        if signal_id is None or stop_loss is None:
+            return
+        history = stop_loss_history.setdefault(signal_id, [])
+        if history:
+            last = history[-1]
+            history[-1] = PriceLevelSpan(
+                kind=last.kind,
+                label=last.label,
+                value=last.value,
+                started_at=last.started_at,
+                ended_at=timestamp,
+            )
+        history.append(
+            PriceLevelSpan(
+                kind="stop_loss",
+                label="SL",
+                value=stop_loss,
+                started_at=timestamp,
+            )
+        )
+
+    def _replace_take_profit_history(
+        self,
+        *,
+        take_profit_history: dict[str, list[PriceLevelSpan]],
+        signal_id: str | None,
+        timestamp: datetime,
+        take_profits: list[Decimal],
+    ) -> None:
+        if signal_id is None:
+            return
+        existing = take_profit_history.setdefault(signal_id, [])
+        updated: list[PriceLevelSpan] = []
+        for span in existing:
+            if span.ended_at is None:
+                updated.append(
+                    PriceLevelSpan(
+                        kind=span.kind,
+                        label=span.label,
+                        value=span.value,
+                        started_at=span.started_at,
+                        ended_at=timestamp,
+                    )
+                )
+            else:
+                updated.append(span)
+        take_profit_history[signal_id] = updated
+        for index, target in enumerate(take_profits, start=1):
+            take_profit_history[signal_id].append(
+                PriceLevelSpan(
+                    kind="take_profit",
+                    label=f"TP{index}",
+                    value=target,
+                    started_at=timestamp,
+                )
+            )
+
+    def _set_signal_level_history(
+        self,
+        *,
+        stop_loss_history: dict[str, list[PriceLevelSpan]],
+        take_profit_history: dict[str, list[PriceLevelSpan]],
+        signal_id: str,
+        timestamp: datetime,
+        stop_loss: Decimal | None,
+        take_profits: list[Decimal],
+    ) -> None:
+        if stop_loss is not None:
+            self._replace_stop_loss_history(
+                stop_loss_history=stop_loss_history,
+                signal_id=signal_id,
+                timestamp=timestamp,
+                stop_loss=stop_loss,
+            )
+        self._replace_take_profit_history(
+            take_profit_history=take_profit_history,
+            signal_id=signal_id,
+            timestamp=timestamp,
+            take_profits=take_profits,
+        )
+
+    def _initial_snapshot_anchor(
+        self,
+        *,
+        candles: list[Candle],
+        events: list[BacktestEvent],
+        snapshot_interval: timedelta | None,
+    ) -> datetime | None:
+        if snapshot_interval is None:
+            return None
+        anchors = [item.open_time for item in candles]
+        anchors.extend(event.timestamp for event in events)
+        if not anchors:
+            return None
+        first = min(anchors)
+        seconds = int(snapshot_interval.total_seconds())
+        epoch = int(first.timestamp())
+        aligned = ((epoch // seconds) + 1) * seconds
+        return datetime.fromtimestamp(aligned, tz=first.tzinfo)
+
+    def _advance_snapshot_anchor(
+        self,
+        next_snapshot_at: datetime | None,
+        snapshots: list[SimulationSnapshot],
+        snapshot_interval: timedelta,
+    ) -> datetime | None:
+        if next_snapshot_at is None:
+            return None
+        if not snapshots:
+            return next_snapshot_at
+        current = next_snapshot_at
+        last_interval_snapshot = next(
+            (item for item in reversed(snapshots) if item.checkpoint_kind == "interval"),
+            None,
+        )
+        while last_interval_snapshot is not None and current <= last_interval_snapshot.timestamp:
+            current = current + snapshot_interval
+        return current
 
     def _last_price(self, candles: list[Candle], symbol: str, fallback: Decimal) -> Decimal:
         relevant = [c for c in candles if same_market_symbol(c.symbol, symbol)]
@@ -856,14 +1209,14 @@ class BacktestSimulator:
         return relevant[-1].close
 
     def _hit_sl(self, position: _OpenPosition, candle: Candle) -> bool:
-        if position.side is TradeSide.SHORT:
+        if position.side.is_short:
             return candle.high >= position.stop_loss
         return candle.low <= position.stop_loss
 
     def _hit_tp(self, position: _OpenPosition, candle: Candle, tp: Decimal | None) -> bool:
         if tp is None:
             return False
-        if position.side is TradeSide.SHORT:
+        if position.side.is_short:
             return candle.low <= tp
         return candle.high >= tp
 
@@ -873,5 +1226,5 @@ class BacktestSimulator:
         exit_price: Decimal,
         quantity: Decimal,
     ) -> Decimal:
-        direction = Decimal("-1") if position.side is TradeSide.SHORT else Decimal("1")
+        direction = Decimal("-1") if position.side.is_short else Decimal("1")
         return (exit_price - position.entry_price) * quantity * direction

@@ -17,6 +17,7 @@ from triak_trade.backtesting.report import (
 from triak_trade.backtesting.scoring import ChannelScorer
 from triak_trade.backtesting.simulator import BacktestSimulator
 from triak_trade.backtesting.strategies.base import TradeStrategy
+from triak_trade.backtesting.strategies.registry import load_strategy
 from triak_trade.backtesting.timeline import BacktestTimelineBuilder
 from triak_trade.domain.enums import BacktestFillPolicy
 from triak_trade.domain.models import BacktestReport, Candle, RawTelegramMessage
@@ -32,7 +33,7 @@ class BacktestEngine:
         self.classifier = classifier or RegexMessageClassifier()
         self.simulator = BacktestSimulator()
         self.scorer = ChannelScorer()
-        self.strategy = strategy
+        self.strategy = strategy or load_strategy()
 
     def run(self, request: BacktestRequest) -> BacktestReport:
         messages = fixture_messages(request.channel)

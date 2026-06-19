@@ -7,7 +7,7 @@ from pathlib import Path
 from triak_trade.backtesting.real_runner import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.report_store import BacktestReportStore
 from triak_trade.config.settings import Settings
-from triak_trade.domain.enums import CandleSource
+from triak_trade.domain.enums import CandleSource, SignalAction
 from triak_trade.domain.models import Candle, RawTelegramMessage
 from triak_trade.observability.errors import TelegramLogChannelError
 from triak_trade.telegram.client import FakeTelegramClient
@@ -1641,6 +1641,140 @@ def test_followup_update_does_not_corrupt_base_open_event(tmp_path: Path) -> Non
     assert open_events[0].action.value == "open"
     assert open_events[0].parsed_signal.action.value == "open"
     assert open_events[0].signal_id in signal_trace_map
+
+
+class _DuplicateOpenSameSymbolClassifier:
+    """Two OPEN-like messages for the same symbol; second must become follow-up."""
+
+    def classify(self, message, context):  # type: ignore[no-untyped-def]
+        from triak_trade.agents.classifier import ClassifiedMessage
+        from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
+        from triak_trade.domain.models import ParsedSignal
+
+        if message.message_id == 30:
+            parsed = ParsedSignal(
+                action=SignalAction.OPEN,
+                market=MarketType.FUTURES,
+                symbol="DOGEUSDT",
+                side=TradeSide.SHORT,
+                entry_type=EntryType.MARKET,
+                entry_low=None,
+                entry_high=None,
+                stop_loss=Decimal("0.08915"),
+                take_profits=[Decimal("0.087"), Decimal("0.085")],
+                leverage=10,
+                confidence=Decimal("0.90"),
+                invalid_reason=None,
+                source_channel_id=message.channel_id,
+                source_message_id=message.message_id,
+                parser_version="ai-v1",
+            )
+        else:
+            parsed = ParsedSignal(
+                action=SignalAction.OPEN,
+                market=MarketType.FUTURES,
+                symbol="DOGEUSDT",
+                side=TradeSide.SHORT,
+                entry_type=EntryType.UNKNOWN,
+                entry_low=None,
+                entry_high=None,
+                stop_loss=Decimal("0.08880"),
+                take_profits=[Decimal("0.0865"), Decimal("0.0845")],
+                leverage=10,
+                confidence=Decimal("0.87"),
+                invalid_reason=None,
+                source_channel_id=message.channel_id,
+                source_message_id=message.message_id,
+                parser_version="ai-v1",
+            )
+        return ClassifiedMessage(
+            raw_message=message,
+            normalized_message=None,
+            parsed_signal=parsed,
+            is_potential_new_signal=True,
+            is_related_to_existing_signal=False,
+            related_signal_id=None,
+            relation_reason=None,
+            confidence=parsed.confidence,
+            debug_notes=["classifier=ai"],
+        )
+
+
+def test_second_open_for_same_symbol_is_rerouted_to_followup(tmp_path: Path) -> None:
+    import asyncio
+
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Crypto_Etehad",
+        channel_username="Crypto_Etehad",
+        message_id=30,
+        text="DOGE/USDT SHORT MARKET SL 0.08915 TP 0.087 0.085",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Crypto_Etehad",
+        channel_username="Crypto_Etehad",
+        message_id=31,
+        text="DOGE update TP 0.0865 0.0845 SL 0.08880",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Crypto_Etehad": [first, second]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(),
+    )
+    request = RealBacktestRunRequest(
+        channel="https://t.me/Crypto_Etehad",
+        from_date=now - timedelta(minutes=1),
+        to_date=now + timedelta(minutes=10),
+        interval="1m",
+        max_messages=50,
+        use_ai=True,
+        send_telegram_summary=False,
+        send_log_channel=False,
+        log_per_message=False,
+    )
+    counts = {
+        "total_messages": 2,
+        "caption_media_candidates": 0,
+        "classified_messages": 0,
+        "parsed_signals": 0,
+        "valid_signals": 0,
+        "invalid_signals": 0,
+        "ignored_messages": 0,
+        "ambiguous_messages": 0,
+        "ai_failed_messages": 0,
+        "trades_simulated": 0,
+        "trades_filled": 0,
+    }
+
+    events, traces, _signal_trace_map, _sym, _counts, _pref = asyncio.run(
+        runner._build_events_with_traces(
+            request=request,
+            classifier=_DuplicateOpenSameSymbolClassifier(),
+            messages=[first, second],
+            progress_callback=None,
+            counts=counts,
+            warnings=[],
+            prefetched_candles_by_symbol={},
+        )
+    )
+
+    open_events = [event for event in events if event.action is SignalAction.OPEN]
+    assert len(open_events) == 1
+    followup_events = [event for event in events if event.source_message_id == 31]
+    assert followup_events
+    assert followup_events[0].related_signal_id == open_events[0].signal_id
+    assert followup_events[0].action is not SignalAction.OPEN
+    second_trace = traces[31]
+    assert "rerouted_open_to_followup; symbol_owner=" in " ".join(second_trace.debug_notes)
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:

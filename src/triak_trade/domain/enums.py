@@ -36,6 +36,16 @@ class TradeSide(str, Enum):
     SELL = "sell"
     UNKNOWN = "unknown"
 
+    @property
+    def is_short(self) -> bool:
+        """True for SHORT and SELL (both mean a short/sell position)."""
+        return self in (TradeSide.SHORT, TradeSide.SELL)
+
+    @property
+    def is_long(self) -> bool:
+        """True for LONG and BUY (both mean a long/buy position)."""
+        return self in (TradeSide.LONG, TradeSide.BUY)
+
 
 class EntryType(str, Enum):
     MARKET = "market"

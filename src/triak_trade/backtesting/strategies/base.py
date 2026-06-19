@@ -19,6 +19,9 @@ class TargetHitAction:
     move_sl_to_entry: bool = False
     """If True, move the stop loss to the entry price (risk-free / breakeven)."""
 
+    new_stop_loss: Decimal | None = None
+    """Explicit stop-loss price to apply after this target hit."""
+
 
 @runtime_checkable
 class TradeStrategy(Protocol):
@@ -72,6 +75,8 @@ class TradeStrategy(Protocol):
         *,
         targets_hit_so_far: int,
         remaining_targets_including_this: int,
+        entry_price: Decimal,
+        take_profits: list[Decimal],
     ) -> TargetHitAction:
         """
         Return the action to take when a TP target is hit.
@@ -83,5 +88,9 @@ class TradeStrategy(Protocol):
         remaining_targets_including_this:
             Count of targets still pending, including the one currently being hit.
             When this equals 1, it is the final target.
+        entry_price:
+            Filled entry price for the position.
+        take_profits:
+            Full ordered TP ladder for the position.
         """
         ...
