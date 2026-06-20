@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, is_dataclass
 from decimal import Decimal
 from importlib import import_module
@@ -11,6 +12,8 @@ from typing import Any
 from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.backtesting.strategies.default_risk import DefaultRiskManagedStrategy
 from triak_trade.backtesting.strategies.trailing_tp import TrailingTakeProfitStrategy
+
+_log = logging.getLogger(__name__)
 
 _STRATEGY_CLASSES: dict[str, type] = {
     "default_risk_managed": DefaultRiskManagedStrategy,
@@ -109,6 +112,11 @@ def load_strategy(config_path: Path | str | None = None) -> TradeStrategy:
             cfg = yaml.safe_load(fh) or {}
         return load_strategy_from_dict(cfg)
     except Exception:
+        _log.warning(
+            "Failed to load strategy config from %s; falling back to default strategy.",
+            path,
+            exc_info=True,
+        )
         return load_strategy_from_dict(_DEFAULT_STRATEGY_CONFIG)
 
 
@@ -191,4 +199,9 @@ def _load_strategy_config_dict(config_path: Path) -> dict[str, Any]:
         with config_path.open() as fh:
             return yaml.safe_load(fh) or {}
     except Exception:
+        _log.warning(
+            "Failed to read/parse strategy config from %s; using built-in defaults.",
+            config_path,
+            exc_info=True,
+        )
         return _DEFAULT_STRATEGY_CONFIG

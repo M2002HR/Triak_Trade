@@ -858,6 +858,16 @@ class RealBacktestRunner:
                 warnings=warnings,
             )
 
+        # Enforce the candle cap to bound memory/CPU. Candles are already sorted
+        # by open_time ascending; we keep the LATEST ones (most likely to cover
+        # the signal timestamps) by slicing off the oldest end.
+        max_candles = self.settings.REAL_BACKTEST_MAX_CANDLES
+        if max_candles > 0 and len(candles) > max_candles:
+            candles = candles[-max_candles:]
+            warnings.append(
+                f"candles_capped=true; kept last {max_candles} of fetched candles"
+            )
+
         report_request = BacktestRequest(
             channel=request.channel,
             from_date=from_date,
@@ -902,6 +912,8 @@ class RealBacktestRunner:
             active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
             max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
             default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
+            fee_rate_pct=Decimal(self.settings.BACKTEST_FEE_RATE_PCT),
+            default_signal_leverage=Decimal(self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE),
         )
         score = extract_channel_score(report.warnings)
         trades_filled = sum(1 for trade in report.trades if trade.status != "not_filled")
@@ -1344,6 +1356,19 @@ class RealBacktestRunner:
         sorted_messages = sorted(messages, key=lambda item: item.date)
         context.seed_message_catalog(sorted_messages)
 
+        # B1 throttle: cache the last live-sim result and only re-run the full
+        # simulation when (a) the message carries a signal-bearing event (OPEN,
+        # CLOSE, CANCEL, UPDATE_SL, UPDATE_TP) or (b) this many non-signal
+        # messages have passed since the last update.
+        _live_metrics_cache: dict[str, str] = self._empty_live_metrics()
+        _live_signals_cache: list[dict[str, Any]] = []
+        _passive_since_update: int = 0
+        _live_update_every_n: int = self.settings.REAL_BACKTEST_LIVE_SIM_UPDATE_EVERY_N
+        # Mutable cursor: how many interval snapshots have already been emitted
+        # to the dashboard.  Shared across all _update_live_simulation_state calls
+        # for this run so each call only emits NEW snapshots.
+        _emitted_interval_count: list[int] = [0]
+
         for message in sorted_messages:
             trace = self._make_trace(message)
             traces_by_message_id[message.message_id] = trace
@@ -1435,24 +1460,30 @@ class RealBacktestRunner:
                         move_stop_to_entry=False,
                     )
                 )
-                live_metrics, live_signals = self._update_live_simulation_state(
-                    request=request,
-                    events=events,
-                    traces_by_message_id=traces_by_message_id,
-                    signal_trace_map=signal_trace_map,
-                    prefetched_candles_by_symbol=prefetched_candles_by_symbol,
-                    progress_callback=progress_callback,
-                    counts=counts,
-                    current_message_id=message.message_id,
-                )
+                # B1 throttle: empty messages are always IGNORE → no-op for the
+                # simulator; skip full re-simulation unless batch threshold hit.
+                _passive_since_update += 1
+                if _passive_since_update >= _live_update_every_n:
+                    _live_metrics_cache, _live_signals_cache = self._update_live_simulation_state(
+                        request=request,
+                        events=events,
+                        traces_by_message_id=traces_by_message_id,
+                        signal_trace_map=signal_trace_map,
+                        prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                        progress_callback=progress_callback,
+                        counts=counts,
+                        current_message_id=message.message_id,
+                        emitted_interval_count=_emitted_interval_count,
+                    )
+                    _passive_since_update = 0
                 self._emit_run_progress(
                     progress_callback,
                     phase="classify_messages",
                     status="running",
                     summary=f"Message {message.message_id} advanced live simulation state.",
                     counts=counts,
-                    live_metrics=live_metrics,
-                    live_signals=live_signals,
+                    live_metrics=_live_metrics_cache,
+                    live_signals=_live_signals_cache,
                 )
                 await self._maybe_send_message_log(request, trace, warnings)
                 continue
@@ -1891,24 +1922,50 @@ class RealBacktestRunner:
             )
             if signal_id is not None and classified.is_potential_new_signal:
                 event_index_by_signal_id[signal_id] = len(events) - 1
-            live_metrics, live_signals = self._update_live_simulation_state(
-                request=request,
-                events=events,
-                traces_by_message_id=traces_by_message_id,
-                signal_trace_map=signal_trace_map,
-                prefetched_candles_by_symbol=prefetched_candles_by_symbol,
-                progress_callback=progress_callback,
-                counts=counts,
-                current_message_id=message.message_id,
+
+            # B1 throttle: always re-simulate on signal-bearing events (OPEN /
+            # CLOSE / CANCEL / UPDATE_*) since they change position state.  For
+            # IGNORE / UNKNOWN events, coalesce updates via the passive counter.
+            _is_signal_event = parsed_for_event.action not in (
+                SignalAction.IGNORE,
+                SignalAction.UNKNOWN,
             )
+            if _is_signal_event:
+                _passive_since_update = 0  # reset counter on real event
+                _live_metrics_cache, _live_signals_cache = self._update_live_simulation_state(
+                    request=request,
+                    events=events,
+                    traces_by_message_id=traces_by_message_id,
+                    signal_trace_map=signal_trace_map,
+                    prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                    progress_callback=progress_callback,
+                    counts=counts,
+                    current_message_id=message.message_id,
+                    emitted_interval_count=_emitted_interval_count,
+                )
+            else:
+                _passive_since_update += 1
+                if _passive_since_update >= _live_update_every_n:
+                    _live_metrics_cache, _live_signals_cache = self._update_live_simulation_state(
+                        request=request,
+                        events=events,
+                        traces_by_message_id=traces_by_message_id,
+                        signal_trace_map=signal_trace_map,
+                        prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                        progress_callback=progress_callback,
+                        counts=counts,
+                        current_message_id=message.message_id,
+                        emitted_interval_count=_emitted_interval_count,
+                    )
+                    _passive_since_update = 0
             self._emit_run_progress(
                 progress_callback,
                 phase="classify_messages",
                 status="running",
                 summary=f"Message {message.message_id} advanced live simulation state.",
                 counts=counts,
-                live_metrics=live_metrics,
-                live_signals=live_signals,
+                live_metrics=_live_metrics_cache,
+                live_signals=_live_signals_cache,
             )
         return (
             events,
@@ -2291,6 +2348,7 @@ class RealBacktestRunner:
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         current_message_id: int,
+        emitted_interval_count: list[int] | None = None,
     ) -> tuple[dict[str, str], list[dict[str, Any]]]:
         available_candles = [
             candle
@@ -2316,6 +2374,8 @@ class RealBacktestRunner:
             default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
             strategy=active_strategy,
             snapshot_interval=refresh_interval,
+            fee_rate_pct=Decimal(self.settings.BACKTEST_FEE_RATE_PCT),
+            default_signal_leverage=Decimal(self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE),
         )
         if not snapshots:
             return self._empty_live_metrics(), []
@@ -2326,15 +2386,28 @@ class RealBacktestRunner:
             1 for state in snapshot.signal_states.values() if state.status != "not_filled"
         )
         metrics = self._live_metrics_from_snapshot(snapshot)
-        live_signals = self._live_signals_from_snapshot(snapshot)
+        # Build signal_id -> Telegram message link lookup so the live signal
+        # panel can surface a direct link to the original signal message.
+        signal_links: dict[str, str | None] = {
+            sig_id: (traces_by_message_id.get(msg_id) or None) and
+                    traces_by_message_id[msg_id].message_link
+            for sig_id, msg_id in signal_trace_map.items()
+        }
+        live_signals = self._live_signals_from_snapshot(snapshot, signal_links=signal_links)
+        # Only emit NEW interval snapshots (those beyond the cursor) to prevent
+        # re-broadcasting already-sent snapshots every call (B1 event explosion).
+        already_emitted = emitted_interval_count[0] if emitted_interval_count is not None else 0
+        new_interval_snapshots = interval_snapshots[already_emitted:]
         self._emit_interval_snapshots(
-            snapshots=interval_snapshots,
+            snapshots=new_interval_snapshots,
             latest_snapshot=snapshot,
             counts=counts,
             progress_callback=progress_callback,
             live_metrics=metrics,
             current_message_id=current_message_id,
         )
+        if emitted_interval_count is not None:
+            emitted_interval_count[0] = len(interval_snapshots)
         self._apply_snapshot_to_traces(
             snapshot=snapshot,
             traces_by_message_id=traces_by_message_id,
@@ -2370,7 +2443,7 @@ class RealBacktestRunner:
                 ),
                 counts=counts,
                 live_metrics=self._live_metrics_from_snapshot(snapshot),
-                live_signals=self._live_signals_from_snapshot(snapshot),
+                live_signals=self._live_signals_from_snapshot(snapshot, signal_links={}),
                 event_timestamp=snapshot.timestamp,
                 current_message_id=current_message_id,
             )
@@ -2464,7 +2537,11 @@ class RealBacktestRunner:
         }
 
     @staticmethod
-    def _live_signals_from_snapshot(snapshot: SimulationSnapshot) -> list[dict[str, Any]]:
+    def _live_signals_from_snapshot(
+        snapshot: SimulationSnapshot,
+        *,
+        signal_links: dict[str, str | None] | None = None,
+    ) -> list[dict[str, Any]]:
         signals: list[dict[str, Any]] = []
         for state in snapshot.signal_states.values():
             lifecycle = RealBacktestRunner._signal_lifecycle_events(state)
@@ -2500,6 +2577,7 @@ class RealBacktestRunner:
                     "leverage": str(state.effective_leverage),
                     "margin": str(state.margin),
                     "targets_hit": state.targets_hit,
+                    "message_link": (signal_links or {}).get(state.signal_id),
                     "lifecycle": lifecycle,
                     "chart": {
                         "timezone": "Asia/Tehran",

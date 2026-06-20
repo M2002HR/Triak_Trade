@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -26,9 +27,7 @@ def report_to_json(report: BacktestReport, score: Decimal) -> dict[str, Any]:
 
 def report_to_telegram_summary(report: BacktestReport, score: Decimal) -> str:
     metrics = report.metrics
-    interval = "n/a"
-    if report.trades and report.trades[0].notes:
-        interval = report.trades[0].notes[0]
+    interval = report.interval
     return (
         "📊 Backtest Report\n\n"
         f"Channel: {report.channel_id}\n"
@@ -44,7 +43,7 @@ def report_to_telegram_summary(report: BacktestReport, score: Decimal) -> str:
         "Performance:\n"
         f"• PnL: {metrics.total_pnl}\n"
         f"• Win rate: {(metrics.win_rate * Decimal('100')).quantize(Decimal('0.1'))}%\n"
-        f"• Profit factor: {metrics.profit_factor}\n"
+        f"• Profit factor: {metrics.profit_factor if metrics.profit_factor is not None else '∞'}\n"
         f"• Max drawdown: {metrics.max_drawdown}\n"
         f"• Conservative PnL: {metrics.conservative_pnl}\n"
         f"• Optimistic PnL: {metrics.optimistic_pnl}\n\n"
@@ -140,7 +139,13 @@ def _symbol_summary(report: BacktestReport) -> list[dict[str, Any]]:
 def _equity_curve(report: BacktestReport) -> list[dict[str, Any]]:
     equity = report.initial_balance
     points: list[dict[str, Any]] = []
-    for index, trade in enumerate(report.trades, start=1):
+    # Sort chronologically so the curve reflects real time progression.
+    # Trades without exit_time sort to the end (they contribute zero net change).
+    sorted_trades = sorted(
+        report.trades,
+        key=lambda t: t.exit_time or datetime(9999, 12, 31, tzinfo=timezone.utc),
+    )
+    for index, trade in enumerate(sorted_trades, start=1):
         equity += trade.pnl
         points.append(
             {

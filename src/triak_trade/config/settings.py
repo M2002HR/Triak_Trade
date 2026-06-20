@@ -257,11 +257,26 @@ class Settings(BaseSettings):
     # Margin/notional risk cap only — clamps how much leverage the simulator will
     # apply when sizing a position. It NEVER blocks a signal from opening; a signal
     # whose leverage exceeds this is opened with leverage clamped to this ceiling.
-    BACKTEST_MAX_EFFECTIVE_LEVERAGE: int = 25
+    BACKTEST_MAX_EFFECTIVE_LEVERAGE: int = 50
+    # Leverage assumed when a signal carries no explicit leverage field.
+    # Set to 50 so unlevered crypto futures signals get realistic sizing;
+    # always capped by BACKTEST_MAX_EFFECTIVE_LEVERAGE.
+    BACKTEST_DEFAULT_SIGNAL_LEVERAGE: int = 50
     # When a backtest OPEN signal carries no stop_loss, the simulator synthesizes a
     # stop this many percent away from entry (by side) so risk-per-trade sizing can
     # still size the position. The signal opens and is tracked normally.
     BACKTEST_DEFAULT_STOP_PCT: Decimal = Decimal("5")
+    # Per-side trading fee charged on entry and on each (partial) exit, as a
+    # percent of the filled notional (e.g. Decimal("0.04") = 0.04% taker fee).
+    # Default 0 keeps PnL gross (no behavior change); set it to model realistic
+    # exchange costs. Fees are subtracted from each trade's net pnl and balance.
+    BACKTEST_FEE_RATE_PCT: Decimal = Decimal("0")
+    # During message-by-message classification, the live simulation is re-run
+    # from scratch on every N-th message (or immediately on every signal-bearing
+    # message). Higher values reduce CPU/I/O at the cost of slightly delayed
+    # dashboard updates for non-signal messages. Default 10 means at most 1/10
+    # of the O(N²) cost for plain IGNORE/UNKNOWN messages.
+    REAL_BACKTEST_LIVE_SIM_UPDATE_EVERY_N: int = 10
     VERIFICATION_REPORT_DIR: str = "runtime/reports"
     VERIFICATION_WRITE_JSON: bool = True
     VERIFICATION_WRITE_MARKDOWN: bool = True

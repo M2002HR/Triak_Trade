@@ -69,6 +69,8 @@ class BacktestEngine:
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
+        fee_rate_pct: Decimal = Decimal("0"),
+        default_signal_leverage: Decimal = Decimal("1"),
     ) -> BacktestReport:
         effective_strategy = strategy or self.strategy
         conservative_trades, conservative_final = self.simulator.simulate(
@@ -81,8 +83,10 @@ class BacktestEngine:
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
             strategy=effective_strategy,
+            fee_rate_pct=fee_rate_pct,
+            default_signal_leverage=default_signal_leverage,
         )
-        _optimistic_trades, optimistic_final = self.simulator.simulate(
+        optimistic_trades, optimistic_final = self.simulator.simulate(
             events=events,
             candles=candles,
             initial_balance=request.initial_balance,
@@ -92,19 +96,28 @@ class BacktestEngine:
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
             strategy=effective_strategy,
+            fee_rate_pct=fee_rate_pct,
+            default_signal_leverage=default_signal_leverage,
         )
-        final_balance = max(
-            conservative_final
-            if request.fill_policy is BacktestFillPolicy.CONSERVATIVE
-            else optimistic_final,
-            Decimal("0"),
-        )
+        # Use primary trades/balance from the simulation matching the requested
+        # fill_policy so that report.trades and total_pnl are always consistent
+        # (sum of trade pnl == total_pnl, equity curve ends at final_balance).
+        if request.fill_policy is BacktestFillPolicy.CONSERVATIVE:
+            primary_trades, primary_final = conservative_trades, conservative_final
+        else:
+            primary_trades, primary_final = optimistic_trades, optimistic_final
+        raw_final_balance = primary_final
+        final_balance = max(raw_final_balance, Decimal("0"))
         total_pnl = final_balance - request.initial_balance
+        if raw_final_balance < Decimal("0"):
+            warnings_list = ["account_blown_up=true"]
+        else:
+            warnings_list = []
 
         metrics, score, _breakdown = self.scorer.score_with_breakdown(
             channel_id=request.channel,
             events=events,
-            trades=conservative_trades,
+            trades=primary_trades,
             total_pnl=total_pnl,
             conservative_pnl=conservative_final - request.initial_balance,
             optimistic_pnl=optimistic_final - request.initial_balance,
@@ -118,11 +131,12 @@ class BacktestEngine:
             to_date=request.to_date,
             initial_balance=request.initial_balance,
             final_balance=final_balance,
+            interval=request.interval,
             metrics=metrics,
-            trades=conservative_trades,
+            trades=primary_trades,
             fill_policy=request.fill_policy,
             generated_at=datetime.now(timezone.utc),
-            warnings=[],
+            warnings=warnings_list,
         )
         report.warnings.append(f"channel_score={score}")
         return report

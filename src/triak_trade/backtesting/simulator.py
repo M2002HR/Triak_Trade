@@ -59,6 +59,7 @@ class _OpenPosition:
     targets_hit: int
     manual_partial_exit: bool
     effective_leverage: Decimal = Decimal("1")
+    fee_rate_pct: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,8 @@ class BacktestSimulator:
         max_effective_leverage: Decimal | None = None,
         default_stop_pct: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
+        fee_rate_pct: Decimal = Decimal("0"),
+        default_signal_leverage: Decimal = Decimal("1"),
     ) -> tuple[list[SimulatedTrade], Decimal]:
         trades, balance, _snapshots = self._simulate_internal(
             events=events,
@@ -132,6 +135,8 @@ class BacktestSimulator:
             max_effective_leverage=max_effective_leverage,
             default_stop_pct=default_stop_pct,
             strategy=strategy,
+            fee_rate_pct=fee_rate_pct,
+            default_signal_leverage=default_signal_leverage,
         )
         return trades, balance
 
@@ -148,6 +153,8 @@ class BacktestSimulator:
         default_stop_pct: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
         snapshot_interval: timedelta | None = None,
+        fee_rate_pct: Decimal = Decimal("0"),
+        default_signal_leverage: Decimal = Decimal("1"),
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         return self._simulate_internal(
             events=events,
@@ -161,6 +168,8 @@ class BacktestSimulator:
             default_stop_pct=default_stop_pct,
             strategy=strategy,
             snapshot_interval=snapshot_interval,
+            fee_rate_pct=fee_rate_pct,
+            default_signal_leverage=default_signal_leverage,
         )
 
     def _simulate_internal(
@@ -177,6 +186,8 @@ class BacktestSimulator:
         default_stop_pct: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
         snapshot_interval: timedelta | None = None,
+        fee_rate_pct: Decimal = Decimal("0"),
+        default_signal_leverage: Decimal = Decimal("1"),
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         trades: list[SimulatedTrade] = []
         closed_trades_by_signal: dict[str, SimulatedTrade] = {}
@@ -303,7 +314,9 @@ class BacktestSimulator:
                 # Leverage caps how much notional the balance can support. Keep
                 # the risk-based quantity as primary sizing, but never let a
                 # position exceed balance * effective_leverage in notional.
-                signal_leverage = Decimal(event.leverage) if event.leverage else Decimal("1")
+                signal_leverage = (
+                    Decimal(event.leverage) if event.leverage else default_signal_leverage
+                )
                 if max_effective_leverage is None:
                     # Leverage modeling disabled: keep legacy risk-based sizing with
                     # no margin cap, and report return-on-notional (leverage 1).
@@ -321,6 +334,37 @@ class BacktestSimulator:
                                 f"risk_qty={qty}; capped_qty={max_qty_by_margin}"
                             )
                             qty = max_qty_by_margin
+                # B7: portfolio-level margin check — only when leverage modeling
+                # is active (max_effective_leverage is not None).  In legacy mode
+                # (None) no margin model is in effect, so we skip this gate.
+                #
+                # Use max_effective_leverage (the exchange cap) for portfolio
+                # accounting rather than each signal's effective_leverage.  When a
+                # signal has no explicit leverage the effective_leverage falls to 1,
+                # which would make used_margin equal the full notional and block all
+                # subsequent positions unfairly.  The exchange-level cap reflects the
+                # true shared margin capacity across the portfolio.
+                if max_effective_leverage is not None:
+                    portfolio_lev = max(max_effective_leverage, Decimal("1"))
+                    used_margin = sum(
+                        (pos.entry_price * pos.original_quantity) / portfolio_lev
+                        for pos in open_positions.values()
+                    )
+                    new_margin = (entry_price * qty) / portfolio_lev
+                    if used_margin + new_margin > balance:
+                        free_margin = max(balance - used_margin, Decimal("0"))
+                        if free_margin <= Decimal("0") or entry_price <= Decimal("0"):
+                            notes.append("rejected_insufficient_portfolio_margin")
+                            continue
+                        # Clamp qty to what free margin actually allows.
+                        clamped_qty = (free_margin * portfolio_lev) / entry_price
+                        notes.append(
+                            f"quantity_capped_portfolio_margin; "
+                            f"used={used_margin:.4f}; free={free_margin:.4f}; "
+                            f"req_margin={new_margin:.4f}; clamped_qty={clamped_qty:.6f}"
+                        )
+                        qty = clamped_qty
+
                 # Filter take-profits to only those on the correct side of
                 # entry.  A TP above entry for a SHORT (or below for a LONG)
                 # is a parser artefact; including it would trigger an
@@ -347,6 +391,11 @@ class BacktestSimulator:
                             "synthetic_take_profits_strategy="
                             + ",".join(str(item) for item in valid_tps)
                         )
+                entry_fee = (
+                    entry_price * qty * fee_rate_pct / Decimal("100")
+                    if fee_rate_pct > Decimal("0")
+                    else Decimal("0")
+                )
                 open_positions[event.signal_id or f"sig_{len(open_positions)+1}"] = _OpenPosition(
                     trade_id=f"trade_{event.signal_id or len(open_positions)+1}",
                     signal_id=event.signal_id or "unknown",
@@ -360,7 +409,7 @@ class BacktestSimulator:
                     remaining_quantity=qty,
                     entry_time=entry_time,
                     realized_pnl=Decimal("0"),
-                    realized_fees=Decimal("0"),
+                    realized_fees=entry_fee,
                     exit_price=None,
                     exit_time=None,
                     status="open",
@@ -368,6 +417,7 @@ class BacktestSimulator:
                     targets_hit=0,
                     manual_partial_exit=False,
                     effective_leverage=effective_leverage,
+                    fee_rate_pct=fee_rate_pct,
                 )
                 self._set_signal_level_history(
                     stop_loss_history=stop_loss_history,
@@ -581,7 +631,10 @@ class BacktestSimulator:
         candles: list[Candle],
         symbol: str,
     ) -> Decimal | None:
-        candle = next((c for c in candles if c.symbol == symbol and c.open_time >= ts), None)
+        candle = next(
+            (c for c in candles if same_market_symbol(c.symbol, symbol) and c.open_time >= ts),
+            None,
+        )
         return candle.open if candle is not None else None
 
     def _process_candles_until(
@@ -867,7 +920,13 @@ class BacktestSimulator:
         if effective_fraction >= Decimal("1") or quantity > position.remaining_quantity:
             quantity = position.remaining_quantity
         pnl = self._calculate_pnl(position, exit_price, quantity)
+        exit_fee = (
+            exit_price * quantity * position.fee_rate_pct / Decimal("100")
+            if position.fee_rate_pct > Decimal("0")
+            else Decimal("0")
+        )
         position.realized_pnl += pnl
+        position.realized_fees += exit_fee
         position.remaining_quantity -= quantity
         position.exit_time = exit_time
         position.exit_price = exit_price
@@ -908,8 +967,15 @@ class BacktestSimulator:
         # absolute dollar PnL is leverage-independent.
         leverage = position.effective_leverage if position.effective_leverage > 0 else Decimal("1")
         margin = exposure / leverage if exposure > Decimal("0") else Decimal("0")
+        # Net PnL is gross realized PnL minus all trading fees (entry + exits).
+        # Netting here — the single finalize chokepoint that every balance
+        # increment flows through — keeps balance, total_pnl, scoring and
+        # snapshots consistent (sum(trade.pnl) == total_pnl). With fee_rate=0
+        # realized_fees is 0, so this is a no-op for the default configuration.
+        fees = max(position.realized_fees, Decimal("0"))
+        net_pnl = position.realized_pnl - fees
         pnl_pct = (
-            (position.realized_pnl / margin) * Decimal("100")
+            (net_pnl / margin) * Decimal("100")
             if margin > Decimal("0")
             else Decimal("0")
         )
@@ -924,9 +990,9 @@ class BacktestSimulator:
             entry_price=position.entry_price,
             exit_price=position.exit_price,
             quantity=max(position.original_quantity, Decimal("0")),
-            pnl=position.realized_pnl,
+            pnl=net_pnl,
             pnl_pct=pnl_pct,
-            fees=max(position.realized_fees, Decimal("0")),
+            fees=fees,
             status=status,
             notes=list(position.notes),
         )
@@ -987,7 +1053,10 @@ class BacktestSimulator:
             unrealized = self._calculate_pnl(position, mark_price, position.remaining_quantity)
             unrealized_pnl += unrealized
             notional_value = position.entry_price * position.original_quantity
-            total_pnl = position.realized_pnl + unrealized
+            # Net the realized component by fees accrued so far (entry + any
+            # partial exits) so live snapshots match the finalized net PnL.
+            net_realized = position.realized_pnl - max(position.realized_fees, Decimal("0"))
+            total_pnl = net_realized + unrealized
             leverage = (
                 position.effective_leverage
                 if position.effective_leverage > 0
@@ -1009,7 +1078,7 @@ class BacktestSimulator:
                     abs(position.entry_price - position.stop_loss)
                     * position.original_quantity
                 ),
-                realized_pnl=position.realized_pnl,
+                realized_pnl=net_realized,
                 unrealized_pnl=unrealized,
                 total_pnl_pct=(
                     (total_pnl / margin) * Decimal("100")

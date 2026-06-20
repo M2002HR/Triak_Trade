@@ -328,6 +328,7 @@ class BacktestReport(BaseModel):
     to_date: datetime
     initial_balance: Decimal
     final_balance: Decimal
+    interval: str = "1m"
     metrics: ChannelMetrics
     trades: list[SimulatedTrade] = Field(default_factory=list)
     fill_policy: BacktestFillPolicy

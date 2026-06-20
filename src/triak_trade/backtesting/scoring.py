@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from triak_trade.backtesting.models import BacktestEvent
@@ -96,11 +96,13 @@ class ChannelScorer:
         parsed_signals = sum(1 for e in events if e.action is SignalAction.OPEN)
         ignored = sum(1 for e in events if e.action is SignalAction.IGNORE)
         invalid = sum(1 for e in events if e.action is SignalAction.UNKNOWN)
-        wins = sum(1 for t in trades if t.pnl > 0)
         filled_trades = [trade for trade in trades if trade.status != "not_filled"]
+        wins = sum(1 for t in filled_trades if t.pnl > 0)
         gross_win = sum((t.pnl for t in filled_trades if t.pnl > 0), Decimal("0"))
         gross_loss = sum((-t.pnl for t in filled_trades if t.pnl < 0), Decimal("0"))
-        win_rate = Decimal(wins) / Decimal(len(trades)) if trades else Decimal("0")
+        # Denominator is filled trades only (breakeven/not_filled excluded) so
+        # win_rate stays comparable to profit_factor and fill_rate.
+        win_rate = Decimal(wins) / Decimal(len(filled_trades)) if filled_trades else Decimal("0")
         profit_factor = (gross_win / gross_loss) if gross_loss > 0 else None
         expectancy = total_pnl / Decimal(len(trades)) if trades else Decimal("0")
         max_drawdown = _max_drawdown(trades)
@@ -214,10 +216,17 @@ class ChannelScorer:
 
 
 def _max_drawdown(trades: list[SimulatedTrade]) -> Decimal:
+    # Sort by exit_time so drawdown is computed in chronological order.
+    # Trades without an exit_time (not_filled / open_until_end written before
+    # close) sort to the end — they contribute zero PnL so order is irrelevant.
+    sorted_trades = sorted(
+        trades,
+        key=lambda t: t.exit_time or datetime(9999, 12, 31, tzinfo=timezone.utc),
+    )
     equity = Decimal("0")
     peak = Decimal("0")
     max_dd = Decimal("0")
-    for trade in trades:
+    for trade in sorted_trades:
         equity += trade.pnl
         peak = max(peak, equity)
         drawdown = peak - equity
