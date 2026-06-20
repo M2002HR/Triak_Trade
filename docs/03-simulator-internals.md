@@ -86,11 +86,14 @@ pnl = (exit_price - entry_price) * quantity * direction
 ```
 
 - PnL **دلاری** مستقل از اهرم است (درست).
-- در `_finalize_position` (`simulator.py:893`):
+- در `_finalize_position` (`simulator.py:921`):
+  `fees = max(realized_fees, 0)`؛ `net_pnl = realized_pnl - fees`
   `margin = (entry*original_qty) / leverage`
-  `pnl_pct = realized_pnl / margin * 100` → بازده‌ی روی margin (اهرم درصد را تقویت می‌کند).
+  `pnl_pct = net_pnl / margin * 100` → بازده‌ی روی margin (اهرم درصد را تقویت می‌کند).
+- `trade.pnl` اکنون **net از کارمزد** است و `trade.fees` کارمزد کل را جدا گزارش می‌کند.
 
-> ⚠️ `realized_fees` هرگز افزوده نمی‌شود → **کارمزد/اسلیپیج/فاندینگ صفر** است (فایل ۰۸ B3).
+> ✅ B3 (کارمزد) رفع شد: با تنظیم `BACKTEST_FEE_RATE_PCT` (پیش‌فرض `0`)، در باز کردن `entry_fee = entry*qty*rate/100` و در هر بستن `exit_fee = exit*qty*rate/100` به `realized_fees` افزوده و در `_finalize_position` از PnL کسر می‌شود. چون balance از `trade.pnl` ساخته می‌شود، کارمزد به‌طور سازگار در balance/total_pnl/scoring/drawdown اعمال می‌شود.
+> ⚠️ **اسلیپیج و فاندینگ** هنوز مدل نشده‌اند (فایل ۰۸ B3 — باقی‌مانده).
 
 ## وضعیت‌های ترید (status)
 
@@ -106,7 +109,7 @@ pnl = (exit_price - entry_price) * quantity * direction
 - `CLOSE` (follow-up): قیمت = اولین `open` کندل بعد از event، با fallback به `entry_price`. کسر = `close_fraction or 1`.
 - `close_all`: روی همه‌ی پوزیشن‌ها.
 
-> ⚠️ `_first_candle_open_after` (`simulator.py:574`) از تطبیق **دقیق** `c.symbol == symbol` استفاده می‌کند، نه `same_market_symbol` — ناهمگون با بقیه‌ی کد (فایل ۰۸ B4).
+> ✅ B4 رفع شد: `_first_candle_open_after` (`simulator.py:596`) اکنون از `same_market_symbol(c.symbol, symbol)` استفاده می‌کند (مطابق `_last_price` و `_find_entry_execution`) تا فرمت‌های متفاوت نماد (مثل `BTCUSDT` در مقابل `BTC-SWAP-USDT`) به‌درستی match شوند.
 
 ## Snapshotها — `_build_snapshot` (`simulator.py:924`)
 

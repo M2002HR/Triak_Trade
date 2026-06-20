@@ -8,15 +8,15 @@
 |-------|--------|
 | `parsed_signals` | تعداد eventهای OPEN |
 | `ignored` / `invalid` | eventهای IGNORE / UNKNOWN |
-| `wins` | `t.pnl > 0` روی **همه‌ی** تریدها |
 | `filled_trades` | `status != "not_filled"` |
+| `wins` | `t.pnl > 0` روی **filled_trades** (B6 رفع‌شده) |
 | `gross_win/loss` | جمع pnl مثبت/منفی روی filled |
-| `win_rate` | `wins / len(trades)` ← **مخرج: همه‌ی تریدها (شامل not_filled و breakeven)** |
+| `win_rate` | `wins / len(filled_trades)` ← مخرج فقط تریدهای filled (✅ هم‌مقیاس با profit_factor) |
 | `profit_factor` | `gross_win / gross_loss` یا None اگر loss صفر |
 | `expectancy` | `total_pnl / len(trades)` |
 | `max_drawdown` | بیشینه افت equity تجمعی (`_max_drawdown`) |
 
-> ⚠️ ناهماهنگی مخرج: `win_rate` روی همه‌ی تریدها ولی `profit_factor`/wins-losses در breakdown روی filled. این win_rate را به‌طور سیستماتیک پایین می‌آورد (فایل ۰۸ **B6**).
+> ✅ B6 رفع شد: `win_rate` اکنون روی `filled_trades` است (نه همه‌ی تریدها)، پس با `profit_factor`/`fill_rate` هم‌مقیاس است. تریدهای `pnl` در اینجا **net از کارمزد** هستند (B3).
 
 > ⚠️ `_max_drawdown` (`scoring.py:216`) روی **ترتیب لیست تریدها** equity می‌سازد، نه ترتیب زمانی `exit_time`؛ و فقط PnLِ realized بسته‌شده را می‌بیند (drawdown داخل-ترید/unrealized نادیده) (فایل ۰۸ B9).
 

@@ -2,70 +2,101 @@
 
 > این فایل حساس‌ترین بخش بازبینی است. هر مورد با **شناسه، شدت، محل دقیق، توضیح، و پیشنهاد رفع** آمده.
 > شدت‌ها: 🔴 بحرانی · 🟠 مهم · 🟡 متوسط · ⚪ جزئی/بهبود.
->
-> هیچ کدی در این بازبینی تغییر داده نشده است؛ این موارد پیشنهادی‌اند و باید با تست تأیید شوند.
+
+## وضعیت رفع‌ها (تا تاریخ بازبینی)
+
+این موارد در همین بازبینی **رفع و با تست پوشش داده شدند** (تست‌ها سبز، `ruff`/`mypy` پاس):
+
+| شناسه | موضوع | وضعیت |
+|-------|-------|-------|
+| **B2** | یکپارچگی `total_pnl` با لیست تریدها (`primary_trades`) | ✅ رفع شد |
+| **B3** | کارمزد معاملاتی (`BACKTEST_FEE_RATE_PCT`, netting در PnL/balance) | ✅ رفع شد (اسلیپیج/فاندینگ هنوز باز) |
+| **B4** | تطبیق نماد ناهمگون در `_first_candle_open_after` | ✅ رفع شد |
+| **B6** | مخرج `win_rate` فقط روی تریدهای filled | ✅ رفع شد |
+| **B10/W10** | warning صریح `account_blown_up=true` | ✅ نیمه‌رفع |
+| **W4** | interval در خلاصه تلگرام از `report.interval` (نه `notes[0]`) | ✅ رفع شد |
+| **B1** | throttle O(N²): live sim فقط روی signal events + هر N پیام passive | ✅ رفع شد |
+| **B7** | سقف margin تجمعی: clamping qty به free_margin قبل از باز کردن | ✅ رفع شد |
+| **B9** | sort تریدها بر اساس `exit_time` برای drawdown و equity curve | ✅ رفع شد |
+| **W3** | logging.warning قبل از fallback به default strategy | ✅ رفع شد |
+| **W6** | اعمال `REAL_BACKTEST_MAX_CANDLES` قبل از simulate | ✅ رفع شد |
+| **W8** | profit_factor=None → ∞ در telegram summary | ✅ رفع شد |
+
+فایل‌های تغییر‌یافته: `engine.py`, `scoring.py`, `simulator.py`, `config/settings.py`, `real_runner.py`, `report.py`, `domain/models.py`, `strategies/registry.py` + تست جدید `tests/backtesting/test_backtest_fee_and_consistency.py`.
+
+بقیه‌ی موارد (B5, B8, B11, W1, W2, W5, W7, W9) **هنوز باز** و صرفاً پیشنهادی‌اند.
 
 ---
 
 ## باگ‌های صحت محاسبات مالی (مهم‌ترین دسته)
 
-### 🔴 B1 — شبیه‌سازی زنده O(N²): بازاجرای کامل به‌ازای هر پیام
-**محل**: `real_runner.py:2279 _update_live_simulation_state`، فراخوانی در `:1434`, `:1890` و promote.
+### 🔴 B1 — شبیه‌سازی زنده O(N²): بازاجرای کامل به‌ازای هر پیام — ✅ رفع شد (throttle)
+**محل**: `real_runner.py` — `_build_events_with_traces` + `_update_live_simulation_state` + `_emit_interval_snapshots`.
 
-`_update_live_simulation_state` بعد از **هر** پیام، `simulator.simulate_with_snapshots(...)` را روی **تمام** رویدادها و **تمام** کندل‌های جمع‌شده از صفر اجرا می‌کند. برای N پیام و M کندل، هزینه ~ O(N²·M). با `REAL_BACKTEST_MAX_MESSAGES=1000` و کندل‌های ۱m روی ۲۴ ساعت چند نماد، این یعنی صدها بازاجرای کامل + emit رویداد. علاوه بر این:
-- `_emit_interval_snapshots` (`:2346`) **همه‌ی** snapshotهای interval را هر بار دوباره emit می‌کند (نه فقط جدیدها) → انفجار رویداد.
-- هر emit در داشبورد منجر به یک بازنویسی کامل فایل JSON می‌شود (B8).
+**مشکل اصلی:** `_update_live_simulation_state` بعد از **هر** پیام (شامل پیام‌های empty/IGNORE) از صفر شبیه‌سازی می‌کرد → O(N²). `_emit_interval_snapshots` هم هر بار **همه‌ی** snapshotهای تاریخی را emit می‌کرد.
 
-**اثر**: کندی شدید، مصرف CPU/I/O بالا، احتمال timeout روی runهای واقعی بزرگ.
+**رفع انجام‌شده:**
+1. **Throttle signal-aware**: در حلقه‌ی پیام‌ها (`_build_events_with_traces`)، live sim فقط زمانی اجرا می‌شود که:
+   - پیام دارای event سیگنال‌دار (OPEN/CLOSE/CANCEL/UPDATE_*) باشد → همیشه فوری.
+   - یا `_passive_since_update >= REAL_BACKTEST_LIVE_SIM_UPDATE_EVERY_N` passive پیام گذشته باشد (پیش‌فرض ۱۰).
+   - بین دو اجرا، آخرین نتیجه‌ی live از cache (`_live_metrics_cache`, `_live_signals_cache`) استفاده می‌شود.
+2. **Interval snapshot cursor**: `emitted_interval_count: list[int]` به هر فراخوانی پاس داده می‌شود. `_emit_interval_snapshots` فقط snapshotهای **جدید** (ایندکس > cursor) emit می‌کند — انفجار event برطرف شد.
+3. **تنظیم جدید** `REAL_BACKTEST_LIVE_SIM_UPDATE_EVERY_N: int = 10`.
 
-**پیشنهاد**:
-- شبیه‌سازی زنده را incremental کنید: وضعیت پوزیشن‌ها را نگه دارید و فقط کندل/رویداد جدید را اعمال کنید؛ یا
-- live update را throttle کنید (مثلاً هر K پیام یا هر T ثانیه)، یا فقط روی delta رویدادها.
-- `_emit_interval_snapshots` فقط snapshotهای جدید نسبت به آخرین emit را بفرستد (یک cursor نگه دارید).
+**اثر**: برای ۱۰۰۰ پیام با ۵۰ سیگنال و ۹۵۰ passive، تعداد اجراهای کامل شبیه‌سازی از ۱۰۰۰ به ~۱۴۵ (۵۰ سیگنال + ۹۵ بلوک passive) کاهش می‌یابد.
 
 ---
 
-### 🔴 B2 — ناهماهنگی conservative/optimistic بین `total_pnl` و لیست تریدها
-**محل**: `engine.py:85-128`.
+### 🔴 B2 — ناهماهنگی conservative/optimistic بین `total_pnl` و لیست تریدها — ✅ رفع شد
+**محل**: `engine.py:96-135`.
 
-`report.trades` همیشه `conservative_trades` است، ولی:
+**مشکل اصلی (نسخه‌ی قبلی):** `report.trades` همیشه `conservative_trades` بود، ولی `final_balance`/`total_pnl` بسته به `fill_policy` می‌توانست از optimistic بیاید. در نتیجه `win_rate`, `profit_factor`, `max_drawdown` و equity curve از conservative محاسبه می‌شدند ولی `total_pnl` از optimistic → `sum(trade.pnl) ≠ total_pnl` و equity curve به final_balance نمی‌رسید.
+
+**رفع انجام‌شده:** اکنون یک مجموعه‌ی واحد `primary_trades`/`primary_final` مطابق `request.fill_policy` انتخاب و **هم** برای متریک‌ها/scoring و **هم** برای `report.trades` و `total_pnl` استفاده می‌شود:
 ```python
-final_balance = max(optimistic_final if fill_policy==OPTIMISTIC else conservative_final, 0)
-total_pnl = final_balance - initial_balance
+if request.fill_policy is BacktestFillPolicy.CONSERVATIVE:
+    primary_trades, primary_final = conservative_trades, conservative_final
+else:
+    primary_trades, primary_final = optimistic_trades, optimistic_final
+...
+trades=primary_trades,                      # report
+scorer.score_with_breakdown(trades=primary_trades, ...)
 ```
-وقتی `fill_policy=OPTIMISTIC`، `total_pnl` از optimistic می‌آید ولی `win_rate`, `profit_factor`, `max_drawdown`, equity curve همگی از conservative_trades محاسبه می‌شوند. در نتیجه:
-- `sum(trade.pnl for trade in report.trades) ≠ total_pnl`.
-- `expectancy = total_pnl / len(trades)` با تریدهای ناهمخوان.
-- equity curve به final_balance نمی‌رسد.
+اینورینت `sum(trade.pnl) == final_balance - initial_balance` اکنون برقرار است (تست: `tests/backtesting/test_backtest_fee_and_consistency.py`).
 
-**اثر**: گزارش از درون ناسازگار؛ امتیاز و متریک‌ها قابل‌اتکا نیستند در حالت optimistic.
-
-**پیشنهاد**: متریک‌ها و total_pnl را از **همان** مجموعه‌ی تریدِ منتخب fill_policy بسازید. یا هر دو مجموعه را جدا گزارش کنید و هیچ‌گاه آن‌ها را mix نکنید.
+> نکته‌ی باقی‌مانده: در حالت blow-up (balance منفی)، clamp شدن `final_balance` به صفر این اینورینت را می‌شکند؛ این حالت اکنون با warning صریح `account_blown_up=true` علامت‌گذاری می‌شود (B10).
 
 ---
 
-### 🔴 B3 — کارمزد، اسلیپیج و فاندینگ مدل نشده
-**محل**: `simulator.py:845 _close_fraction_of_position`، فیلد `realized_fees`.
+### 🔴 B3 — کارمزد مدل نشده — ✅ رفع شد (کارمزد) · ⚠️ اسلیپیج/فاندینگ هنوز باز
+**محل**: `simulator.py` (`_simulate_internal` entry fee، `_close_fraction_of_position:879` exit fee، `_finalize_position:921` netting)، `settings.py:BACKTEST_FEE_RATE_PCT`.
 
-`realized_fees` هرگز افزایش نمی‌یابد (`_calculate_pnl` فقط قیمت*مقدار است). `_finalize_position` فقط `max(realized_fees, 0)=0` را گزارش می‌کند. هیچ کارمزد taker/maker، اسلیپیج، یا funding rate (برای فیوچرز ۲۴ساعته) لحاظ نمی‌شود.
+**مشکل اصلی (نسخه‌ی قبلی):** `realized_fees` هرگز افزایش نمی‌یافت و `pnl = realized_pnl` بدون کسر کارمزد بود → PnL سیستماتیک خوش‌بینانه.
 
-**اثر**: PnL سیستماتیک **خوش‌بینانه**؛ برای استراتژی‌های پر-معامله/اهرم‌بالا اختلاف می‌تواند زیاد باشد. امتیاز کانال بیش‌برآورد می‌شود.
+**رفع انجام‌شده — کارمزد:**
+- تنظیم جدید `BACKTEST_FEE_RATE_PCT` (پیش‌فرض `0` → بدون تغییر رفتار) که درصد کارمزد per-side روی notional است.
+- در باز کردن پوزیشن: `entry_fee = entry_price * qty * fee_rate/100` به `realized_fees` افزوده می‌شود.
+- در هر بستن (کامل/partial): `exit_fee = exit_price * quantity * fee_rate/100` به `realized_fees` افزوده می‌شود.
+- در `_finalize_position`: `pnl = realized_pnl - realized_fees` (net) و `fees = realized_fees` جداگانه گزارش می‌شود. چون balance از `trade.pnl` ساخته می‌شود، کارمزد به‌طور سازگار در balance/total_pnl/scoring/drawdown و snapshotهای زنده اعمال می‌شود (اینورینت B2 حفظ می‌شود).
+- plumbing: `engine.run_from_events(fee_rate_pct=...)` و در `real_runner` از `settings.BACKTEST_FEE_RATE_PCT` به هر دو `simulate` و `simulate_with_snapshots` پاس داده می‌شود.
+- تست: `tests/backtesting/test_backtest_fee_and_consistency.py`.
 
-**پیشنهاد**:
-- پارامتر `fee_rate` (و اختیاری `slippage_bps`, `funding_rate`) به شبیه‌ساز اضافه کنید.
-- در هر fill: `fee = exit_notional * fee_rate` (و entry fee)، به `realized_fees` و در PnL کسر شود.
-- funding بر حسب مدت نگهداری × نرخ برای پوزیشن‌های فیوچرز.
+**باقی‌مانده (باز):**
+- **اسلیپیج** هنوز مدل نشده (fill دقیقاً روی قیمت تئوریک). پیشنهاد: `slippage_bps` روی قیمت fill در جهت نامطلوب.
+- **فاندینگ** برای فیوچرز ۲۴ساعته هنوز نیست. پیشنهاد: `funding_rate × مدت نگهداری` روی پوزیشن‌های باز.
 
 ---
 
-### 🟠 B4 — تطبیق نماد ناهمگون (`==` به‌جای `same_market_symbol`)
-**محل**: `simulator.py:580 _first_candle_open_after` (`c.symbol == symbol`).
+### 🟠 B4 — تطبیق نماد ناهمگون (`==` به‌جای `same_market_symbol`) — ✅ رفع شد
+**محل**: `simulator.py:596 _first_candle_open_after`.
 
-بقیه‌ی کد از `same_market_symbol`/`canonical_market_symbol` استفاده می‌کند، ولی این تابع تطبیق دقیق رشته‌ای دارد. وقتی `position.symbol` فرمت متفاوتی از `candle.symbol` دارد (مثلاً پس از `selected_symbol` که در real_runner ممکن است `BTCUSDT_PERP` و کندل `BTCUSDT` باشد)، lookup شکست می‌خورد و close دستی/close_all به `entry_price` fallback می‌کند → PnL صفر اشتباه برای آن خروج.
+**مشکل اصلی (نسخه‌ی قبلی):** `c.symbol == symbol` (مقایسه‌ی دقیق رشته) در تنها تابعی که قیمت خروج دستی (`CLOSE`/`close_all`) را می‌یابد. اگر `position.symbol` فرمت متفاوتی داشت (مثلاً `BTC-SWAP-USDT` از Toobit در مقابل کندل `BTCUSDT` از Binance Public)، lookup شکست می‌خورد و fallback به `entry_price` → PnL اشتباه صفر.
 
-**اثر**: بستن دستی/CLOSE/close_all ممکن است به‌جای قیمت واقعی، breakeven ثبت کند.
-
-**پیشنهاد**: از `same_market_symbol(c.symbol, symbol)` استفاده کنید (مطابق `_last_price` و `_find_entry_execution`).
+**رفع انجام‌شده:** خط ۵۹۶ اکنون:
+```python
+candle = next((c for c in candles if same_market_symbol(c.symbol, symbol) and ...), None)
+```
+مطابق `_last_price` و `_find_entry_execution` که هر دو از `same_market_symbol` استفاده می‌کردند. `same_market_symbol` از `canonical_market_symbol` (در `core/symbols.py`) استفاده می‌کند که SWAP-variants را نرمال می‌کند — و قبلاً import بود.
 
 ---
 
@@ -80,25 +111,41 @@ total_pnl = final_balance - initial_balance
 
 ---
 
-### 🟠 B6 — مخرج `win_rate` شامل تریدهای پر-نشده و breakeven
-**محل**: `scoring.py:103` (`wins / len(trades)`).
+### 🟠 B6 — مخرج `win_rate` شامل تریدهای پر-نشده و breakeven — ✅ رفع شد
+**محل**: `scoring.py:99-105`.
 
-`len(trades)` شامل `not_filled` و تریدهای breakeven (pnl==0، که نه win نه loss شمرده می‌شوند) است. در حالی‌که `profit_factor`/`fill_rate` روی `filled_trades` کار می‌کنند. با استراتژی risk-free که SL را به entry می‌برد، تریدهای breakeven فراوان‌اند و `win_rate` را به‌طور مصنوعی پایین می‌کشند.
+**مشکل اصلی (نسخه‌ی قبلی):** `win_rate = wins / len(trades)` که `not_filled` و breakeven را هم در مخرج می‌آورد، در حالی‌که `profit_factor`/`fill_rate` روی `filled_trades` کار می‌کردند → `win_rate` سیستماتیک کم‌برآورد و در نتیجه `win_rate_score` (وزن ۰.۱۸) ناعادلانه پایین.
 
-**اثر**: `win_rate` و در نتیجه `win_rate_score` (وزن ۰.۱۸) سیستماتیک کم‌برآورد؛ امتیاز کانال ناعادلانه پایین.
+**رفع انجام‌شده:** مخرج اکنون `filled_trades` است:
+```python
+filled_trades = [t for t in trades if t.status != "not_filled"]
+wins = sum(1 for t in filled_trades if t.pnl > 0)
+win_rate = Decimal(wins) / Decimal(len(filled_trades)) if filled_trades else Decimal("0")
+```
+این `win_rate` را با `profit_factor` و `fill_rate` هم‌مقیاس می‌کند. تست: `test_backtest_fee_and_consistency.py::test_win_rate_denominator_excludes_not_filled_and_breakeven`.
 
-**پیشنهاد**: `win_rate = wins / filled_count` (یا حداقل حذف not_filled از مخرج)، و تصمیم صریح برای breakeven (شمارش جدا).
+> نکته: تریدهای breakeven (`pnl==0`) هنوز در مخرج هستند ولی win شمرده نمی‌شوند. اگر بخواهید breakeven کاملاً خنثی باشد، می‌توان آن‌ها را از مخرج هم حذف کرد — این یک تصمیم محصولی است (هنوز باز).
 
 ---
 
-### 🟠 B7 — نبود سقف اکسپوژر/margin تجمعی بین پوزیشن‌های هم‌زمان
-**محل**: `simulator.py:294-319` (سایزینگ).
+### 🟠 B7 — نبود سقف اکسپوژر/margin تجمعی بین پوزیشن‌های هم‌زمان — ✅ رفع شد
+**محل**: `simulator.py:330-351` (بعد از سایزینگ اهرمی، قبل از فیلتر TP).
 
-هر OPEN مستقل با `balance` لحظه‌ای (فقط realized) سایز می‌شود. اگر چند سیگنال هم‌زمان باز باشند، مجموع margin مصرفی می‌تواند از کل balance بیشتر شود؛ هیچ بررسی margin پرتفویی نیست. همچنین balance برای سایزینگ شامل unrealized پوزیشن‌های باز نیست.
+**مشکل اصلی:** هر OPEN مستقل با `balance` سایز می‌شد. مجموع margin چند پوزیشن هم‌زمان می‌توانست از balance بیشتر شود.
 
-**اثر**: اکسپوژر غیرواقعی (اهرم مؤثر کل > سقف)، PnL غیرقابل‌بازتولید در حساب واقعی.
-
-**پیشنهاد**: یک حساب margin مشترک نگه دارید؛ قبل از باز کردن، margin آزاد را چک کنید و در صورت کمبود رد/کاهش دهید.
+**رفع انجام‌شده:**
+```python
+used_margin = sum((pos.entry_price * pos.original_quantity) / pos.effective_leverage
+                  for pos in open_positions.values())
+new_margin = (entry_price * qty) / effective_leverage
+if used_margin + new_margin > balance:
+    free_margin = max(balance - used_margin, Decimal("0"))
+    if free_margin <= Decimal("0"):
+        notes.append("rejected_insufficient_portfolio_margin"); continue
+    qty = (free_margin * effective_leverage) / entry_price  # clamp
+    notes.append(f"quantity_capped_portfolio_margin; ...")
+```
+اگر free margin کافی نباشد: qty clamp به مقدار واقعی، یا رد کامل اگر free_margin صفر باشد. هر دو trace در `notes` ثبت می‌شوند.
 
 ---
 
@@ -111,14 +158,16 @@ total_pnl = final_balance - initial_balance
 
 ---
 
-### 🟡 B9 — drawdown و equity curve بر اساس ترتیب لیست تریدها، نه زمان
-**محل**: `scoring.py:216 _max_drawdown`، `report.py:140 _equity_curve`.
+### 🟡 B9 — drawdown و equity curve بر اساس ترتیب لیست تریدها، نه زمان — ✅ رفع شد
+**محل**: `scoring.py:218 _max_drawdown`، `report.py:139 _equity_curve`.
 
-تریدها به ترتیب «resolution» append می‌شوند (ابتدا تریدهای حل‌شده در پردازش کندل، بعد no-fill/eventها، در پایان open-until-end). این لزوماً ترتیب `exit_time` نیست. drawdown و equity curve روی این ترتیب ساخته می‌شوند.
+**مشکل اصلی:** ترتیب تریدها در لیست لزوماً ترتیب زمانی نبود.
 
-**اثر**: max_drawdown و منحنی equity ممکن است از نظر زمانی نادرست باشند؛ drawdown داخل-ترید (unrealized) اصلاً دیده نمی‌شود.
-
-**پیشنهاد**: تریدها را قبل از محاسبه بر اساس `exit_time` (یا entry_time) مرتب کنید؛ برای drawdown دقیق‌تر از equity مبتنی بر snapshot (که از قبل وجود دارد) استفاده کنید.
+**رفع انجام‌شده:** هر دو تابع اکنون قبل از محاسبه روی `exit_time` مرتب می‌کنند:
+```python
+sorted_trades = sorted(trades, key=lambda t: t.exit_time or datetime(9999, 12, 31, tzinfo=timezone.utc))
+```
+تریدهای بدون `exit_time` (not_filled) به انتها می‌روند و چون PnL صفر دارند، ترتیبشان بی‌اثر است. `import timezone` به هر دو فایل اضافه شد تا sentinel timezone-aware باشد.
 
 ---
 
@@ -154,11 +203,15 @@ total_pnl = final_balance - initial_balance
 
 **پیشنهاد**: یک پرچم runtime مجزا (مثلاً همان `REAL_BACKTEST_ENABLED`) کافی باشد؛ ساخت پوشه را به مسیر اجرای واقعی منتقل کنید نه به readiness.
 
-### 🟡 W3 — بازگشت بی‌صدا به strategy پیش‌فرض هنگام خطای config
-**محل**: `strategies/registry.py:111, 193` (`except Exception`). اگر `strategies.yaml` خراب باشد، بی‌هیچ warning نسخه‌ی پیش‌فرض اجرا می‌شود. **پیشنهاد**: حداقل log/warning بدهید.
+### 🟡 W3 — بازگشت بی‌صدا به strategy پیش‌فرض هنگام خطای config — ✅ رفع شد
+**محل**: `strategies/registry.py` (دو `except Exception`). اکنون هر دو `except` با `logging.warning(..., exc_info=True)` خطا را log می‌کنند قبل از fallback به default. `logger = logging.getLogger(__name__)` اضافه شد.
 
-### 🟡 W4 — interval اشتباه در خلاصه‌ی تلگرام
-**محل**: `report.py:30` — `interval` را از `trades[0].notes[0]` می‌خواند که یک note (مثل synthetic_stop) است، نه interval. **پیشنهاد**: interval را از request به report منتقل و مستقیم استفاده کنید.
+### 🟡 W4 — interval اشتباه در خلاصه‌ی تلگرام — ✅ رفع شد
+**محل**: `report.py:29`، `domain/models.py:325`، `engine.py:125`.
+
+**مشکل اصلی:** `interval = report.trades[0].notes[0]` — اولین note یک ترید (مثل `synthetic_stop=...`) را به‌اشتباه به‌عنوان interval نمایش می‌داد.
+
+**رفع انجام‌شده:** فیلد `interval: str = "1m"` به `BacktestReport` اضافه شد (پیش‌فرض `"1m"` برای سازگاری با کد قدیمی)؛ در `engine.py` از `request.interval` پر می‌شود؛ `report_to_telegram_summary` اکنون مستقیماً از `report.interval` استفاده می‌کند.
 
 ### 🟡 W5 — اختلاط datetime naive/aware در candle cache
 **محل**: `candle_cache.py:72 _as_utc`. خروجی گاهی naive و گاهی aware؛ مقایسه‌ها می‌توانند خطا/لغزش بدهند. **پیشنهاد**: یکدست aware-UTC نگه دارید.
@@ -169,14 +222,16 @@ total_pnl = final_balance - initial_balance
 ### 🟡 W7 — `detect_tp_list_update` می‌تواند اعداد نامرتبط را به‌عنوان TP بگیرد
 **محل**: `directives.py:100`. هر پیام با مارکر «tp/تارگت/اهداف» و ≥۲ عدد، آن اعداد را TP ladder می‌گیرد (با `replace(",","")`). اعداد تاریخ/درصد/شناسه ممکن است اشتباه به‌عنوان قیمت گرفته شوند. **پیشنهاد**: فیلتر بازه‌ی قیمت معقول نسبت به entry/قیمت بازار؛ یا حذف اعداد با علامت `%`.
 
-### ⚪ W8 — `profit_factor=None` در خروجی چاپ می‌شود
-**محل**: `report.py:47`. وقتی هیچ ضرری نیست، «Profit factor: None» نمایش داده می‌شود. **پیشنهاد**: «∞» یا «N/A».
+### ⚪ W8 — `profit_factor=None` در خروجی چاپ می‌شود — ✅ رفع شد
+**محل**: `report.py:47`. اکنون: `metrics.profit_factor if metrics.profit_factor is not None else '∞'`
 
 ### ⚪ W9 — degrade بی‌صدای AI به ai_failed
 **محل**: `real_runner.py:1456`. اگر گیت‌وی AI قطع شود، **همه‌ی** پیام‌ها `ai_failed` می‌شوند، هیچ ترید ساخته نمی‌شود، ولی run همچنان `success=True` با صفر سیگنال است (warning می‌خورد). تشخیص بین «کانال سیگنال نداشت» و «AI کلاً قطع بود» برای کاربر سخت می‌شود. **پیشنهاد**: اگر نرخ `ai_failed` از آستانه‌ای گذشت، run را failure با دلیل صریح علامت بزنید.
 
-### ⚪ W10 — clamp نهایی `final_balance` به صفر، blow-up را پنهان می‌کند
-**محل**: `engine.py:96`. اگر استراتژی حساب را منفی کند، `final_balance=max(...,0)` و گزارش معتبر می‌ماند (validator نیاز به `≥0` دارد). drawdown بیش از ۱۰۰٪ پنهان می‌شود. **پیشنهاد**: یک پرچم `liquidated/blown_up` و گزارش drawdown واقعی.
+### 🟡 W10 (B10) — clamp نهایی `final_balance` به صفر، blow-up را پنهان می‌کند — ✅ نیمه‌رفع
+**محل**: `engine.py:104-109`. اگر استراتژی حساب را منفی کند، `final_balance=max(...,0)` همچنان اعمال می‌شود (برای سازگاری با validatorِ `≥0`). **رفع انجام‌شده:** اکنون اگر `raw_final_balance < 0`، warningِ صریح `account_blown_up=true` به گزارش افزوده می‌شود تا blow-up پنهان نماند.
+
+**باقی‌مانده (باز):** مقدار drawdown واقعی (بیش از ۱۰۰٪) همچنان clamp و گزارش نمی‌شود؛ پیشنهاد: یک متریک/پرچم `liquidated` با drawdown حقیقی.
 
 ---
 
@@ -191,13 +246,14 @@ total_pnl = final_balance - initial_balance
 
 ---
 
-## اولویت‌بندی پیشنهادی رفع
+## اولویت‌بندی پیشنهادی رفع (موارد باقی‌مانده)
 
-1. **B1** (کارایی O(N²)) — بیشترین اثر عملی روی runهای واقعی.
-2. **B2 + B6** (ناهماهنگی متریک‌ها و win_rate) — اعتبار گزارش/امتیاز.
-3. **B3** (کارمزد/اسلیپیج) — واقع‌گرایی PnL.
-4. **B4** (تطبیق نماد در close) — صحت خروج‌های دستی.
-5. **B7 / B9 / B10** — واقع‌گرایی ریسک و drawdown.
-6. بقیه‌ی W ها — استحکام و تجربه‌ی کاربری.
+1. **B1** (کارایی O(N²)) — بیشترین اثر عملی روی runهای واقعی. (همراه B8)
+2. **B3 (باقی‌مانده)** اسلیپیج/فاندینگ — واقع‌گرایی بیشتر PnL.
+3. **B7 / B9** — واقع‌گرایی ریسک و drawdown زمانی.
+4. **B5** — fill در midpoint بجای لبه برای RANGE entry.
+5. بقیه‌ی W ها — استحکام و تجربه‌ی کاربری.
+
+> ✅ رفع‌شده در این بازبینی: **B2، B3 (کارمزد)، B4، B6، B10**.
 
 > پیش از هر تغییر: تست مربوطه را در `tests/backtesting/` اجرا و یک تست رگرسیون برای رفتار درست اضافه کنید (`pytest`, `ruff check .`, `mypy src` طبق `AGENTS.md`).
