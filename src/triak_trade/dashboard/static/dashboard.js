@@ -939,6 +939,8 @@ document.documentElement.dataset.dashboardReady = "true";
           ${detailMetric("Entry Price", signal.entry_price || "n/a")}
           ${detailMetric("Mark Price", signal.mark_price || "n/a")}
           ${detailMetric("Stop Loss", signal.stop_loss || "n/a")}
+          ${detailMetric("Leverage", signal.leverage ? `${signal.leverage}×` : "n/a")}
+          ${detailMetric("Margin", signal.margin || "0")}
           ${detailMetric("Original Quantity", signal.original_quantity || "0")}
           ${detailMetric("Open Quantity", signal.open_quantity || "0")}
           ${detailMetric("Risk Amount", signal.risk_amount || "0")}
@@ -948,6 +950,7 @@ document.documentElement.dataset.dashboardReady = "true";
           ${detailMetric("Total PnL %", signal.total_pnl_pct ?? "0", pnlClassName(signal.total_pnl_pct))}
           ${detailMetric("Realized PnL", signal.realized_pnl ?? "0", pnlClassName(signal.realized_pnl))}
           ${detailMetric("Unrealized PnL", signal.unrealized_pnl ?? "0", pnlClassName(signal.unrealized_pnl))}
+          ${signal.message_link ? `<div class="metric-item"><span class="metric-label">Telegram Link</span><span class="metric-value"><a href="${escapeHtml(signal.message_link)}" target="_blank" rel="noreferrer">Open Message ↗</a></span></div>` : ""}
         </div>
         <section class="signal-detail-section">
           <h3>Price Lifecycle Chart</h3>
