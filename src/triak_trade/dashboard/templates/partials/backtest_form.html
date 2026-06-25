@@ -125,7 +125,7 @@
       <span class="help-text">Default capital for the live simulation. Default: 100.</span>
     </label>
 
-    <label class="field">Risk Per Signal %
+    <label class="field">Allocation Factor
       <input
         id="backtest-risk-per-trade-pct"
         name="risk_per_trade_pct"
@@ -135,7 +135,7 @@
         value="{{ bootstrap.default_risk_per_trade_pct }}"
         required
       >
-      <span class="help-text">Used for compounding position sizing. Default: 3%.</span>
+      <span class="help-text">Actual allocation % is computed as factor / leverage, then clamped between the configured min and max. Default factor: 120.</span>
     </label>
 
     <section class="panel subtle-panel span-2 strategy-panel">

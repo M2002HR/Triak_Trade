@@ -154,6 +154,9 @@ class FakeRunner:
                             "entry_price": "68010",
                             "stop_loss": "67400",
                             "take_profits": ["69000", "70000"],
+                            "declared_leverage": "10",
+                            "effective_leverage": "10",
+                            "leverage": "10",
                             "open_quantity": "1",
                             "mark_price": "68100",
                             "realized_pnl": "0",
@@ -454,6 +457,9 @@ def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_
                     "entry_price": "68010",
                     "stop_loss": "67400",
                     "take_profits": ["69000", "70000"],
+                    "declared_leverage": "10",
+                    "effective_leverage": "10",
+                    "leverage": "10",
                     "open_quantity": "1",
                     "mark_price": "68100",
                     "realized_pnl": "0",
@@ -461,6 +467,40 @@ def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_
                     "total_pnl": "2.5",
                     "targets_hit": 0,
                     "lifecycle": ["created"],
+                    "chart": {
+                        "interval": "1m",
+                        "candles": [
+                            {
+                                "timestamp": now.isoformat(),
+                                "timestamp_tehran": "2026-06-04T03:30:00+03:30",
+                                "timestamp_ms": "1780531200000",
+                                "close_timestamp": now.isoformat(),
+                                "close_timestamp_tehran": "2026-06-04T03:30:59+03:30",
+                                "close_timestamp_ms": "1780531259000",
+                                "open": "68000",
+                                "high": "68200",
+                                "low": "67950",
+                                "close": "68100",
+                                "mark_price": "68100",
+                                "stop_loss": "67400",
+                                "take_profits": ["69000", "70000"],
+                            }
+                        ],
+                        "stop_loss_history": [
+                            {
+                                "kind": "stop_loss",
+                                "label": "SL",
+                                "value": "67400",
+                                "started_at": now.isoformat(),
+                                "started_at_tehran": "2026-06-04T03:30:00+03:30",
+                                "started_at_ms": "1780531200000",
+                                "ended_at": None,
+                                "ended_at_tehran": None,
+                                "ended_at_ms": None,
+                            }
+                        ],
+                        "take_profit_history": [],
+                    },
                 }
             ],
             trace=trace,
@@ -482,6 +522,9 @@ def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_
     assert loaded is not None
     assert loaded.signals
     assert loaded.signals[0]["signal_id"] == "sig_77"
+    assert loaded.signals[0]["leverage"] == "10"
+    assert loaded.signals[0]["declared_leverage"] == "10"
+    assert loaded.signals[0]["chart"]["interval"] == "1m"
 
 
 def test_dashboard_backtest_coordinator_keeps_signal_history_and_aggregate_counts(
@@ -538,6 +581,9 @@ def test_dashboard_backtest_coordinator_keeps_signal_history_and_aggregate_count
                     "entry_price": "100",
                     "stop_loss": "95",
                     "take_profits": ["105"],
+                    "declared_leverage": "5",
+                    "effective_leverage": "5",
+                    "leverage": "5",
                     "notional_value": "30",
                     "risk_amount": "3",
                     "open_quantity": "1",
@@ -547,6 +593,8 @@ def test_dashboard_backtest_coordinator_keeps_signal_history_and_aggregate_count
                     "unrealized_pnl": "1",
                     "total_pnl": "1",
                     "total_pnl_pct": "1",
+                    "margin_pnl_pct": "5",
+                    "balance_basis": "100",
                     "targets_hit": 0,
                     "lifecycle": ["created"],
                 }
@@ -577,6 +625,9 @@ def test_dashboard_backtest_coordinator_keeps_signal_history_and_aggregate_count
                     "entry_price": None,
                     "stop_loss": "3600",
                     "take_profits": [],
+                    "declared_leverage": None,
+                    "effective_leverage": "1",
+                    "leverage": "1",
                     "notional_value": "0",
                     "risk_amount": "0",
                     "open_quantity": "0",

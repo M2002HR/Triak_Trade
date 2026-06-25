@@ -5,8 +5,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from triak_trade.backtesting.real_runner import (
     RealBacktestMessageStage,
     RealBacktestMessageTrace,
@@ -16,6 +14,7 @@ from triak_trade.backtesting.real_runner import (
 )
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
+from triak_trade.dashboard.local_client import LocalASGIClient
 
 
 class FakeRunner:
@@ -185,16 +184,17 @@ class FakeRunner:
         )
 
 
-def build_client(tmp_path: Path, monkeypatch) -> TestClient:
+def build_client(tmp_path: Path, monkeypatch) -> LocalASGIClient:
     monkeypatch.setattr("triak_trade.dashboard.services.RealBacktestRunner", FakeRunner)
     settings = Settings(
         _env_file=None,
         DASHBOARD_ADMIN_TOKEN="test-token",
         DASHBOARD_SESSION_SECRET="session-secret",
         DASHBOARD_RUNTIME_DIR=str(tmp_path / "dashboard"),
+        LIVE_TRADING_RUNTIME_DIR=str(tmp_path / "live_trading"),
         REAL_BACKTEST_REPORT_DIR=str(tmp_path / "reports"),
     )
-    return TestClient(create_dashboard_app(settings))
+    return LocalASGIClient(create_dashboard_app(settings))
 
 
 def _headers() -> dict[str, str]:

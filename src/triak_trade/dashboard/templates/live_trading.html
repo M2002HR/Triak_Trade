@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero backtest-hero">
+  <div>
+    <p class="eyebrow">Demo Trading Workspace</p>
+    <h1>Toobit Multi-Session Trading Monitor</h1>
+    <p class="subtle hero-copy">
+      Run multiple independent sessions in parallel. Each session tracks one Telegram channel with
+      its own mode, strategy, risk profile, messages, and trade lifecycle.
+      Live order execution remains blocked in this phase; dashboard sessions are demo-only.
+    </p>
+  </div>
+  <div class="hero-stat-cluster">
+    <div class="hero-stat"><span>Running Sessions</span><strong id="lt-running-hl">0</strong></div>
+    <div class="hero-stat"><span>Total Open Positions</span><strong id="lt-pos-hl">0</strong></div>
+    <div class="hero-stat"><span>Processed Messages</span><strong id="lt-msg-hl">0</strong></div>
+    <div class="hero-stat"><span>Realized PnL</span><strong id="lt-pnl-hl">$0.00</strong></div>
+  </div>
+</section>
+
+<script id="live-bootstrap" type="application/json">{{ bootstrap | tojson }}</script>
+
+<div class="grid-two backtest-layout" data-live-workbench="true">
+  <div class="backtest-main-column">
+    <section class="panel" id="lt-config-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Session Config</p>
+          <h2>Start a Trading Session</h2>
+        </div>
+        <div id="lt-readiness-badge" class="badge-row"></div>
+      </div>
+      <div id="lt-readiness-issues" class="issues-list" style="display:none"></div>
+
+      <form id="lt-start-form" class="backtest-form" novalidate>
+        <div class="form-row">
+          <label for="lt-channel-input">Telegram Channel</label>
+          <div class="channel-input-row">
+            <input id="lt-channel-input" type="text" placeholder="https://t.me/channel or @username">
+            <button type="button" id="lt-channel-save-btn" class="btn btn-sm">Save</button>
+          </div>
+          <div id="lt-selected-channel" class="channel-tag-row"></div>
+          <div id="lt-saved-channels" class="saved-channel-list" style="display:none"></div>
+          <button type="button" id="lt-show-saved-btn" class="btn-link">Choose from saved channels ▾</button>
+        </div>
+
+        <div class="form-row form-row-2">
+          <div>
+            <label for="lt-mode">Trading Mode</label>
+            <select id="lt-mode" name="trading_mode">
+              <option value="demo" selected>Demo (Paper Trading)</option>
+              <option value="live" disabled>Live (Blocked In Current Phase)</option>
+            </select>
+          </div>
+          <div>
+            <label for="lt-balance">Initial Balance (USDT)</label>
+            <input id="lt-balance" name="initial_balance" type="number" step="0.01" min="1" value="100">
+            <p id="lt-balance-help" class="subtle">Demo mode uses this value. Live execution is blocked in the current phase.</p>
+          </div>
+        </div>
+
+        <div class="form-row form-row-2">
+          <div>
+            <label for="lt-risk">Risk / Trade (%)</label>
+            <input id="lt-risk" name="risk_per_trade_pct" type="number" step="0.1" min="0.1" value="120">
+          </div>
+          <div>
+            <label for="lt-strategy">Strategy</label>
+            <select id="lt-strategy" name="strategy_key"></select>
+          </div>
+        </div>
+
+        <div class="form-row form-row-2">
+          <div>
+            <label>
+              <input type="checkbox" id="lt-use-ai" name="use_ai" checked>
+              Use AI Classifier
+            </label>
+          </div>
+          <div>
+            <label for="lt-label">Session Label</label>
+            <input id="lt-label" name="label" type="text" placeholder="Optional label">
+          </div>
+        </div>
+
+        <div class="form-row lt-action-row">
+          <button type="submit" class="btn btn-primary" id="lt-start-btn">Start Session</button>
+          <button type="button" class="btn btn-sm" id="lt-refresh-account-btn">Refresh Account</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel" id="lt-sessions-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Sessions</p>
+          <h2>Concurrent Trading Sessions</h2>
+        </div>
+        <span class="subtle" id="lt-session-count">0 sessions</span>
+      </div>
+      <div id="lt-sessions-list" class="session-card-list">
+        <p class="empty-state">No sessions started yet.</p>
+      </div>
+    </section>
+
+    <section class="panel" id="lt-account-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Toobit Account</p>
+          <h2>Account Information</h2>
+        </div>
+        <span id="lt-account-ts" class="subtle"></span>
+      </div>
+      <div id="lt-account-content">
+        <p class="subtle">Click Refresh Account to fetch the latest account data.</p>
+      </div>
+    </section>
+  </div>
+
+  <div class="backtest-side-column">
+    <section class="panel" id="lt-messages-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Aggregate Feed</p>
+          <h2>Incoming Messages</h2>
+        </div>
+        <span class="subtle" id="lt-msg-count">0 messages</span>
+      </div>
+      <div id="lt-messages-list" class="msg-stream">
+        <p class="empty-state">Start a session to display messages here.</p>
+      </div>
+    </section>
+
+    <section class="panel" id="lt-positions-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Aggregate Positions</p>
+          <h2>Open Positions</h2>
+        </div>
+        <span class="subtle" id="lt-positions-count">0 open</span>
+      </div>
+      <div id="lt-positions-list" class="trade-list">
+        <p class="empty-state">No open positions.</p>
+      </div>
+    </section>
+
+    <section class="panel" id="lt-history-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Aggregate History</p>
+          <h2>Recent Closed Trades</h2>
+        </div>
+      </div>
+      <div id="lt-history-list" class="trade-list">
+        <p class="empty-state">No closed trades yet.</p>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div id="lt-session-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal-box wide">
+    <button class="modal-close" id="lt-session-modal-close" aria-label="Close">&times;</button>
+    <div class="section-head compact">
+      <div>
+        <p class="eyebrow">Session Detail</p>
+        <h3 id="lt-session-modal-title">Session Details</h3>
+      </div>
+      <div class="lt-modal-actions">
+        <span id="lt-session-modal-status" class="phase-pill phase-queued">Idle</span>
+        <button type="button" class="btn btn-danger btn-sm" id="lt-session-modal-stop-btn">Stop Session</button>
+      </div>
+    </div>
+    <div id="lt-session-modal-summary" class="metrics backtest-metrics"></div>
+    <div class="lt-session-detail-grid">
+      <section>
+        <h4>Messages</h4>
+        <div id="lt-session-modal-messages" class="msg-stream modal-stream"></div>
+      </section>
+      <section>
+        <h4>Open Positions</h4>
+        <div id="lt-session-modal-open-trades" class="trade-list"></div>
+      </section>
+      <section>
+        <h4>Closed Trades</h4>
+        <div id="lt-session-modal-closed-trades" class="trade-list"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div id="lt-trade-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal-box wide">
+    <button class="modal-close" id="lt-modal-close" aria-label="Close">&times;</button>
+    <h3 id="lt-modal-title">Trade Details</h3>
+    <div id="lt-modal-content"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="/static/live_trading.js"></script>
+{% endblock %}

@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.auth import DashboardAuth
+from triak_trade.dashboard.live_runtime import DashboardLiveCoordinator
 from triak_trade.dashboard.realtime import DashboardRealtimeHub
 from triak_trade.dashboard.services import DashboardService
+from triak_trade.live_trading.models import LiveSessionConfig
 
 
 def build_router(
@@ -21,6 +24,7 @@ def build_router(
     templates: Jinja2Templates,
     service: DashboardService,
     realtime_hub: DashboardRealtimeHub,
+    live_coordinator: DashboardLiveCoordinator,
 ) -> APIRouter:
     router = APIRouter()
     auth = DashboardAuth(settings)
@@ -107,7 +111,7 @@ def build_router(
         if redirect is not None:
             return redirect
         form = {key: str(value) for key, value in (await request.form()).items()}
-        result = await asyncio.to_thread(service.run_fixture_backtest_from_form, form)
+        result = await run_in_threadpool(service.run_fixture_backtest_from_form, form)
         return templates.TemplateResponse(
             request,
             "backtests.html",
@@ -346,5 +350,229 @@ def build_router(
     async def status(request: Request) -> JSONResponse:
         auth.require_api(request)
         return JSONResponse(service.safe_settings() | {"overview": service.overview()["cards"]})
+
+    # ── Live Trading Routes ────────────────────────────────────────────────
+
+    @router.get("/live-trading", response_class=HTMLResponse)
+    async def live_trading_page(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        return templates.TemplateResponse(
+            request,
+            "live_trading.html",
+            context(request, {"bootstrap": live_coordinator.bootstrap()}),
+        )
+
+    @router.get("/api/live/readiness")
+    async def live_readiness(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        return JSONResponse(live_coordinator.readiness().model_dump(mode="json"))
+
+    @router.get("/api/live/overview")
+    async def get_live_overview(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        overview = live_coordinator.get_overview()
+        return JSONResponse({"overview": overview.model_dump(mode="json")})
+
+    @router.post("/api/live/sessions/start")
+    async def start_live_session(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "invalid_payload"}, status_code=400)
+        try:
+            channels_raw = payload.get("channels") or []
+            if isinstance(channels_raw, str):
+                channels_raw = [c.strip() for c in channels_raw.split(",") if c.strip()]
+            channels = [str(c).strip() for c in channels_raw if str(c).strip()]
+            if not channels:
+                return JSONResponse({"detail": "at least one channel is required"}, status_code=400)
+            trading_mode = str(
+                payload.get("trading_mode") or settings.LIVE_TRADING_MODE
+            ).strip().lower()
+            initial_balance = (
+                Decimal(
+                    str(
+                        payload.get("initial_balance")
+                        or settings.LIVE_TRADING_DEFAULT_INITIAL_BALANCE
+                    )
+                )
+                if trading_mode == "demo"
+                else Decimal("0")
+            )
+            risk_per_trade_pct = Decimal(
+                str(
+                    payload.get("risk_per_trade_pct")
+                    or settings.LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT
+                )
+            )
+            config = LiveSessionConfig(
+                channels=channels,
+                trading_mode=trading_mode,
+                initial_balance=initial_balance,
+                risk_per_trade_pct=risk_per_trade_pct,
+                strategy_key=str(
+                    payload.get("strategy_key")
+                    or settings.LIVE_TRADING_DEFAULT_STRATEGY_KEY
+                ),
+                use_ai=bool(payload.get("use_ai", settings.LIVE_TRADING_USE_AI)),
+                interval=str(payload.get("interval") or "1m"),
+                label=str(payload.get("label") or "") or None,
+            )
+            session = live_coordinator.start_session(config)
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse(
+            {"started": True, "session": session.model_dump(mode="json")},
+            status_code=202,
+        )
+
+    @router.post("/api/live/sessions/stop")
+    async def stop_live_session(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = (
+            await request.json()
+            if request.headers.get("content-type") == "application/json"
+            else {}
+        )
+        session_id = payload.get("session_id") if isinstance(payload, dict) else None
+        session = live_coordinator.stop_session(str(session_id) if session_id else None)
+        if session is None:
+            return JSONResponse({"detail": "no_active_session"}, status_code=404)
+        return JSONResponse({"stopped": True, "session": session.model_dump(mode="json")})
+
+    @router.post("/api/live/sessions/{session_id}/stop")
+    async def stop_live_session_by_id(request: Request, session_id: str) -> JSONResponse:
+        auth.require_api(request)
+        session = live_coordinator.stop_session(session_id)
+        if session is None:
+            return JSONResponse({"detail": "session_not_found"}, status_code=404)
+        return JSONResponse({"stopped": True, "session": session.model_dump(mode="json")})
+
+    @router.get("/api/live/sessions/current")
+    async def get_current_live_session(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        session = live_coordinator.get_current_session()
+        if session is None:
+            return JSONResponse({"session": None, "is_running": False})
+        return JSONResponse(
+            {
+                "session": session.model_dump(mode="json"),
+                "is_running": live_coordinator.is_running(),
+            }
+        )
+
+    @router.get("/api/live/sessions/{session_id}")
+    async def get_live_session_detail(request: Request, session_id: str) -> JSONResponse:
+        auth.require_api(request)
+        detail = live_coordinator.get_session_detail(session_id)
+        if detail is None:
+            return JSONResponse({"detail": "session_not_found"}, status_code=404)
+        return JSONResponse({"detail": detail.model_dump(mode="json")})
+
+    @router.get("/api/live/snapshot")
+    async def get_live_snapshot(request: Request, session_id: str | None = None) -> JSONResponse:
+        auth.require_api(request)
+        snap = live_coordinator.get_snapshot(session_id=session_id)
+        if snap is None:
+            return JSONResponse({"snapshot": None})
+        return JSONResponse({"snapshot": snap.model_dump(mode="json")})
+
+    @router.get("/api/live/sessions")
+    async def list_live_sessions(request: Request, limit: int = 10) -> JSONResponse:
+        auth.require_api(request)
+        sessions = live_coordinator.list_sessions(limit=limit)
+        return JSONResponse({"sessions": [s.model_dump(mode="json") for s in sessions]})
+
+    @router.get("/api/live/sessions/{session_id}/trades")
+    async def list_session_trades(
+        request: Request, session_id: str, open_only: bool = False
+    ) -> JSONResponse:
+        auth.require_api(request)
+        trades = live_coordinator.list_trades(session_id, open_only=open_only)
+        return JSONResponse({"trades": [t.model_dump(mode="json") for t in trades]})
+
+    @router.get("/api/live/sessions/{session_id}/messages")
+    async def list_session_messages(
+        request: Request,
+        session_id: str,
+        limit: int = 100,
+    ) -> JSONResponse:
+        auth.require_api(request)
+        detail = live_coordinator.get_session_detail(session_id, message_limit=limit)
+        if detail is None:
+            return JSONResponse({"detail": "session_not_found"}, status_code=404)
+        return JSONResponse(
+            {"messages": [item.model_dump(mode="json") for item in detail.messages]}
+        )
+
+    @router.get("/api/live/account")
+    async def get_live_account(request: Request) -> JSONResponse:
+        """Fetch live Toobit account info directly from the exchange API."""
+        auth.require_api(request)
+        data = await live_coordinator.fetch_account_info_direct()
+        return JSONResponse(data)
+
+    @router.get("/api/live/messages")
+    async def get_live_messages(request: Request, limit: int = 50) -> JSONResponse:
+        auth.require_api(request)
+        traces = live_coordinator.get_recent_messages(limit=limit)
+        return JSONResponse({"messages": [t.model_dump(mode="json") for t in traces]})
+
+    # ── Saved Channel Management ──────────────────────────────────────────
+
+    @router.get("/api/live/channels")
+    async def list_live_channels(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        return JSONResponse({"channels": live_coordinator.get_saved_channels()})
+
+    @router.post("/api/live/channels")
+    async def save_live_channel(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "invalid_payload"}, status_code=400)
+        try:
+            channels = live_coordinator.save_channel(str(payload.get("channel") or ""))
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"saved": True, "channels": channels}, status_code=201)
+
+    @router.delete("/api/live/channels")
+    async def delete_live_channel(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "invalid_payload"}, status_code=400)
+        try:
+            channels = live_coordinator.remove_channel(str(payload.get("channel") or ""))
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"deleted": True, "channels": channels})
+
+    @router.websocket("/ws/live")
+    async def live_websocket(websocket: WebSocket) -> None:
+        if not auth.is_authenticated_websocket(websocket):
+            await websocket.close(code=1008, reason="unauthorized")
+            return
+        await realtime_hub.connect(websocket)
+        try:
+            overview = live_coordinator.get_overview()
+            await websocket.send_json(
+                {
+                    "type": "live_bootstrap",
+                    "bootstrap": live_coordinator.bootstrap(),
+                    "overview": overview.model_dump(mode="json"),
+                }
+            )
+            while True:
+                msg = await websocket.receive_text()
+                if msg.strip().lower() == "ping":
+                    await websocket.send_json({"type": "pong"})
+        except WebSocketDisconnect:
+            await realtime_hub.disconnect(websocket)
+        except Exception:
+            await realtime_hub.disconnect(websocket)
 
     return router

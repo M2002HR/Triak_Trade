@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
+from triak_trade.dashboard.local_client import LocalASGIClient
 from triak_trade.dashboard.runtime import (
     dashboard_safe_config,
     dashboard_smoke_test,
@@ -14,7 +13,7 @@ from triak_trade.dashboard.runtime import (
     start_dashboard_process,
     stop_dashboard_process,
 )
-from triak_trade.dashboard.services import DashboardStateService
+from triak_trade.dashboard.services import DashboardService, DashboardStateService
 
 
 def settings(tmp_path: Path) -> Settings:
@@ -24,6 +23,7 @@ def settings(tmp_path: Path) -> Settings:
         DASHBOARD_ADMIN_TOKEN="test-token",
         DASHBOARD_SESSION_SECRET="session-secret",
         DASHBOARD_RUNTIME_DIR=str(runtime),
+        LIVE_TRADING_RUNTIME_DIR=str(tmp_path / "live_trading"),
         DASHBOARD_PID_FILE=str(runtime / "dashboard.pid"),
         DASHBOARD_STATUS_FILE=str(runtime / "status.json"),
         DASHBOARD_LOG_FILE=str(runtime / "dashboard.log"),
@@ -49,7 +49,7 @@ def test_auto_mode_and_kill_switch_toggle_runtime_state(tmp_path: Path) -> None:
 
 
 def test_settings_page_does_not_show_secrets(tmp_path: Path) -> None:
-    client = TestClient(create_dashboard_app(settings(tmp_path)))
+    client = LocalASGIClient(create_dashboard_app(settings(tmp_path)))
     response = client.get("/settings", headers={"X-Triak-Admin-Token": "test-token"})
     assert response.status_code == 200
     assert "test-token" not in response.text
@@ -74,7 +74,7 @@ def test_ai_keyword_filters_persist_to_root_env_file(tmp_path: Path) -> None:
 
 
 def test_ai_keyword_filters_form_updates_settings_view(tmp_path: Path) -> None:
-    client = TestClient(create_dashboard_app(settings(tmp_path)))
+    client = LocalASGIClient(create_dashboard_app(settings(tmp_path)))
 
     response = client.post(
         "/settings/ai-keyword-filters",
@@ -105,6 +105,15 @@ def test_backtest_lifecycle_refresh_interval_persists_to_root_env_file(tmp_path:
     env_text = (tmp_path / ".env.local").read_text(encoding="utf-8")
     assert 'BACKTEST_LIFECYCLE_REFRESH_INTERVAL="15m"' in env_text
     assert service.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL == "15m"
+
+
+def test_dashboard_runtime_default_lifecycle_refresh_interval_is_thirty_minutes(
+    tmp_path: Path,
+) -> None:
+    service = DashboardService(settings(tmp_path))
+    bootstrap = service.backtest_bootstrap()
+
+    assert bootstrap["default_lifecycle_refresh_interval"] == "30m"
 
 
 def test_dashboard_runtime_duplicate_start_and_stop_safe(tmp_path: Path) -> None:

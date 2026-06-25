@@ -100,7 +100,7 @@ class DashboardBacktestStore:
     def write(self, run: DashboardBacktestRun) -> None:
         path = self._path(run.run_id)
         payload = run.model_dump(mode="json")
-        temporary = path.with_suffix(".tmp")
+        temporary = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.tmp")
         with self._lock:
             temporary.write_text(
                 json.dumps(payload, indent=2, sort_keys=True),
@@ -406,7 +406,7 @@ class DashboardBacktestCoordinator:
                 current_message_id=event.current_message_id,
             )
         )
-        run.events = run.events[-250:]
+        run.events = run.events[-120:]
         if event.trace is not None:
             self._merge_trace(run, event.trace)
         self.store.write(run)

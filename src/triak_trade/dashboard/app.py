@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from triak_trade.config.settings import Settings
+from triak_trade.dashboard.live_runtime import DashboardLiveCoordinator
 from triak_trade.dashboard.realtime import DashboardRealtimeHub
 from triak_trade.dashboard.routes import build_router
 from triak_trade.dashboard.services import DashboardService
@@ -23,6 +24,10 @@ def create_dashboard_app(settings: Settings) -> FastAPI:
         settings,
         realtime_notifier=realtime_hub.broadcast_threadsafe,
     )
+    live_coordinator = DashboardLiveCoordinator(
+        settings=settings,
+        notifier=realtime_hub.broadcast_threadsafe,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -33,6 +38,7 @@ def create_dashboard_app(settings: Settings) -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
     app.state.dashboard_service = service
     app.state.dashboard_realtime_hub = realtime_hub
+    app.state.live_coordinator = live_coordinator
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     app.include_router(
@@ -41,6 +47,7 @@ def create_dashboard_app(settings: Settings) -> FastAPI:
             templates=templates,
             service=service,
             realtime_hub=realtime_hub,
+            live_coordinator=live_coordinator,
         )
     )
     return app

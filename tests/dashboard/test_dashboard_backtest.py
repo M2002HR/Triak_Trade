@@ -4,61 +4,53 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from triak_trade.backtesting.real_runner import RealBacktestResult
 from triak_trade.config.settings import Settings
-from triak_trade.dashboard.app import create_dashboard_app
 from triak_trade.dashboard.services import DashboardService
 
 
-def build_client(tmp_path: Path, *, real_guard: int = 0) -> TestClient:
-    settings = Settings(
+def build_settings(tmp_path: Path, *, real_guard: int = 0) -> Settings:
+    return Settings(
         _env_file=None,
         DASHBOARD_ADMIN_TOKEN="test-token",
         DASHBOARD_SESSION_SECRET="session-secret",
         RUN_BACKTEST_INTEGRATION_TESTS=real_guard,
         DASHBOARD_RUNTIME_DIR=str(tmp_path / "dashboard"),
+        LIVE_TRADING_RUNTIME_DIR=str(tmp_path / "live_trading"),
     )
-    return TestClient(create_dashboard_app(settings))
 
 
-def test_backtest_fixture_post_runs_summary(tmp_path: Path) -> None:
-    response = build_client(tmp_path).post(
-        "/backtests/run",
-        headers={"X-Triak-Admin-Token": "test-token"},
-        data={
+def test_backtest_fixture_run_returns_summary(tmp_path: Path) -> None:
+    result = DashboardService(build_settings(tmp_path)).run_fixture_backtest_from_form(
+        {
             "channel": "https://t.me/Tofan_Trade",
             "interval": "1m",
             "initial_balance": "1000",
             "risk_per_trade_pct": "1",
             "fill_policy": "conservative",
-        },
+        }
     )
-    assert response.status_code == 200
-    assert "Legacy Result" in response.text
-    assert "total_pnl" in response.text
+    assert result["blocked"] is False
+    assert "summary" in result
+    assert "total_pnl" in result["summary"]
 
 
-def test_real_backtest_route_blocked_without_guard(tmp_path: Path) -> None:
-    response = build_client(tmp_path).post(
-        "/backtests/run",
-        headers={"X-Triak-Admin-Token": "test-token"},
-        data={
+def test_real_backtest_service_blocked_without_guard(tmp_path: Path) -> None:
+    result = DashboardService(build_settings(tmp_path)).run_fixture_backtest_from_form(
+        {
             "channel": "https://t.me/Tofan_Trade",
             "interval": "1m",
             "initial_balance": "1000",
             "risk_per_trade_pct": "1",
             "fill_policy": "conservative",
             "real_mode": "on",
-        },
+        }
     )
-    assert response.status_code == 200
-    assert "Blocked" in response.text
-    assert "Real backtest is not ready" in response.text
+    assert result["blocked"] is True
+    assert result["reason"] == "Real backtest is not ready."
 
 
-def test_real_backtest_route_runs_with_fake_runner(
+def test_real_backtest_service_runs_with_fake_runner(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -115,20 +107,18 @@ def test_real_backtest_route_runs_with_fake_runner(
 
     monkeypatch.setattr("triak_trade.dashboard.services.RealBacktestRunner", FakeRunner)
 
-    response = build_client(tmp_path).post(
-        "/backtests/run",
-        headers={"X-Triak-Admin-Token": "test-token"},
-        data={
+    result = DashboardService(build_settings(tmp_path)).run_fixture_backtest_from_form(
+        {
             "channel": "https://t.me/Tofan_Trade",
             "interval": "1m",
             "real_mode": "on",
             "lookback_hours": "24",
             "max_messages": "1000",
-        },
+        }
     )
-    assert response.status_code == 200
-    assert "real_telegram_used" in response.text
-    assert "runtime/reports/backtests/report.json" in response.text
+    assert result["blocked"] is False
+    assert result["summary"]["real_telegram_used"] is True
+    assert result["summary"]["report_path"] == "runtime/reports/backtests/report.json"
 
 
 def test_dashboard_service_parses_naive_datetime_as_tehran_utc() -> None:

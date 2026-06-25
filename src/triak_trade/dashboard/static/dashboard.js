@@ -25,6 +25,7 @@ document.documentElement.dataset.dashboardReady = "true";
     ws: null,
     wsReady: false,
     charts: new Map(),
+    wsPingTimer: null,
   };
 
   const nodes = {
@@ -102,7 +103,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.interval.value = bootstrap.default_interval || "1m";
     nodes.maxMessages.value = String(bootstrap.default_max_messages || 1000);
     nodes.initialBalance.value = String(bootstrap.default_initial_balance || "100");
-    nodes.riskPerTradePct.value = String(bootstrap.default_risk_per_trade_pct || "3");
+    nodes.riskPerTradePct.value = String(bootstrap.default_risk_per_trade_pct || "120");
     if (nodes.strategyKey) {
       nodes.strategyKey.value = bootstrap.default_strategy_key || "default_risk_managed";
     }
@@ -441,6 +442,7 @@ document.documentElement.dataset.dashboardReady = "true";
     state.activePanelModal = null;
     state.selectedSignalId = null;
     nodes.panelModal.hidden = true;
+    disposeChart("signal-lifecycle-chart");
     syncBodyModalState();
   }
 
@@ -664,7 +666,7 @@ document.documentElement.dataset.dashboardReady = "true";
       ["Trades Simulated", run.trades_simulated],
       ["Trades Filled", run.trades_filled],
       ["Initial Balance", run.initial_balance],
-      ["Risk / Signal %", run.risk_per_trade_pct],
+      ["Allocation Factor", run.risk_per_trade_pct],
       ["Open Positions", run.live_open_positions],
       ["Closed Trades", run.live_closed_trades],
       ["Wins / Losses", `${run.live_wins} / ${run.live_losses}`],
@@ -916,11 +918,13 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.panelModalTitle.textContent = `${signal.symbol || "Signal"} Lifecycle`;
     nodes.panelModalBody.innerHTML = buildSignalDetailMarkup(signal);
     renderSignalLifecycleChart(signal);
+    window.requestAnimationFrame(() => resizeChart("signal-lifecycle-chart"));
     syncBodyModalState();
   }
 
   function buildSignalDetailMarkup(signal) {
     const takeProfits = Array.isArray(signal.take_profits) ? signal.take_profits : [];
+    const leverageLabel = formatSignalLeverage(signal);
     return `
       <div class="signal-detail-shell">
         <div class="signal-detail-hero ${signal.status_group === "active" ? "active" : "inactive"}">
@@ -939,8 +943,9 @@ document.documentElement.dataset.dashboardReady = "true";
           ${detailMetric("Entry Price", signal.entry_price || "n/a")}
           ${detailMetric("Mark Price", signal.mark_price || "n/a")}
           ${detailMetric("Stop Loss", signal.stop_loss || "n/a")}
-          ${detailMetric("Leverage", signal.leverage ? `${signal.leverage}×` : "n/a")}
+          ${detailMetric("Leverage", leverageLabel)}
           ${detailMetric("Margin", signal.margin || "0")}
+          ${detailMetric("Balance Basis", signal.balance_basis || "0")}
           ${detailMetric("Original Quantity", signal.original_quantity || "0")}
           ${detailMetric("Open Quantity", signal.open_quantity || "0")}
           ${detailMetric("Risk Amount", signal.risk_amount || "0")}
@@ -948,6 +953,7 @@ document.documentElement.dataset.dashboardReady = "true";
           ${detailMetric("Targets Hit", signal.targets_hit ?? "0")}
           ${detailMetric("Total PnL", signal.total_pnl ?? "0", pnlClassName(signal.total_pnl))}
           ${detailMetric("Total PnL %", signal.total_pnl_pct ?? "0", pnlClassName(signal.total_pnl_pct))}
+          ${detailMetric("Margin ROI %", signal.margin_pnl_pct ?? "0", pnlClassName(signal.margin_pnl_pct))}
           ${detailMetric("Realized PnL", signal.realized_pnl ?? "0", pnlClassName(signal.realized_pnl))}
           ${detailMetric("Unrealized PnL", signal.unrealized_pnl ?? "0", pnlClassName(signal.unrealized_pnl))}
           ${signal.message_link ? `<div class="metric-item"><span class="metric-label">Telegram Link</span><span class="metric-value"><a href="${escapeHtml(signal.message_link)}" target="_blank" rel="noreferrer">Open Message ↗</a></span></div>` : ""}
@@ -956,7 +962,8 @@ document.documentElement.dataset.dashboardReady = "true";
           <h3>Price Lifecycle Chart</h3>
           <div class="signal-chart-meta">
             <span>Time: Tehran</span>
-            <span>Candles: 5m</span>
+            <span>Candles: ${escapeHtml(signal.chart?.interval || "n/a")}</span>
+            <span>Visible points: ${escapeHtml(String((signal.chart?.candles || []).length || 0))}</span>
             <span>Last refresh: ${formatTehranDate(signal.last_checkpoint_at_tehran || signal.last_checkpoint_at)}</span>
           </div>
           <div id="signal-lifecycle-chart" class="signal-lifecycle-chart"></div>
@@ -1045,6 +1052,23 @@ document.documentElement.dataset.dashboardReady = "true";
     return chart;
   }
 
+  function disposeChart(id) {
+    const existing = state.charts.get(id);
+    if (!existing) {
+      return;
+    }
+    existing.dispose();
+    state.charts.delete(id);
+  }
+
+  function resizeChart(id) {
+    const existing = state.charts.get(id);
+    if (!existing) {
+      return;
+    }
+    existing.resize();
+  }
+
   function renderSignalLifecycleChart(signal) {
     const chart = ensureChart("signal-lifecycle-chart");
     if (!chart) {
@@ -1058,41 +1082,74 @@ document.documentElement.dataset.dashboardReady = "true";
       chart.clear();
       return;
     }
-    const xAxis = candles.map((item) => formatTehranDate(item.timestamp_tehran));
+    const candleSeries = candles
+      .map((item) => buildCandleChartPoint(item))
+      .filter(Boolean);
+    if (!candleSeries.length) {
+      chart.clear();
+      return;
+    }
+    const leverageLabel = formatSignalLeverage(signal);
+    const markLines = [];
+    if (signal.entry_price) {
+      markLines.push(markLineItem("Entry", signal.entry_price, "#1f5f8b"));
+    }
+    if (signal.mark_price) {
+      markLines.push(markLineItem("Mark", signal.mark_price, "#0e7c66"));
+    }
     const series = [
       {
         name: "Price",
         type: "candlestick",
-        data: candles.map((item) => [
-          Number(item.open),
-          Number(item.close),
-          Number(item.low),
-          Number(item.high),
-        ]),
+        data: candleSeries,
         itemStyle: {
           color: "#0e7c66",
           color0: "#d14343",
           borderColor: "#0e7c66",
           borderColor0: "#d14343",
         },
+        markLine: markLines.length ? {
+          symbol: ["none", "none"],
+          label: { formatter: "{b}: {c}" },
+          lineStyle: { width: 1.5, opacity: 0.9 },
+          data: markLines,
+        } : undefined,
       },
-      ...buildLevelHistorySeries(stopLossHistory, xAxis, "#d14343", "dashed"),
-      ...buildLevelHistorySeries(takeProfitHistory, xAxis, "#b7791f", "solid"),
+      ...buildLevelHistorySeries(stopLossHistory, candles, "#d14343", "dashed"),
+      ...buildLevelHistorySeries(takeProfitHistory, candles, "#b7791f", "solid"),
     ];
     chart.setOption(
       {
         animation: false,
-        grid: { left: 56, right: 24, top: 30, bottom: 64 },
-        legend: { top: 0 },
-        tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
+        backgroundColor: "transparent",
+        grid: { left: 64, right: 28, top: 54, bottom: 74 },
+        legend: { top: 10, textStyle: { color: "#39524b" } },
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "cross" },
+          backgroundColor: "rgba(17, 31, 28, 0.94)",
+          borderWidth: 0,
+          textStyle: { color: "#f4fbf8" },
+        },
+        title: {
+          left: 12,
+          top: 8,
+          text: `${signal.symbol || "Signal"} · ${String(signal.side || "").toUpperCase()} · Lev ${leverageLabel}`,
+          textStyle: { fontSize: 12, fontWeight: 700, color: "#39524b" },
+        },
         xAxis: {
-          type: "category",
-          data: xAxis,
-          axisLabel: { rotate: 25, color: "#39524b" },
+          type: "time",
+          axisLabel: {
+            color: "#39524b",
+            hideOverlap: true,
+            formatter: (value) => formatTehranShortDate(value),
+          },
+          splitLine: { show: false },
         },
         yAxis: {
           scale: true,
           axisLabel: { color: "#39524b" },
+          splitLine: { lineStyle: { color: "rgba(57, 82, 75, 0.10)" } },
         },
         dataZoom: [{ type: "inside" }, { type: "slider", height: 24, bottom: 12 }],
         series,
@@ -1101,24 +1158,70 @@ document.documentElement.dataset.dashboardReady = "true";
     );
   }
 
-  function buildLevelHistorySeries(history, xAxis, color, styleType) {
+  function buildLevelHistorySeries(history, candles, color, styleType) {
     return history.map((item) => {
-      const start = formatTehranDate(item.started_at_tehran || item.started_at);
-      const end = item.ended_at_tehran || item.ended_at
-        ? formatTehranDate(item.ended_at_tehran || item.ended_at)
-        : xAxis[xAxis.length - 1];
+      const points = buildLevelSpanPoints(item, candles);
       return {
         name: `${item.label} ${item.value}`,
         type: "line",
         symbol: "none",
+        connectNulls: false,
         lineStyle: {
           color,
           type: styleType,
           width: item.ended_at ? 2 : 3,
         },
-        data: xAxis.map((label) => (label >= start && label <= end ? Number(item.value) : null)),
+        data: points,
       };
     });
+  }
+
+  function buildLevelSpanPoints(item, candles) {
+    const startMs = Number(item.started_at_ms || Date.parse(item.started_at || ""));
+    const endMs = item.ended_at_ms
+      ? Number(item.ended_at_ms)
+      : Number((candles[candles.length - 1] || {}).close_timestamp_ms || 0);
+    const value = Number(item.value);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || !Number.isFinite(value)) {
+      return [];
+    }
+    const points = [];
+    candles.forEach((candle) => {
+      const openMs = Number(candle.timestamp_ms || 0);
+      const closeMs = Number(candle.close_timestamp_ms || 0);
+      if (!Number.isFinite(openMs) || !Number.isFinite(closeMs)) {
+        return;
+      }
+      if (closeMs < startMs || openMs > endMs) {
+        return;
+      }
+      points.push([openMs, value]);
+      points.push([closeMs, value]);
+    });
+    return points;
+  }
+
+  function buildCandleChartPoint(item) {
+    const timestamp = Number(item.timestamp_ms || Date.parse(item.timestamp || ""));
+    const open = Number(item.open);
+    const close = Number(item.close);
+    const low = Number(item.low);
+    const high = Number(item.high);
+    if (![timestamp, open, close, low, high].every(Number.isFinite)) {
+      return null;
+    }
+    return [timestamp, open, close, low, high];
+  }
+
+  function markLineItem(label, value, color) {
+    return {
+      name: label,
+      yAxis: Number(value),
+      lineStyle: {
+        color,
+        type: label === "Entry" ? "solid" : "dotted",
+      },
+    };
   }
 
   function upsertRun(run) {
@@ -1227,6 +1330,18 @@ document.documentElement.dataset.dashboardReady = "true";
         window.clearInterval(state.pollTimer);
         state.pollTimer = null;
       }
+      if (state.wsPingTimer) {
+        window.clearInterval(state.wsPingTimer);
+      }
+      state.wsPingTimer = window.setInterval(() => {
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          try {
+            state.ws.send("ping");
+          } catch (_error) {
+            // no-op
+          }
+        }
+      }, 10000);
     };
     state.ws.onmessage = (event) => {
       try {
@@ -1239,11 +1354,16 @@ document.documentElement.dataset.dashboardReady = "true";
     state.ws.onclose = () => {
       state.wsReady = false;
       state.ws = null;
+      if (state.wsPingTimer) {
+        window.clearInterval(state.wsPingTimer);
+        state.wsPingTimer = null;
+      }
       startPolling();
       window.setTimeout(connectWebSocket, 1500);
     };
     state.ws.onerror = () => {
       state.wsReady = false;
+      startPolling();
     };
   }
 
@@ -1334,6 +1454,38 @@ document.documentElement.dataset.dashboardReady = "true";
       minute: "2-digit",
       second: "2-digit",
     }).format(date);
+  }
+
+  function formatTehranShortDate(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return "";
+    }
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Tehran",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  }
+
+  function formatSignalLeverage(signal) {
+    const declared = signal && signal.declared_leverage ? String(signal.declared_leverage) : "";
+    const effective = signal && signal.effective_leverage ? String(signal.effective_leverage) : "";
+    if (declared && effective && declared !== effective) {
+      return `${declared}× (effective ${effective}×)`;
+    }
+    if (declared) {
+      return `${declared}×`;
+    }
+    if (effective) {
+      return `${effective}×`;
+    }
+    if (signal && signal.leverage) {
+      return `${signal.leverage}×`;
+    }
+    return "n/a";
   }
 
   function pnlClassName(value) {

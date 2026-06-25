@@ -32,8 +32,8 @@
 | `market_data/` | تأمین‌کننده‌های کندل: Binance public (آرشیو + REST)، Toobit، Composite (fallback)، Candle cache، factory، intervals. |
 | `backtesting/` | **هسته‌ی بک‌تست** — موضوع اصلی این مستندات. |
 | `telegram/` | کلاینت Telethon، history sync، live listener، mapper. |
-| `exchange/toobit/` | امضاکننده، اکانت، spot، demo execution، safety (live مسدود). |
-| `dashboard/` | UI کنترل محلی، runtime بک‌تست زنده، routes، realtime/WebSocket. |
+| `exchange/toobit/` | امضاکننده، اکانت، spot، futures، demo execution، safety. |
+| `dashboard/` | UI کنترل محلی، runtime بک‌تست زنده، workspace دمو-تریدینگ، routes، realtime/WebSocket. |
 | `admin_bot/` | ربات تأیید ادمین (approve/reject/watch؛ بدون اجرای معامله). |
 | `observability/` | event bus، processing audit، کانال لاگ تلگرام، redaction. |
 | `verification/` | اجراکننده‌ی verify-system و گزارش‌های سلامت. |
@@ -51,14 +51,14 @@
   - `real-backtest-run --channel … --hours … --interval …`
   - `real-backtest-tofan --hours …` — کانال پیش‌فرض پیکربندی‌شده.
   - `backtest-show-latest` — آخرین گزارش ذخیره‌شده.
-- **داشبورد**: اجرای بک‌تست زنده با progress لحظه‌ای، نمودار سیگنال، live metrics و امکان stop/rerun.
+- **داشبورد**: اجرای بک‌تست زنده با progress لحظه‌ای، نمودار سیگنال، live metrics، امکان stop/rerun، و workspace دمو-تریدینگ چند-session.
 - پارس/طبقه‌بندی پیام، بررسی گیت‌وی AI، تاریخچه‌ی تلگرام، داده‌ی بازار، ربات ادمین، کانال لاگ، verify-system.
 
 ## اصول طراحی غیرقابل‌مذاکره (از `AGENTS.md`)
 
 1. هر ماژول مستقلاً قابل‌تست؛ سرویس بیرونی پشت interface.
 2. تست‌های unit هرگز سرویس واقعی صدا نمی‌زنند؛ تست‌های integration پشت گارد env.
-3. هیچ سفارش واقعی/برداشت واقعی؛ live مسدود.
+3. هیچ سفارش واقعی/برداشت واقعی؛ workspace دمو-تریدینگ فعلاً demo-only است و live order execution همچنان مسدود می‌ماند.
 4. همه‌ی مقادیر مالی `Decimal`.
 5. هرگز چاپ/کامیت راز.
 6. بک‌تست simulation-only؛ از endpointهای خصوصی استفاده نمی‌کند.

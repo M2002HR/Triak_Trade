@@ -170,5 +170,6 @@ mypy src
 - Auth uses `DASHBOARD_ADMIN_TOKEN`; the token is stored only in root `.env.local`.
 - Use `triak-trade dashboard-check` for safe non-secret config status.
 - Use `triak-trade dashboard-start`, `dashboard-status`, `dashboard-logs`, and `dashboard-stop` for runtime control.
+- The dashboard now includes a live-trading workspace for guarded multi-session monitoring, but real order execution remains blocked in this phase and sessions are demo-only.
 - Auto Mode and Kill Switch are runtime state toggles only; no live execution exists.
 - Dashboard approvals record/placeholder decisions only and never execute orders.

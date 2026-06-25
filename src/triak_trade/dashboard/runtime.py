@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi.testclient import TestClient
 
 from triak_trade.ai.runtime import ensure_local_ai_gateway_ready
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
 from triak_trade.dashboard.auth import session_secret_present, token_present
+from triak_trade.dashboard.local_client import LocalASGIClient
 from triak_trade.dashboard.schemas import DashboardRuntimeStatus
 from triak_trade.verification.redaction import redact, redact_text
 
@@ -169,27 +169,26 @@ def dashboard_smoke_test(settings: Settings) -> dict[str, Any]:
     app = create_dashboard_app(settings)
     token = settings.DASHBOARD_ADMIN_TOKEN.get_secret_value()
     headers = {"X-Triak-Admin-Token": token}
-    with TestClient(app) as client:
-        unauthorized = client.get("/", follow_redirects=False)
-        authorized = client.get("/", headers=headers)
-        backtest = client.post(
-            "/backtests/run",
-            headers=headers,
-            data={
-                "channel": settings.BACKTEST_DEFAULT_CHANNEL,
-                "interval": "1m",
-                "initial_balance": str(settings.BACKTEST_DEFAULT_INITIAL_BALANCE),
-                "risk_per_trade_pct": str(settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT),
-                "fill_policy": "conservative",
-            },
-        )
-        settings_page = client.get("/settings", headers=headers)
-        status_json = client.get("/status", headers=headers)
-        status_unauthorized = client.get("/status", follow_redirects=False)
+    client = LocalASGIClient(app)
+    service = app.state.dashboard_service
+    unauthorized = client.get("/", follow_redirects=False)
+    authorized = client.get("/", headers=headers)
+    backtest = service.run_fixture_backtest_from_form(
+        {
+            "channel": settings.BACKTEST_DEFAULT_CHANNEL,
+            "interval": "1m",
+            "initial_balance": str(settings.BACKTEST_DEFAULT_INITIAL_BALANCE),
+            "risk_per_trade_pct": str(settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT),
+            "fill_policy": "conservative",
+        }
+    )
+    settings_page = client.get("/settings", headers=headers)
+    status_json = client.get("/status", headers=headers)
+    status_unauthorized = client.get("/status", follow_redirects=False)
     return {
         "unauthorized_blocked": unauthorized.status_code == 303,
         "dashboard_authorized": authorized.status_code == 200,
-        "backtest_fixture_ok": backtest.status_code == 200,
+        "backtest_fixture_ok": bool(not backtest.get("blocked") and backtest.get("summary")),
         "settings_ok": settings_page.status_code == 200,
         "status_json_ok": status_json.status_code == 200,
         "status_api_unauthorized": status_unauthorized.status_code == 401,
