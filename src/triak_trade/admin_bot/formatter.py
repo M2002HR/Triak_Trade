@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from triak_trade.core.formatting import format_decimal
 from triak_trade.domain.models import ProposedAction, SignalState
 
 
@@ -86,10 +87,15 @@ def _pick(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if value is None:
         return None
-    if isinstance(value, (str, int, Decimal)):
+    if isinstance(value, Decimal):
+        return format_decimal(value)
+    if isinstance(value, (str, int)):
         return str(value)
     if isinstance(value, list):
-        return ",".join(str(item) for item in value[:5])
+        return ",".join(
+            (format_decimal(item) or "0") if isinstance(item, Decimal) else str(item)
+            for item in value[:5]
+        )
     return None
 
 
@@ -99,6 +105,13 @@ def _signal_value(signal: SignalState | None, key: str) -> str | None:
     value = getattr(signal.current_signal, key, None)
     if value is None:
         return None
+    if isinstance(value, Decimal):
+        return format_decimal(value)
+    if isinstance(value, list):
+        return ",".join(
+            (format_decimal(item) or "0") if isinstance(item, Decimal) else str(item)
+            for item in value
+        )
     return str(value)
 
 
@@ -108,8 +121,8 @@ def _entry_from_signal(signal: SignalState | None) -> str | None:
     low = signal.current_signal.entry_low
     high = signal.current_signal.entry_high
     if low is not None and high is not None:
-        return f"{low}-{high}"
-    return str(low or high) if (low or high) else None
+        return f"{format_decimal(low)}-{format_decimal(high)}"
+    return format_decimal(low or high) if (low or high) else None
 
 
 def _safe_json(value: dict[str, Any]) -> str:

@@ -44,6 +44,9 @@ class TradeStrategy(Protocol):
         *,
         side: TradeSide,
         entry_price: Decimal,
+        balance_at_entry: Decimal,
+        quantity: Decimal,
+        fee_rate_pct: Decimal,
     ) -> Decimal:
         """
         Return a synthetic stop-loss price for a signal that has none.
@@ -60,6 +63,7 @@ class TradeStrategy(Protocol):
         side: TradeSide,
         entry_price: Decimal,
         stop_loss: Decimal,
+        notional_value: Decimal,
     ) -> list[Decimal]:
         """
         Return a fallback take-profit ladder when the signal has no explicit TP.

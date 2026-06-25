@@ -8,6 +8,7 @@
 - `events`, `candles`, `initial_balance`, `risk_per_trade_pct`, `fill_policy`
 - `active_signal_hours` — انقضای سیگنال باز.
 - `max_effective_leverage` — سقف اهرم (None = مدل اهرم خاموش، سایزینگ legacy).
+- `min_allocation_pct`, `max_allocation_pct` — کف/سقف درصد درگیری سرمایه.
 - `default_stop_pct` — استاپ مصنوعی وقتی نه SL هست نه strategy.
 - `strategy` — `TradeStrategy` برای استاپ/TP مصنوعی و مدیریت partial.
 - `snapshot_interval` — برای snapshotهای دوره‌ای (داشبورد زنده).
@@ -38,23 +39,26 @@
 ## سایزینگ پوزیشن (`simulator.py:271`–367)
 
 ```
-risk_amount   = balance * risk_per_trade_pct / 100
-stop_distance = |entry_price - effective_stop|
-qty           = risk_amount / stop_distance          # سایزینگ مبتنی بر ریسک
+allocation_pct    = clamp(risk_per_trade_pct / leverage, min_allocation_pct, max_allocation_pct)
+allocation_amount = balance * allocation_pct / 100
+qty               = (allocation_amount * leverage) / entry_price
 ```
 
 - اگر `balance ≤ 0` → ورود جدید رد می‌شود.
-- اگر `stop_distance ≤ 0` → رد.
+- اگر `allocation_amount ≤ 0` یا `stop_distance ≤ 0` → رد.
 - **استاپ مؤثر** (`effective_stop`):
   1. `parsed.stop_loss` اگر موجود.
   2. وگرنه `strategy.get_synthetic_stop(...)`.
   3. وگرنه درصد ثابت `default_stop_pct` از entry.
-- **اهرم**: اگر `max_effective_leverage` تنظیم شده باشد، `effective_leverage = clamp(signal_leverage, 1, max)` و سقف مقدار بر اساس margin اعمال می‌شود:
-  `max_qty_by_margin = balance * effective_leverage / entry_price`؛ اگر `qty` بیشتر بود، clamp و note می‌خورد.
-  اگر None باشد، اهرم=۱ و سقف margin اعمال نمی‌شود (سایزینگ legacy).
+- **factor / leverage**: `risk_per_trade_pct` دیگر «درصد مستقیم تخصیص» نیست؛ یک factor است. نمونه:
+  - factor=`150`, leverage=`50` → allocation=`3%`
+  - factor=`150`, leverage=`20` → allocation=`7.5%`
+  - leverage پایین با `max_allocation_pct` cap می‌شود
+  - leverage خیلی بالا با `min_allocation_pct` floor می‌شود
+- **اهرم**: اگر `max_effective_leverage` تنظیم شده باشد، `effective_leverage = clamp(signal_leverage, 1, max)` و سپس check سطح portfolio margin اعمال می‌شود.
 - **فیلتر TP**: TPهایی که در سمت اشتباه entry هستند حذف می‌شوند (long: tp>entry, short: tp<entry). اگر همه حذف شدند و strategy هست → TP مصنوعی R-multiple.
 
-> ⚠️ هیچ سقف اکسپوژر تجمعی بین چند پوزیشن باز هم‌زمان وجود ندارد؛ هر پوزیشن مستقل با balance لحظه‌ای سایز می‌شود (فایل ۰۸ B7).
+> درصد درگیری سرمایه روی موجودی لحظه‌ای compound می‌شود و برای هر سیگنال مجدداً محاسبه می‌شود.
 
 ## اعمال کندل به پوزیشن — `_apply_candle_to_position` (`simulator.py:720`)
 

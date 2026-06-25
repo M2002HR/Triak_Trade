@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from triak_trade.backtesting.scoring import ChannelScorer
+from triak_trade.core.formatting import format_decimal
 from triak_trade.domain.models import BacktestReport
 
 
@@ -28,27 +29,34 @@ def report_to_json(report: BacktestReport, score: Decimal) -> dict[str, Any]:
 def report_to_telegram_summary(report: BacktestReport, score: Decimal) -> str:
     metrics = report.metrics
     interval = report.interval
+    profit_factor_line = _telegram_profit_factor_line(metrics.profit_factor)
     return (
         "📊 Backtest Report\n\n"
         f"Channel: {report.channel_id}\n"
         f"Range: {report.from_date.date()} → {report.to_date.date()}\n"
         f"Interval: {interval}\n"
-        f"Initial Balance: {report.initial_balance} USDT\n"
-        f"Final Balance: {report.final_balance} USDT\n\n"
+        f"Initial Balance: {format_decimal(report.initial_balance)} USDT\n"
+        f"Final Balance: {format_decimal(report.final_balance)} USDT\n\n"
         "Signals:\n"
         f"• Messages: {metrics.total_messages}\n"
         f"• Parsed signals: {metrics.parsed_signals}\n"
         f"• Valid signals: {metrics.valid_signals}\n"
         f"• Trades filled: {sum(1 for t in report.trades if t.status != 'not_filled')}\n\n"
         "Performance:\n"
-        f"• PnL: {metrics.total_pnl}\n"
+        f"• PnL: {format_decimal(metrics.total_pnl)}\n"
         f"• Win rate: {(metrics.win_rate * Decimal('100')).quantize(Decimal('0.1'))}%\n"
-        f"• Profit factor: {metrics.profit_factor if metrics.profit_factor is not None else '∞'}\n"
-        f"• Max drawdown: {metrics.max_drawdown}\n"
-        f"• Conservative PnL: {metrics.conservative_pnl}\n"
-        f"• Optimistic PnL: {metrics.optimistic_pnl}\n\n"
+        f"{profit_factor_line}"
+        f"• Max drawdown: {format_decimal(metrics.max_drawdown)}\n"
+        f"• Conservative PnL: {format_decimal(metrics.conservative_pnl)}\n"
+        f"• Optimistic PnL: {format_decimal(metrics.optimistic_pnl)}\n\n"
         f"Score: {score.quantize(Decimal('1'))}/100"
     )
+
+
+def _telegram_profit_factor_line(value: Decimal | None) -> str:
+    if value is None:
+        return "• Profit factor: ∞\n"
+    return f"• Profit factor: {format_decimal(value)}\n"
 
 
 def report_to_markdown_summary(report: BacktestReport, score: Decimal) -> str:
@@ -59,17 +67,17 @@ def report_to_markdown_summary(report: BacktestReport, score: Decimal) -> str:
             "",
             f"- Channel: `{report.channel_id}`",
             f"- Range: `{report.from_date.isoformat()} -> {report.to_date.isoformat()}`",
-            f"- Initial Balance: `{report.initial_balance}`",
-            f"- Final Balance: `{report.final_balance}`",
+            f"- Initial Balance: `{format_decimal(report.initial_balance)}`",
+            f"- Final Balance: `{format_decimal(report.final_balance)}`",
             f"- Parsed Signals: `{metrics.parsed_signals}`",
             f"- Valid Signals: `{metrics.valid_signals}`",
-            f"- Total PnL: `{metrics.total_pnl}`",
-            f"- Win Rate: `{metrics.win_rate}`",
-            f"- Profit Factor: `{metrics.profit_factor}`",
-            f"- Max Drawdown: `{metrics.max_drawdown}`",
-            f"- Conservative PnL: `{metrics.conservative_pnl}`",
-            f"- Optimistic PnL: `{metrics.optimistic_pnl}`",
-            f"- Score: `{score}`",
+            f"- Total PnL: `{format_decimal(metrics.total_pnl)}`",
+            f"- Win Rate: `{format_decimal(metrics.win_rate)}`",
+            f"- Profit Factor: `{format_decimal(metrics.profit_factor)}`",
+            f"- Max Drawdown: `{format_decimal(metrics.max_drawdown)}`",
+            f"- Conservative PnL: `{format_decimal(metrics.conservative_pnl)}`",
+            f"- Optimistic PnL: `{format_decimal(metrics.optimistic_pnl)}`",
+            f"- Score: `{format_decimal(score)}`",
         ]
     )
 
@@ -130,7 +138,7 @@ def _symbol_summary(report: BacktestReport) -> list[dict[str, Any]]:
             "wins": item["wins"],
             "losses": item["losses"],
             "not_filled": item["not_filled"],
-            "pnl": str(item["pnl"]),
+            "pnl": format_decimal(item["pnl"]),
         }
         for item in ranked
     ]
@@ -153,8 +161,8 @@ def _equity_curve(report: BacktestReport) -> list[dict[str, Any]]:
                 "signal_id": trade.signal_id,
                 "symbol": trade.symbol,
                 "status": trade.status,
-                "pnl": str(trade.pnl),
-                "equity": str(equity),
+                "pnl": format_decimal(trade.pnl),
+                "equity": format_decimal(equity),
                 "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
             }
         )

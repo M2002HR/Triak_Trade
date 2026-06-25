@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 from triak_trade.backtesting.models import BacktestEvent
 from triak_trade.backtesting.strategies.base import TradeStrategy
@@ -58,6 +58,8 @@ class _OpenPosition:
     notes: list[str]
     targets_hit: int
     manual_partial_exit: bool
+    balance_at_entry: Decimal = Decimal("0")
+    declared_leverage: Decimal | None = None
     effective_leverage: Decimal = Decimal("1")
     fee_rate_pct: Decimal = Decimal("0")
 
@@ -84,8 +86,11 @@ class SimulationSignalState:
     exit_price: Decimal | None
     targets_hit: int
     notes: list[str]
+    declared_leverage: Decimal | None = None
     effective_leverage: Decimal = Decimal("1")
     margin: Decimal = Decimal("0")
+    balance_basis: Decimal = Decimal("0")
+    margin_pnl_pct: Decimal = Decimal("0")
     price_history: list[SignalPricePoint] | None = None
     stop_loss_history: list[PriceLevelSpan] | None = None
     take_profit_history: list[PriceLevelSpan] | None = None
@@ -108,6 +113,18 @@ class SimulationSnapshot:
     checkpoint_kind: str = "message"
 
 
+@dataclass(frozen=True)
+class _ClosedSignalSnapshotMeta:
+    stop_loss: Decimal | None
+    take_profits: list[Decimal]
+    risk_amount: Decimal
+    targets_hit: int
+    balance_basis: Decimal
+    declared_leverage: Decimal | None
+    effective_leverage: Decimal
+    margin: Decimal
+
+
 class BacktestSimulator:
     def simulate(
         self,
@@ -119,7 +136,10 @@ class BacktestSimulator:
         fill_policy: BacktestFillPolicy,
         active_signal_hours: int | None = None,
         max_effective_leverage: Decimal | None = None,
+        min_allocation_pct: Decimal = Decimal("2"),
+        max_allocation_pct: Decimal = Decimal("20"),
         default_stop_pct: Decimal = Decimal("5"),
+        synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
@@ -133,7 +153,10 @@ class BacktestSimulator:
             active_signal_hours=active_signal_hours,
             capture_snapshots=False,
             max_effective_leverage=max_effective_leverage,
+            min_allocation_pct=min_allocation_pct,
+            max_allocation_pct=max_allocation_pct,
             default_stop_pct=default_stop_pct,
+            synthetic_stop_max_loss_pct_of_balance=synthetic_stop_max_loss_pct_of_balance,
             strategy=strategy,
             fee_rate_pct=fee_rate_pct,
             default_signal_leverage=default_signal_leverage,
@@ -150,11 +173,15 @@ class BacktestSimulator:
         fill_policy: BacktestFillPolicy,
         active_signal_hours: int | None = None,
         max_effective_leverage: Decimal | None = None,
+        min_allocation_pct: Decimal = Decimal("2"),
+        max_allocation_pct: Decimal = Decimal("20"),
         default_stop_pct: Decimal = Decimal("5"),
+        synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
         snapshot_interval: timedelta | None = None,
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
+        close_open_positions_at_end: bool = True,
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         return self._simulate_internal(
             events=events,
@@ -165,11 +192,15 @@ class BacktestSimulator:
             active_signal_hours=active_signal_hours,
             capture_snapshots=True,
             max_effective_leverage=max_effective_leverage,
+            min_allocation_pct=min_allocation_pct,
+            max_allocation_pct=max_allocation_pct,
             default_stop_pct=default_stop_pct,
+            synthetic_stop_max_loss_pct_of_balance=synthetic_stop_max_loss_pct_of_balance,
             strategy=strategy,
             snapshot_interval=snapshot_interval,
             fee_rate_pct=fee_rate_pct,
             default_signal_leverage=default_signal_leverage,
+            close_open_positions_at_end=close_open_positions_at_end,
         )
 
     def _simulate_internal(
@@ -183,11 +214,15 @@ class BacktestSimulator:
         active_signal_hours: int | None,
         capture_snapshots: bool,
         max_effective_leverage: Decimal | None = None,
+        min_allocation_pct: Decimal = Decimal("2"),
+        max_allocation_pct: Decimal = Decimal("20"),
         default_stop_pct: Decimal = Decimal("5"),
+        synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5"),
         strategy: TradeStrategy | None = None,
         snapshot_interval: timedelta | None = None,
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
+        close_open_positions_at_end: bool = True,
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         trades: list[SimulatedTrade] = []
         closed_trades_by_signal: dict[str, SimulatedTrade] = {}
@@ -199,6 +234,7 @@ class BacktestSimulator:
         signal_price_history: dict[str, list[SignalPricePoint]] = {}
         stop_loss_history: dict[str, list[PriceLevelSpan]] = {}
         take_profit_history: dict[str, list[PriceLevelSpan]] = {}
+        closed_signal_metadata: dict[str, _ClosedSignalSnapshotMeta] = {}
         next_snapshot_at = self._initial_snapshot_anchor(
             candles=sorted_candles,
             events=sorted_events,
@@ -222,6 +258,7 @@ class BacktestSimulator:
                 signal_price_history=signal_price_history,
                 stop_loss_history=stop_loss_history,
                 take_profit_history=take_profit_history,
+                closed_signal_metadata=closed_signal_metadata,
                 next_snapshot_at=next_snapshot_at,
                 snapshot_interval=snapshot_interval,
             )
@@ -265,6 +302,24 @@ class BacktestSimulator:
                     )
                     trades.append(no_fill_trade)
                     closed_trades_by_signal[no_fill_trade.signal_id] = no_fill_trade
+                    closed_signal_metadata[no_fill_trade.signal_id] = _ClosedSignalSnapshotMeta(
+                        stop_loss=parsed.stop_loss,
+                        take_profits=list(parsed.take_profits),
+                        risk_amount=Decimal("0"),
+                        targets_hit=0,
+                        balance_basis=balance,
+                        declared_leverage=(
+                            Decimal(event.leverage)
+                            if event.leverage is not None
+                            else (
+                                Decimal(parsed.leverage)
+                                if parsed.leverage is not None
+                                else None
+                            )
+                        ),
+                        effective_leverage=Decimal("1"),
+                        margin=Decimal("0"),
+                    )
                     if capture_snapshots:
                         snapshots.append(
                             self._build_snapshot(
@@ -278,6 +333,7 @@ class BacktestSimulator:
                                 signal_price_history=signal_price_history,
                                 stop_loss_history=stop_loss_history,
                                 take_profit_history=take_profit_history,
+                                closed_signal_metadata=closed_signal_metadata,
                                 checkpoint_kind="message",
                             )
                         )
@@ -290,98 +346,121 @@ class BacktestSimulator:
                 # A real stop_loss, when present, always takes precedence.
                 if parsed.stop_loss is not None:
                     effective_stop = parsed.stop_loss
-                elif strategy is not None:
-                    effective_stop = strategy.get_synthetic_stop(
-                        side=parsed.side,
-                        entry_price=entry_price,
-                    )
-                    notes.append(f"synthetic_stop_strategy={strategy.name}")
-                else:
-                    pct = max(default_stop_pct, Decimal("0")) / Decimal("100")
-                    if parsed.side.is_short:
-                        effective_stop = entry_price * (Decimal("1") + pct)
-                    else:
-                        effective_stop = entry_price * (Decimal("1") - pct)
-                    notes.append(f"synthetic_stop_pct={default_stop_pct}")
                 # If balance is zero or negative, we can't size a new position.
                 if balance <= Decimal("0"):
                     continue
-                risk_amount = (balance * risk_per_trade_pct) / Decimal("100")
-                stop_distance = abs(entry_price - effective_stop)
-                if stop_distance <= Decimal("0"):
-                    continue
-                qty = risk_amount / stop_distance
-                # Leverage caps how much notional the balance can support. Keep
-                # the risk-based quantity as primary sizing, but never let a
-                # position exceed balance * effective_leverage in notional.
                 signal_leverage = (
                     Decimal(event.leverage) if event.leverage else default_signal_leverage
                 )
+                declared_leverage = (
+                    Decimal(event.leverage)
+                    if event.leverage is not None
+                    else (
+                        Decimal(parsed.leverage)
+                        if parsed.leverage is not None
+                        else None
+                    )
+                )
                 if max_effective_leverage is None:
-                    # Leverage modeling disabled: keep legacy risk-based sizing with
-                    # no margin cap, and report return-on-notional (leverage 1).
                     effective_leverage = Decimal("1")
                 else:
                     effective_leverage = min(
                         max(signal_leverage, Decimal("1")),
                         max(max_effective_leverage, Decimal("1")),
                     )
-                    if entry_price > Decimal("0"):
-                        max_qty_by_margin = (balance * effective_leverage) / entry_price
-                        if qty > max_qty_by_margin:
-                            notes.append(
-                                f"quantity_capped_by_leverage; lev={effective_leverage}; "
-                                f"risk_qty={qty}; capped_qty={max_qty_by_margin}"
-                            )
-                            qty = max_qty_by_margin
+                allocation_pct = self._allocation_pct_for_signal(
+                    allocation_factor_pct=risk_per_trade_pct,
+                    leverage=effective_leverage,
+                    min_allocation_pct=min_allocation_pct,
+                    max_allocation_pct=max_allocation_pct,
+                )
+                allocation_amount = (balance * allocation_pct) / Decimal("100")
+                if allocation_amount <= Decimal("0"):
+                    continue
+                notes.append(f"allocation_pct={allocation_pct}")
+                qty = (allocation_amount * effective_leverage) / entry_price
                 # B7: portfolio-level margin check — only when leverage modeling
-                # is active (max_effective_leverage is not None).  In legacy mode
+                # is active (max_effective_leverage is not None). In legacy mode
                 # (None) no margin model is in effect, so we skip this gate.
-                #
-                # Use max_effective_leverage (the exchange cap) for portfolio
-                # accounting rather than each signal's effective_leverage.  When a
-                # signal has no explicit leverage the effective_leverage falls to 1,
-                # which would make used_margin equal the full notional and block all
-                # subsequent positions unfairly.  The exchange-level cap reflects the
-                # true shared margin capacity across the portfolio.
                 if max_effective_leverage is not None:
-                    portfolio_lev = max(max_effective_leverage, Decimal("1"))
                     used_margin = sum(
-                        (pos.entry_price * pos.original_quantity) / portfolio_lev
+                        (pos.entry_price * pos.original_quantity)
+                        / max(pos.effective_leverage, Decimal("1"))
                         for pos in open_positions.values()
                     )
-                    new_margin = (entry_price * qty) / portfolio_lev
+                    new_margin = (entry_price * qty) / max(effective_leverage, Decimal("1"))
                     if used_margin + new_margin > balance:
                         free_margin = max(balance - used_margin, Decimal("0"))
                         if free_margin <= Decimal("0") or entry_price <= Decimal("0"):
                             notes.append("rejected_insufficient_portfolio_margin")
                             continue
                         # Clamp qty to what free margin actually allows.
-                        clamped_qty = (free_margin * portfolio_lev) / entry_price
+                        clamped_qty = (free_margin * effective_leverage) / entry_price
                         notes.append(
                             f"quantity_capped_portfolio_margin; "
                             f"used={used_margin:.4f}; free={free_margin:.4f}; "
                             f"req_margin={new_margin:.4f}; clamped_qty={clamped_qty:.6f}"
                         )
                         qty = clamped_qty
+                if parsed.stop_loss is None:
+                    if strategy is not None:
+                        effective_stop = strategy.get_synthetic_stop(
+                            side=parsed.side,
+                            entry_price=entry_price,
+                            balance_at_entry=balance,
+                            quantity=qty,
+                            fee_rate_pct=fee_rate_pct,
+                        )
+                        notes.append(f"synthetic_stop_strategy={strategy.name}")
+                    else:
+                        pct = max(default_stop_pct, Decimal("0")) / Decimal("100")
+                        if parsed.side.is_short:
+                            effective_stop = entry_price * (Decimal("1") + pct)
+                        else:
+                            effective_stop = entry_price * (Decimal("1") - pct)
+                        notes.append(f"synthetic_stop_pct={default_stop_pct}")
+                        effective_stop, qty, synthetic_stop_notes = (
+                            self._cap_synthetic_stop_loss_risk(
+                                side=parsed.side,
+                                entry_price=entry_price,
+                                stop_loss=effective_stop,
+                                quantity=qty,
+                                balance_at_entry=balance,
+                                fee_rate_pct=fee_rate_pct,
+                                max_loss_pct_of_balance=synthetic_stop_max_loss_pct_of_balance,
+                            )
+                        )
+                        notes.extend(synthetic_stop_notes)
+                    if qty <= Decimal("0"):
+                        continue
+                else:
+                    effective_stop = parsed.stop_loss
+                stop_distance = abs(entry_price - effective_stop)
+                if stop_distance <= Decimal("0") and parsed.stop_loss is not None:
+                    continue
 
                 # Filter take-profits to only those on the correct side of
                 # entry.  A TP above entry for a SHORT (or below for a LONG)
                 # is a parser artefact; including it would trigger an
                 # accidental loss instead of a profit exit.
-                valid_tps = [
-                    tp for tp in parsed.take_profits
-                    if (
-                        parsed.side.is_long and tp > entry_price
-                    ) or (
-                        parsed.side.is_short and tp < entry_price
-                    )
-                ]
+                valid_tps = self._sanitize_take_profits(
+                    take_profits=parsed.take_profits,
+                    side=parsed.side,
+                    entry_price=entry_price,
+                    stop_loss=effective_stop,
+                )
                 if len(valid_tps) < len(parsed.take_profits):
                     dropped = len(parsed.take_profits) - len(valid_tps)
                     notes.append(f"tp_direction_filtered={dropped}")
                 if not valid_tps and strategy is not None:
-                    valid_tps = strategy.get_synthetic_take_profits(
+                    strategy_tps = strategy.get_synthetic_take_profits(
+                        side=parsed.side,
+                        entry_price=entry_price,
+                        stop_loss=effective_stop,
+                        notional_value=entry_price * qty,
+                    )
+                    valid_tps = self._sanitize_take_profits(
+                        take_profits=strategy_tps,
                         side=parsed.side,
                         entry_price=entry_price,
                         stop_loss=effective_stop,
@@ -416,6 +495,8 @@ class BacktestSimulator:
                     notes=notes,
                     targets_hit=0,
                     manual_partial_exit=False,
+                    balance_at_entry=balance,
+                    declared_leverage=declared_leverage,
                     effective_leverage=effective_leverage,
                     fee_rate_pct=fee_rate_pct,
                 )
@@ -521,12 +602,18 @@ class BacktestSimulator:
                         stop_loss=parsed.stop_loss,
                     )
                 elif parsed.action is SignalAction.UPDATE_TP and parsed.take_profits:
+                    valid_update_tps = self._sanitize_take_profits(
+                        take_profits=parsed.take_profits,
+                        side=position.side,
+                        entry_price=position.entry_price,
+                        stop_loss=position.stop_loss,
+                    )
                     position.take_profits = (
-                        position.take_profits[: position.targets_hit] + parsed.take_profits
+                        position.take_profits[: position.targets_hit] + valid_update_tps
                     )
                     position.notes.append(
                         "take_profits_updated="
-                        + ",".join(str(item) for item in parsed.take_profits)
+                        + ",".join(str(item) for item in valid_update_tps)
                     )
                     self._replace_take_profit_history(
                         take_profit_history=take_profit_history,
@@ -547,6 +634,7 @@ class BacktestSimulator:
                         signal_price_history=signal_price_history,
                         stop_loss_history=stop_loss_history,
                         take_profit_history=take_profit_history,
+                        closed_signal_metadata=closed_signal_metadata,
                         checkpoint_kind="message",
                     )
                 )
@@ -566,6 +654,7 @@ class BacktestSimulator:
             signal_price_history=signal_price_history,
             stop_loss_history=stop_loss_history,
             take_profit_history=take_profit_history,
+            closed_signal_metadata=closed_signal_metadata,
             next_snapshot_at=next_snapshot_at,
             snapshot_interval=snapshot_interval,
         )
@@ -573,23 +662,89 @@ class BacktestSimulator:
             trades.append(trade)
             closed_trades_by_signal[trade.signal_id] = trade
             balance += trade.pnl
-
-        for signal_id, position in list(open_positions.items()):
-            outcome = self._close_remaining_position(
-                position,
-                position.exit_time or position.entry_time,
-                position.exit_price
-                or self._last_price(
-                    sorted_candles,
-                    position.symbol,
-                    position.entry_price,
-                ),
-                "open_until_end" if position.targets_hit == 0 else "partial_tp_open_until_end",
+        if capture_snapshots and resolved_trades:
+            terminal_timestamp = max(
+                (trade.exit_time or trade.entry_time or sorted_candles[-1].close_time)
+                for trade in resolved_trades
             )
-            trades.append(outcome)
-            closed_trades_by_signal[outcome.signal_id] = outcome
-            balance += outcome.pnl
-            del open_positions[signal_id]
+            snapshots.append(
+                self._build_snapshot(
+                    timestamp=terminal_timestamp,
+                    source_message_id=None,
+                    open_positions=open_positions,
+                    closed_trades_by_signal=closed_trades_by_signal,
+                    candles=sorted_candles,
+                    processed_candle_count=candle_index,
+                    initial_balance=initial_balance,
+                    signal_price_history=signal_price_history,
+                    stop_loss_history=stop_loss_history,
+                    take_profit_history=take_profit_history,
+                    closed_signal_metadata=closed_signal_metadata,
+                    checkpoint_kind="message",
+                )
+            )
+
+        if close_open_positions_at_end:
+            for signal_id, position in list(open_positions.items()):
+                final_exit_time = (
+                    sorted_candles[-1].close_time
+                    if sorted_candles
+                    else position.exit_time or position.entry_time
+                )
+                outcome = self._close_remaining_position(
+                    position,
+                    final_exit_time,
+                    position.exit_price
+                    or self._last_price(
+                        sorted_candles,
+                        position.symbol,
+                        position.entry_price,
+                    ),
+                    "open_until_end" if position.targets_hit == 0 else "partial_tp_open_until_end",
+                )
+                trades.append(outcome)
+                closed_trades_by_signal[outcome.signal_id] = outcome
+                closed_signal_metadata[outcome.signal_id] = (
+                    self._closed_signal_snapshot_meta(position)
+                )
+                balance += outcome.pnl
+                del open_positions[signal_id]
+        if capture_snapshots and trades:
+            latest_snapshot_time = snapshots[-1].timestamp if snapshots else None
+            fallback_snapshot_time = (
+                sorted_candles[-1].close_time
+                if sorted_candles
+                else (
+                    sorted_events[-1].timestamp
+                    if sorted_events
+                    else datetime.now(timezone.utc)
+                )
+            )
+            final_timestamp = max(
+                (
+                    trade.exit_time
+                    or trade.entry_time
+                    or fallback_snapshot_time
+                )
+                for trade in trades
+            )
+            if latest_snapshot_time is None or final_timestamp > latest_snapshot_time:
+                snapshots.append(
+                    self._build_snapshot(
+                        timestamp=final_timestamp,
+                        source_message_id=None,
+                        open_positions=open_positions,
+                        closed_trades_by_signal=closed_trades_by_signal,
+                        candles=sorted_candles,
+                        processed_candle_count=candle_index,
+                        initial_balance=initial_balance,
+                        signal_price_history=signal_price_history,
+                        stop_loss_history=stop_loss_history,
+                        take_profit_history=take_profit_history,
+                        closed_signal_metadata=closed_signal_metadata,
+                        checkpoint_kind="message",
+                    )
+                )
 
         return trades, balance, snapshots
 
@@ -654,9 +809,18 @@ class BacktestSimulator:
         signal_price_history: dict[str, list[SignalPricePoint]] | None = None,
         stop_loss_history: dict[str, list[PriceLevelSpan]] | None = None,
         take_profit_history: dict[str, list[PriceLevelSpan]] | None = None,
+        closed_signal_metadata: dict[str, _ClosedSignalSnapshotMeta] | None = None,
         next_snapshot_at: datetime | None = None,
         snapshot_interval: timedelta | None = None,
     ) -> tuple[int, list[SimulatedTrade]]:
+        if not open_positions:
+            if stop_at is None:
+                return len(candles), []
+            index = start_index
+            while index < len(candles) and candles[index].close_time <= stop_at:
+                index += 1
+            return index, []
+
         index = start_index
         resolved_trades: list[SimulatedTrade] = []
 
@@ -703,6 +867,10 @@ class BacktestSimulator:
                     resolved_trades.append(trade)
                     if closed_trades_by_signal is not None:
                         closed_trades_by_signal[trade.signal_id] = trade
+                    if closed_signal_metadata is not None:
+                        closed_signal_metadata[trade.signal_id] = self._closed_signal_snapshot_meta(
+                            position
+                        )
                     closed_signal_ids.append(signal_id)
                     continue
                 
@@ -720,6 +888,10 @@ class BacktestSimulator:
                 resolved_trades.append(trade)
                 if closed_trades_by_signal is not None:
                     closed_trades_by_signal[trade.signal_id] = trade
+                if closed_signal_metadata is not None:
+                    closed_signal_metadata[trade.signal_id] = self._closed_signal_snapshot_meta(
+                        position
+                    )
                 closed_signal_ids.append(signal_id)
 
             for signal_id in closed_signal_ids:
@@ -735,10 +907,13 @@ class BacktestSimulator:
                 and signal_price_history is not None
                 and stop_loss_history is not None
                 and take_profit_history is not None
+                and closed_signal_metadata is not None
                 and next_snapshot_at is not None
                 and snapshot_interval is not None
             ):
                 while candle.close_time >= next_snapshot_at:
+                    if not open_positions:
+                        break
                     snapshots.append(
                         self._build_snapshot(
                             timestamp=next_snapshot_at,
@@ -751,6 +926,7 @@ class BacktestSimulator:
                             signal_price_history=signal_price_history,
                             stop_loss_history=stop_loss_history,
                             take_profit_history=take_profit_history,
+                            closed_signal_metadata=closed_signal_metadata,
                             checkpoint_kind="interval",
                         )
                     )
@@ -766,19 +942,7 @@ class BacktestSimulator:
         candle: Candle,
         active_signal_hours: int | None,
     ) -> str | None:
-        if active_signal_hours is None or active_signal_hours <= 0:
-            return None
-        expiry_time = position.entry_time + timedelta(hours=active_signal_hours)
-        if candle.open_time < expiry_time:
-            return None
-        self._close_fraction_of_position(
-            position,
-            candle.open_time,
-            candle.open,
-            Decimal("1"),
-            "signal_expired",
-        )
-        return "expired" if position.targets_hit == 0 else "partial_tp_expired"
+        return None
 
     def _apply_candle_to_position(
         self,
@@ -962,11 +1126,10 @@ class BacktestSimulator:
     def _finalize_position(self, position: _OpenPosition, *, status: str) -> SimulatedTrade:
         position.status = status
         exposure = position.entry_price * position.original_quantity
-        # PnL percentage is return on committed margin (= notional / leverage),
-        # so a leveraged trade shows the amplified percentage return while the
-        # absolute dollar PnL is leverage-independent.
-        leverage = position.effective_leverage if position.effective_leverage > 0 else Decimal("1")
-        margin = exposure / leverage if exposure > Decimal("0") else Decimal("0")
+        # PnL percentage is shown as return on account balance at entry so the
+        # percent displayed to the user matches the dollar PnL on a 100 USDT
+        # (or other configured) account. Margin-based ROI is preserved in
+        # live snapshot metadata separately for diagnostics.
         # Net PnL is gross realized PnL minus all trading fees (entry + exits).
         # Netting here — the single finalize chokepoint that every balance
         # increment flows through — keeps balance, total_pnl, scoring and
@@ -974,9 +1137,12 @@ class BacktestSimulator:
         # realized_fees is 0, so this is a no-op for the default configuration.
         fees = max(position.realized_fees, Decimal("0"))
         net_pnl = position.realized_pnl - fees
+        balance_basis = (
+            position.balance_at_entry if position.balance_at_entry > Decimal("0") else exposure
+        )
         pnl_pct = (
-            (net_pnl / margin) * Decimal("100")
-            if margin > Decimal("0")
+            (net_pnl / balance_basis) * Decimal("100")
+            if balance_basis > Decimal("0")
             else Decimal("0")
         )
         return SimulatedTrade(
@@ -1010,6 +1176,7 @@ class BacktestSimulator:
         signal_price_history: dict[str, list[SignalPricePoint]],
         stop_loss_history: dict[str, list[PriceLevelSpan]],
         take_profit_history: dict[str, list[PriceLevelSpan]],
+        closed_signal_metadata: dict[str, _ClosedSignalSnapshotMeta],
         checkpoint_kind: str,
     ) -> SimulationSnapshot:
         realized_pnl = sum(
@@ -1022,6 +1189,7 @@ class BacktestSimulator:
 
         for signal_id, trade in closed_trades_by_signal.items():
             mark_price = trade.exit_price or trade.entry_price or Decimal("0")
+            meta = closed_signal_metadata.get(signal_id)
             signal_states[signal_id] = SimulationSignalState(
                 signal_id=signal_id,
                 symbol=trade.symbol,
@@ -1030,10 +1198,10 @@ class BacktestSimulator:
                 original_quantity=trade.quantity,
                 open_quantity=Decimal("0"),
                 entry_price=trade.entry_price,
-                stop_loss=None,
-                take_profits=[],
+                stop_loss=meta.stop_loss if meta is not None else None,
+                take_profits=list(meta.take_profits) if meta is not None else [],
                 notional_value=(trade.entry_price or Decimal("0")) * trade.quantity,
-                risk_amount=Decimal("0"),
+                risk_amount=meta.risk_amount if meta is not None else Decimal("0"),
                 realized_pnl=trade.pnl,
                 unrealized_pnl=Decimal("0"),
                 total_pnl_pct=trade.pnl_pct,
@@ -1041,8 +1209,19 @@ class BacktestSimulator:
                 entry_time=trade.entry_time or timestamp,
                 exit_time=trade.exit_time,
                 exit_price=trade.exit_price,
-                targets_hit=0,
+                targets_hit=meta.targets_hit if meta is not None else 0,
                 notes=list(trade.notes),
+                declared_leverage=meta.declared_leverage if meta is not None else None,
+                effective_leverage=(
+                    meta.effective_leverage if meta is not None else Decimal("1")
+                ),
+                margin=meta.margin if meta is not None else Decimal("0"),
+                balance_basis=meta.balance_basis if meta is not None else Decimal("0"),
+                margin_pnl_pct=(
+                    ((trade.pnl / meta.margin) * Decimal("100"))
+                    if meta is not None and meta.margin > Decimal("0")
+                    else Decimal("0")
+                ),
                 price_history=list(signal_price_history.get(signal_id, [])),
                 stop_loss_history=list(stop_loss_history.get(signal_id, [])),
                 take_profit_history=list(take_profit_history.get(signal_id, [])),
@@ -1081,18 +1260,25 @@ class BacktestSimulator:
                 realized_pnl=net_realized,
                 unrealized_pnl=unrealized,
                 total_pnl_pct=(
-                    (total_pnl / margin) * Decimal("100")
-                    if margin > Decimal("0")
+                    (total_pnl / position.balance_at_entry) * Decimal("100")
+                    if position.balance_at_entry > Decimal("0")
                     else Decimal("0")
                 ),
                 mark_price=mark_price,
                 entry_time=position.entry_time,
-                exit_time=position.exit_time,
-                exit_price=position.exit_price,
+                exit_time=None,
+                exit_price=None,
                 targets_hit=position.targets_hit,
                 notes=list(position.notes),
+                declared_leverage=position.declared_leverage,
                 effective_leverage=leverage,
                 margin=margin,
+                balance_basis=position.balance_at_entry,
+                margin_pnl_pct=(
+                    (total_pnl / margin) * Decimal("100")
+                    if margin > Decimal("0")
+                    else Decimal("0")
+                ),
                 price_history=list(signal_price_history.get(signal_id, [])),
                 stop_loss_history=list(stop_loss_history.get(signal_id, [])),
                 take_profit_history=list(take_profit_history.get(signal_id, [])),
@@ -1116,6 +1302,25 @@ class BacktestSimulator:
             current_balance=current_balance,
             signal_states=signal_states,
             checkpoint_kind=checkpoint_kind,
+        )
+
+    def _closed_signal_snapshot_meta(self, position: _OpenPosition) -> _ClosedSignalSnapshotMeta:
+        notional_value = position.entry_price * position.original_quantity
+        leverage = (
+            position.effective_leverage
+            if position.effective_leverage > 0
+            else Decimal("1")
+        )
+        margin = notional_value / leverage if notional_value > Decimal("0") else Decimal("0")
+        return _ClosedSignalSnapshotMeta(
+            stop_loss=position.stop_loss,
+            take_profits=list(position.take_profits),
+            risk_amount=abs(position.entry_price - position.stop_loss) * position.original_quantity,
+            targets_hit=position.targets_hit,
+            balance_basis=position.balance_at_entry,
+            declared_leverage=position.declared_leverage,
+            effective_leverage=leverage,
+            margin=margin,
         )
 
     def _append_signal_price_point(
@@ -1297,3 +1502,141 @@ class BacktestSimulator:
     ) -> Decimal:
         direction = Decimal("-1") if position.side.is_short else Decimal("1")
         return (exit_price - position.entry_price) * quantity * direction
+
+    def _allocation_pct_for_signal(
+        self,
+        *,
+        allocation_factor_pct: Decimal,
+        leverage: Decimal,
+        min_allocation_pct: Decimal,
+        max_allocation_pct: Decimal,
+    ) -> Decimal:
+        effective_leverage = max(leverage, Decimal("1"))
+        raw_pct = allocation_factor_pct / effective_leverage
+        floor_pct = max(min_allocation_pct, Decimal("0"))
+        ceiling_pct = max(max_allocation_pct, floor_pct)
+        return min(max(raw_pct, floor_pct), ceiling_pct)
+
+    def _cap_synthetic_stop_loss_risk(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+        quantity: Decimal,
+        balance_at_entry: Decimal,
+        fee_rate_pct: Decimal,
+        max_loss_pct_of_balance: Decimal,
+    ) -> tuple[Decimal, Decimal, list[str]]:
+        notes: list[str] = []
+        if (
+            quantity <= Decimal("0")
+            or entry_price <= Decimal("0")
+            or balance_at_entry <= Decimal("0")
+        ):
+            return stop_loss, quantity, notes
+
+        max_loss_pct = max(max_loss_pct_of_balance, Decimal("0"))
+        risk_budget = balance_at_entry * max_loss_pct / Decimal("100")
+        if risk_budget <= Decimal("0"):
+            return stop_loss, quantity, notes
+
+        fee_rate = max(fee_rate_pct, Decimal("0")) / Decimal("100")
+        base_fee_loss = (
+            Decimal("2") * entry_price * quantity * fee_rate
+            if fee_rate > Decimal("0")
+            else Decimal("0")
+        )
+        if base_fee_loss >= risk_budget:
+            if fee_rate <= Decimal("0"):
+                return stop_loss, quantity, notes
+            denominator = Decimal("2") * entry_price * fee_rate
+            if denominator <= Decimal("0"):
+                return stop_loss, quantity, notes
+            capped_qty = risk_budget / denominator
+            if capped_qty <= Decimal("0"):
+                return stop_loss, Decimal("0"), [
+                    "synthetic_stop_risk_budget_exhausted_by_fees",
+                ]
+            notes.append(
+                "synthetic_stop_qty_capped_for_risk_budget="
+                f"{quantity}->{capped_qty}"
+            )
+            quantity = min(quantity, capped_qty)
+            base_fee_loss = (
+                Decimal("2") * entry_price * quantity * fee_rate
+                if fee_rate > Decimal("0")
+                else Decimal("0")
+            )
+
+        available_price_loss_budget = risk_budget - base_fee_loss
+        if available_price_loss_budget <= Decimal("0"):
+            capped_stop = entry_price
+            if stop_loss != capped_stop:
+                notes.append(
+                    "synthetic_stop_risk_capped="
+                    f"{stop_loss}->{capped_stop}; max_loss_pct={max_loss_pct_of_balance}"
+                )
+            return capped_stop, quantity, notes
+
+        distance_denominator = (
+            quantity * (Decimal("1") + fee_rate)
+            if side.is_short
+            else quantity * (Decimal("1") - fee_rate)
+        )
+        if distance_denominator <= Decimal("0"):
+            return stop_loss, quantity, notes
+        max_stop_distance = available_price_loss_budget / distance_denominator
+        current_stop_distance = abs(entry_price - stop_loss)
+        if current_stop_distance <= max_stop_distance:
+            return stop_loss, quantity, notes
+
+        if side.is_short:
+            capped_stop = entry_price + max_stop_distance
+        else:
+            capped_stop = max(entry_price - max_stop_distance, Decimal("0"))
+        notes.append(
+            "synthetic_stop_risk_capped="
+            f"{stop_loss}->{capped_stop}; max_loss_pct={max_loss_pct_of_balance}"
+        )
+        return capped_stop, quantity, notes
+
+    def _sanitize_take_profits(
+        self,
+        *,
+        take_profits: list[Decimal],
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal | None,
+    ) -> list[Decimal]:
+        sanitized: list[Decimal] = []
+        seen: set[Decimal] = set()
+        max_distance = (
+            abs(entry_price - stop_loss) * Decimal("50")
+            if stop_loss is not None
+            else None
+        )
+        for raw_tp in take_profits:
+            try:
+                tp = Decimal(raw_tp)
+            except (InvalidOperation, TypeError):
+                continue
+            if tp <= Decimal("0"):
+                continue
+            if side.is_long and tp <= entry_price:
+                continue
+            if side.is_short and tp >= entry_price:
+                continue
+            if max_distance is not None and max_distance > Decimal("0"):
+                distance = abs(entry_price - tp)
+                if distance > max_distance:
+                    continue
+            if tp in seen:
+                continue
+            seen.add(tp)
+            sanitized.append(tp)
+        if side.is_short:
+            sanitized.sort(reverse=True)
+        else:
+            sanitized.sort()
+        return sanitized

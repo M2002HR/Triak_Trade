@@ -33,16 +33,18 @@
 | `BACKTEST_MARKET_DATA_PROVIDER` | `binance_public` | provider اصلی |
 | `BACKTEST_MARKET_DATA_USE_TOOBIT_FALLBACK` | `true` | fallback به Toobit |
 | `BACKTEST_DEFAULT_INITIAL_BALANCE` | `100` | موجودی اولیه |
-| `BACKTEST_DEFAULT_RISK_PER_TRADE_PCT` | `3` | ریسک هر ترید |
+| `BACKTEST_DEFAULT_RISK_PER_TRADE_PCT` | `120` | allocation factor برای فرمول `factor / leverage` |
+| `BACKTEST_MIN_ALLOCATION_PCT` | `2` | حداقل درصد درگیری سرمایه در هر سیگنال |
+| `BACKTEST_MAX_ALLOCATION_PCT` | `20` | حداکثر درصد درگیری سرمایه در هر سیگنال |
 | `BACKTEST_DEFAULT_INTERVAL` | `1m` | تایم‌فریم |
-| `BACKTEST_LIFECYCLE_REFRESH_INTERVAL` | `5m` | بازه‌ی snapshot زنده |
+| `BACKTEST_LIFECYCLE_REFRESH_INTERVAL` | `30m` | بازه‌ی snapshot زنده |
 | `BACKTEST_DEFAULT_FILL_POLICY` | `conservative` | سیاست fill |
 | `BACKTEST_MAX_MESSAGES` | `5000` | سقف پیام |
-| `BACKTEST_MAX_EFFECTIVE_LEVERAGE` | `25` | سقف اهرم margin |
+| `BACKTEST_MAX_EFFECTIVE_LEVERAGE` | `50` | سقف اهرم margin |
 | `BACKTEST_DEFAULT_STOP_PCT` | `5` | استاپ مصنوعی بدون strategy |
 | `REAL_BACKTEST_ENABLED` | `false` | کلید اصلی بک‌تست واقعی |
 | `REAL_BACKTEST_MAX_MESSAGES` | `1000` | سقف پیام واقعی |
-| `REAL_BACKTEST_ACTIVE_SIGNAL_HOURS` | `24` | انقضای سیگنال |
+| `REAL_BACKTEST_ACTIVE_SIGNAL_HOURS` | `0` | عملاً غیرفعال؛ سیگنال با زمان expire نمی‌شود |
 | `REAL_BACKTEST_USE_AI` | `true` | استفاده از AI |
 | `REAL_BACKTEST_USE_REGEX_FALLBACK` | `false` | fallback regex |
 | `REAL_BACKTEST_FOLLOWUP_LAST_RESORT_ATTACH` | `true` | attach مبهم |

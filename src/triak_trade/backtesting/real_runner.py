@@ -54,6 +54,7 @@ from triak_trade.backtesting.symbol_mapper import (
 )
 from triak_trade.backtesting.telegram_source import BacktestTelegramSource
 from triak_trade.config.settings import Settings
+from triak_trade.core.formatting import format_decimal
 from triak_trade.core.time import TEHRAN_TZ
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_signal_id
@@ -909,9 +910,14 @@ class RealBacktestRunner:
             request=report_request,
             events=events,
             candles=candles,
-            active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
+            active_signal_hours=None,
             max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
+            min_allocation_pct=Decimal(self.settings.BACKTEST_MIN_ALLOCATION_PCT),
+            max_allocation_pct=Decimal(self.settings.BACKTEST_MAX_ALLOCATION_PCT),
             default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
+            synthetic_stop_max_loss_pct_of_balance=Decimal(
+                self.settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE
+            ),
             fee_rate_pct=Decimal(self.settings.BACKTEST_FEE_RATE_PCT),
             default_signal_leverage=Decimal(self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE),
         )
@@ -1338,10 +1344,7 @@ class RealBacktestRunner:
                 request.max_messages,
                 self.settings.CHANNEL_AGENT_CONTEXT_MESSAGE_LIMIT,
             ),
-            max_update_window_hours=min(
-                self.settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS,
-                self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
-            ),
+            max_update_window_hours=max(1, self.settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS),
         )
         events: list[BacktestEvent] = []
         traces_by_message_id: dict[int, RealBacktestMessageTrace] = {}
@@ -1369,7 +1372,12 @@ class RealBacktestRunner:
         # for this run so each call only emits NEW snapshots.
         _emitted_interval_count: list[int] = [0]
 
-        for message in sorted_messages:
+        for index, message in enumerate(sorted_messages):
+            next_message_time = (
+                self._to_utc(sorted_messages[index + 1].date)
+                if index + 1 < len(sorted_messages)
+                else request.resolve_range()[1]
+            )
             trace = self._make_trace(message)
             traces_by_message_id[message.message_id] = trace
             self._set_trace_stage(
@@ -1473,6 +1481,7 @@ class RealBacktestRunner:
                         progress_callback=progress_callback,
                         counts=counts,
                         current_message_id=message.message_id,
+                        simulation_end_time=next_message_time,
                         emitted_interval_count=_emitted_interval_count,
                     )
                     _passive_since_update = 0
@@ -1930,7 +1939,12 @@ class RealBacktestRunner:
                 SignalAction.IGNORE,
                 SignalAction.UNKNOWN,
             )
-            if _is_signal_event:
+            _enriched_existing_signal = (
+                signal_id is not None
+                and classified.is_related_to_existing_signal
+                and resolved_related_id is not None
+            )
+            if _is_signal_event or _enriched_existing_signal:
                 _passive_since_update = 0  # reset counter on real event
                 _live_metrics_cache, _live_signals_cache = self._update_live_simulation_state(
                     request=request,
@@ -1941,6 +1955,7 @@ class RealBacktestRunner:
                     progress_callback=progress_callback,
                     counts=counts,
                     current_message_id=message.message_id,
+                    simulation_end_time=next_message_time,
                     emitted_interval_count=_emitted_interval_count,
                 )
             else:
@@ -1955,6 +1970,7 @@ class RealBacktestRunner:
                         progress_callback=progress_callback,
                         counts=counts,
                         current_message_id=message.message_id,
+                        simulation_end_time=next_message_time,
                         emitted_interval_count=_emitted_interval_count,
                     )
                     _passive_since_update = 0
@@ -2326,7 +2342,7 @@ class RealBacktestRunner:
         else:
             start = signal_time if signal_time > requested_start else requested_start
         minimum_end = signal_time + timedelta(
-            hours=max(1, self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS)
+            hours=max(24, self.settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS)
         )
         end = max(requested_end, minimum_end)
         return start, end
@@ -2348,12 +2364,14 @@ class RealBacktestRunner:
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         current_message_id: int,
+        simulation_end_time: datetime | None = None,
         emitted_interval_count: list[int] | None = None,
     ) -> tuple[dict[str, str], list[dict[str, Any]]]:
         available_candles = [
             candle
             for candle_group in prefetched_candles_by_symbol.values()
             for candle in candle_group
+            if simulation_end_time is None or candle.close_time <= simulation_end_time
         ]
         if not events or not available_candles or not signal_trace_map:
             return self._empty_live_metrics(), []
@@ -2369,13 +2387,19 @@ class RealBacktestRunner:
             initial_balance=request.initial_balance,
             risk_per_trade_pct=request.risk_per_trade_pct,
             fill_policy=BacktestFillPolicy(self.settings.BACKTEST_DEFAULT_FILL_POLICY),
-            active_signal_hours=self.settings.REAL_BACKTEST_ACTIVE_SIGNAL_HOURS,
+            active_signal_hours=None,
             max_effective_leverage=Decimal(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE),
+            min_allocation_pct=Decimal(self.settings.BACKTEST_MIN_ALLOCATION_PCT),
+            max_allocation_pct=Decimal(self.settings.BACKTEST_MAX_ALLOCATION_PCT),
             default_stop_pct=Decimal(self.settings.BACKTEST_DEFAULT_STOP_PCT),
+            synthetic_stop_max_loss_pct_of_balance=Decimal(
+                self.settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE
+            ),
             strategy=active_strategy,
             snapshot_interval=refresh_interval,
             fee_rate_pct=Decimal(self.settings.BACKTEST_FEE_RATE_PCT),
             default_signal_leverage=Decimal(self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE),
+            close_open_positions_at_end=False,
         )
         if not snapshots:
             return self._empty_live_metrics(), []
@@ -2433,6 +2457,8 @@ class RealBacktestRunner:
         if progress_callback is None:
             return
         for snapshot in snapshots:
+            if snapshot.open_positions <= 0:
+                continue
             self._emit_run_progress(
                 progress_callback,
                 phase="simulate",
@@ -2560,28 +2586,55 @@ class RealBacktestRunner:
                         if state.exit_time
                         else None
                     ),
-                    "original_quantity": str(state.original_quantity),
-                    "entry_price": (
-                        str(state.entry_price) if state.entry_price is not None else None
+                    "original_quantity": format_decimal(state.original_quantity),
+                    "entry_zone": (
+                        {
+                            "low": format_decimal(state.entry_price),
+                            "high": format_decimal(state.entry_price),
+                        }
+                        if state.entry_price is not None
+                        else None
                     ),
-                    "stop_loss": str(state.stop_loss) if state.stop_loss is not None else None,
-                    "take_profits": [str(item) for item in state.take_profits],
-                    "notional_value": str(state.notional_value),
-                    "risk_amount": str(state.risk_amount),
-                    "open_quantity": str(state.open_quantity),
-                    "mark_price": str(state.mark_price),
-                    "realized_pnl": str(state.realized_pnl),
-                    "unrealized_pnl": str(state.unrealized_pnl),
-                    "total_pnl": str(state.realized_pnl + state.unrealized_pnl),
-                    "total_pnl_pct": str(state.total_pnl_pct),
-                    "leverage": str(state.effective_leverage),
-                    "margin": str(state.margin),
+                    "entry_price": (
+                        format_decimal(state.entry_price) if state.entry_price is not None else None
+                    ),
+                    "stop_loss": (
+                        format_decimal(state.stop_loss)
+                        if state.stop_loss is not None
+                        else None
+                    ),
+                    "take_profits": [format_decimal(item) or "0" for item in state.take_profits],
+                    "take_profit_levels": [
+                        format_decimal(item) or "0" for item in state.take_profits
+                    ],
+                    "notional_value": format_decimal(state.notional_value),
+                    "risk_amount": format_decimal(state.risk_amount),
+                    "open_quantity": format_decimal(state.open_quantity),
+                    "mark_price": format_decimal(state.mark_price),
+                    "realized_pnl": format_decimal(state.realized_pnl),
+                    "unrealized_pnl": format_decimal(state.unrealized_pnl),
+                    "total_pnl": format_decimal(state.realized_pnl + state.unrealized_pnl),
+                    "total_pnl_pct": format_decimal(state.total_pnl_pct),
+                    "margin_pnl_pct": format_decimal(state.margin_pnl_pct),
+                    "declared_leverage": (
+                        format_decimal(state.declared_leverage)
+                        if state.declared_leverage is not None
+                        else None
+                    ),
+                    "effective_leverage": format_decimal(state.effective_leverage),
+                    "leverage": (
+                        format_decimal(state.declared_leverage)
+                        if state.declared_leverage is not None
+                        else format_decimal(state.effective_leverage)
+                    ),
+                    "margin": format_decimal(state.margin),
+                    "balance_basis": format_decimal(state.balance_basis),
                     "targets_hit": state.targets_hit,
                     "message_link": (signal_links or {}).get(state.signal_id),
                     "lifecycle": lifecycle,
                     "chart": {
                         "timezone": "Asia/Tehran",
-                        "interval": "5m",
+                        "interval": RealBacktestRunner._signal_chart_interval(state),
                         "candles": RealBacktestRunner._signal_chart_candles(state),
                         "stop_loss_history": RealBacktestRunner._level_history_payload(
                             state.stop_loss_history
@@ -2662,23 +2715,39 @@ class RealBacktestRunner:
             candles.append(
                 {
                     "timestamp": point.candle_open_time.isoformat(),
+                    "timestamp_ms": str(int(point.candle_open_time.timestamp() * 1000)),
                     "timestamp_tehran": point.candle_open_time.astimezone(
                         TEHRAN_TZ
                     ).isoformat(),
                     "close_timestamp": point.candle_close_time.isoformat(),
+                    "close_timestamp_ms": str(int(point.candle_close_time.timestamp() * 1000)),
                     "close_timestamp_tehran": point.candle_close_time.astimezone(
                         TEHRAN_TZ
                     ).isoformat(),
-                    "open": str(point.open),
-                    "high": str(point.high),
-                    "low": str(point.low),
-                    "close": str(point.close),
-                    "mark_price": str(point.mark_price),
-                    "stop_loss": str(point.stop_loss) if point.stop_loss is not None else None,
-                    "take_profits": [str(item) for item in point.take_profits],
+                    "open": format_decimal(point.open),
+                    "high": format_decimal(point.high),
+                    "low": format_decimal(point.low),
+                    "close": format_decimal(point.close),
+                    "mark_price": format_decimal(point.mark_price),
+                    "stop_loss": (
+                        format_decimal(point.stop_loss) if point.stop_loss is not None else None
+                    ),
+                    "take_profits": [format_decimal(item) or "0" for item in point.take_profits],
                 }
             )
         return candles
+
+    @staticmethod
+    def _signal_chart_interval(state: Any) -> str:
+        history = state.price_history or []
+        if len(history) >= 2 and isinstance(history[0], SignalPricePoint) and isinstance(
+            history[1], SignalPricePoint
+        ):
+            delta = history[1].candle_open_time - history[0].candle_open_time
+            minutes = int(delta.total_seconds() // 60)
+            if minutes > 0:
+                return f"{minutes}m"
+        return "n/a"
 
     @staticmethod
     def _level_history_payload(
@@ -2690,10 +2759,14 @@ class RealBacktestRunner:
                 {
                     "kind": item.kind,
                     "label": item.label,
-                    "value": str(item.value),
+                    "value": format_decimal(item.value),
                     "started_at": item.started_at.isoformat(),
+                    "started_at_ms": str(int(item.started_at.timestamp() * 1000)),
                     "started_at_tehran": item.started_at.astimezone(TEHRAN_TZ).isoformat(),
                     "ended_at": item.ended_at.isoformat() if item.ended_at else None,
+                    "ended_at_ms": (
+                        str(int(item.ended_at.timestamp() * 1000)) if item.ended_at else None
+                    ),
                     "ended_at_tehran": (
                         item.ended_at.astimezone(TEHRAN_TZ).isoformat() if item.ended_at else None
                     ),

@@ -16,17 +16,18 @@ class DefaultRiskManagedStrategy:
 
     Rules
     -----
-    1. **No stop loss**: place a synthetic stop at ``no_sl_loss_pct`` percent
-       away from entry (e.g. 100 % → entry doubles distance, effectively a very
-       wide stop that protects against catastrophic moves but does not
-       interfere with normal TP-driven management).
+    1. **No stop loss**: place a synthetic stop that caps worst-case loss to a
+       configurable percentage of balance at entry.
 
     2. **Risk-free on first TP**: when ``risk_free_on_first_tp`` is True, the
        stop loss is automatically moved to the entry price after the first
        take-profit target is hit.  This means subsequent SL hits result in a
        breakeven trade rather than a loss.
 
-    3. **Partial profit at each TP**: the fraction of remaining position to
+    3. **Fallback TP ladder**: when a signal omits explicit targets, build a
+       ladder from configurable profit percentages on the position notional.
+
+    4. **Partial profit at each TP**: the fraction of remaining position to
        close at each successive TP is taken from ``tp_close_fractions``.
        - If the list is exhausted, the last entry is repeated.
        - The *final* pending target always closes 100 % of remaining quantity,
@@ -43,15 +44,33 @@ class DefaultRiskManagedStrategy:
 
     name: str = "default_risk_managed"
 
-    no_sl_loss_pct: Decimal = Decimal("100")
+    synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5")
     """
-    When a signal has no stop loss, place a synthetic stop this many percent
-    from entry.  100 % means the stop sits at zero for a LONG (never reached
-    in practice) and at double the entry price for a SHORT.
+    Cap the worst-case net loss of a synthetic stop-loss position to this
+    percent of the balance that existed when the trade opened.
     """
 
     risk_free_on_first_tp: bool = True
     """Move the stop loss to entry price after the first TP target is hit."""
+
+    synthetic_tp_profit_pct_steps: list[Decimal] = field(
+        default_factory=lambda: [
+            Decimal("2"),
+            Decimal("4"),
+            Decimal("6"),
+            Decimal("8"),
+            Decimal("10"),
+        ]
+    )
+    """
+    Profit milestones, as percentages of total position notional, for fallback
+    take-profits when the signal omitted explicit targets.
+
+    Example with 120 USDT notional on a LONG:
+    - 2%  -> +2.4 USDT
+    - 4%  -> +4.8 USDT
+    - ...
+    """
 
     tp_close_fractions: list[Decimal] = field(
         default_factory=lambda: [
@@ -66,23 +85,6 @@ class DefaultRiskManagedStrategy:
     The very last pending target always closes 100 % regardless of this list.
     """
 
-    synthetic_tp_r_multiples: list[Decimal] = field(
-        default_factory=lambda: [
-            Decimal("1"),
-            Decimal("2"),
-            Decimal("3"),
-        ]
-    )
-    """
-    Risk-multiple ladder used when a signal omits explicit take-profit targets.
-
-    Example for a LONG:
-    - risk = entry - stop
-    - TP1 = entry + 1R
-    - TP2 = entry + 2R
-    - TP3 = entry + 3R
-    """
-
     # ------------------------------------------------------------------ #
     # Protocol implementation                                              #
     # ------------------------------------------------------------------ #
@@ -92,13 +94,42 @@ class DefaultRiskManagedStrategy:
         *,
         side: TradeSide,
         entry_price: Decimal,
+        balance_at_entry: Decimal,
+        quantity: Decimal,
+        fee_rate_pct: Decimal,
     ) -> Decimal:
-        pct = max(self.no_sl_loss_pct, Decimal("0")) / Decimal("100")
+        if (
+            quantity <= Decimal("0")
+            or entry_price <= Decimal("0")
+            or balance_at_entry <= Decimal("0")
+        ):
+            return entry_price
+        max_loss_pct = max(self.synthetic_stop_max_loss_pct_of_balance, Decimal("0"))
+        risk_budget = balance_at_entry * max_loss_pct / Decimal("100")
+        if risk_budget <= Decimal("0"):
+            return entry_price
+
+        fee_rate = max(fee_rate_pct, Decimal("0")) / Decimal("100")
+        base_fee_loss = (
+            Decimal("2") * entry_price * quantity * fee_rate
+            if fee_rate > Decimal("0")
+            else Decimal("0")
+        )
+        if base_fee_loss >= risk_budget:
+            return entry_price
+
+        available_price_loss_budget = risk_budget - base_fee_loss
+        distance_denominator = (
+            quantity * (Decimal("1") + fee_rate)
+            if side.is_short
+            else quantity * (Decimal("1") - fee_rate)
+        )
+        if distance_denominator <= Decimal("0"):
+            return entry_price
+        max_stop_distance = available_price_loss_budget / distance_denominator
         if side.is_short:
-            return entry_price * (Decimal("1") + pct)
-        # LONG: stop below entry.  At 100 % this equals 0, which is valid —
-        # crypto prices never reach zero in normal trading.
-        return max(entry_price * (Decimal("1") - pct), Decimal("0"))
+            return entry_price + max_stop_distance
+        return max(entry_price - max_stop_distance, Decimal("0"))
 
     def get_synthetic_take_profits(
         self,
@@ -106,22 +137,34 @@ class DefaultRiskManagedStrategy:
         side: TradeSide,
         entry_price: Decimal,
         stop_loss: Decimal,
+        notional_value: Decimal,
     ) -> list[Decimal]:
-        risk_distance = abs(entry_price - stop_loss)
-        if risk_distance <= Decimal("0"):
+        if entry_price <= Decimal("0") or notional_value <= Decimal("0"):
             return []
-        multiples = self.synthetic_tp_r_multiples or [Decimal("1"), Decimal("2"), Decimal("3")]
-        if side.is_short:
-            return [
-                entry_price - (risk_distance * multiple)
-                for multiple in multiples
-                if multiple > Decimal("0")
-            ]
-        return [
-            entry_price + (risk_distance * multiple)
-            for multiple in multiples
-            if multiple > Decimal("0")
+        profit_pct_steps = self.synthetic_tp_profit_pct_steps or [
+            Decimal("2"),
+            Decimal("4"),
+            Decimal("6"),
+            Decimal("8"),
+            Decimal("10"),
         ]
+        quantity = notional_value / entry_price
+        if quantity <= Decimal("0"):
+            return []
+        targets: list[Decimal] = []
+        for step in profit_pct_steps:
+            if step <= Decimal("0"):
+                continue
+            target_profit_value = notional_value * step / Decimal("100")
+            price_move = target_profit_value / quantity
+            target = (
+                entry_price - price_move
+                if side.is_short
+                else entry_price + price_move
+            )
+            if target not in targets:
+                targets.append(target)
+        return targets
 
     def get_target_hit_action(
         self,

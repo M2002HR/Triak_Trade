@@ -79,19 +79,22 @@ def _tp_scenario() -> tuple[list[BacktestEvent], list[Candle]]:
     return [open_event], candles
 
 
+def _assert_decimal_close(left: Decimal, right: Decimal) -> None:
+    assert abs(left - right) <= Decimal("0.000000000000000000000001")
+
+
 def test_fees_default_zero_keeps_pnl_gross() -> None:
     events, candles = _tp_scenario()
     trades, _balance = BacktestSimulator().simulate(
         events=events,
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
     )
     assert trades[0].status.startswith("tp")
-    # _long_open() has entry_low=100, entry_high=101 → RANGE logic → midpoint fill at 100.5.
-    # qty = (1000 * 1%) / |100.5 - 98| = 10 / 2.5 = 4; gross = (104 - 100.5) * 4 = 14.
-    assert trades[0].pnl == Decimal("14")
+    # leverage=2 and factor=120 => raw allocation=60%, clamped to max 20%.
+    assert trades[0].pnl == Decimal("6.965174129353233830845771144")
     assert trades[0].fees == Decimal("0")
 
 
@@ -102,24 +105,23 @@ def test_fees_reduce_net_pnl_and_balance() -> None:
         events=events,
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
     )
     net_trades, net_balance = sim.simulate(
         events=events,
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
         fee_rate_pct=Decimal("0.1"),
     )
     trade = net_trades[0]
-    # entry=100.5, exit=104, qty=4, fee_rate=0.1%
-    # entry_fee = 100.5*4*0.1/100 = 0.402; exit_fee = 104*4*0.1/100 = 0.416; total = 0.818.
-    assert trade.fees == Decimal("0.818")
+    # entry=100.5, exit=104, qty=200*2/100.5, fee_rate=0.1%
+    assert trade.fees == Decimal("0.4069651741293532338308457711")
     # Net pnl is gross minus fees, and balance reflects the net figure.
     assert trade.pnl == gross_trades[0].pnl - trade.fees
-    assert net_balance == gross_balance - trade.fees
+    _assert_decimal_close(net_balance, gross_balance - trade.fees)
     assert net_balance == Decimal("1000") + trade.pnl
 
 
@@ -129,13 +131,13 @@ def test_balance_equals_initial_plus_sum_of_trade_pnl_with_fees() -> None:
         events=events,
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
         fee_rate_pct=Decimal("0.1"),
     )
     total_pnl = sum((t.pnl for t in trades), Decimal("0"))
     # The B2 invariant must survive fee netting.
-    assert balance - Decimal("1000") == total_pnl
+    _assert_decimal_close(balance - Decimal("1000"), total_pnl)
 
 
 def _trade(signal_id: str, *, pnl: str, status: str) -> SimulatedTrade:

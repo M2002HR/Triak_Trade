@@ -29,30 +29,44 @@ from triak_trade.domain.models import Candle, ParsedSignal
 
 
 class TestGetSyntheticStop:
-    def test_long_100pct_stop_is_zero(self):
-        strategy = DefaultRiskManagedStrategy(no_sl_loss_pct=Decimal("100"))
-        stop = strategy.get_synthetic_stop(side=TradeSide.LONG, entry_price=Decimal("50000"))
-        assert stop == Decimal("0")
+    def test_long_stop_respects_balance_loss_budget(self):
+        strategy = DefaultRiskManagedStrategy(
+            synthetic_stop_max_loss_pct_of_balance=Decimal("5")
+        )
+        stop = strategy.get_synthetic_stop(
+            side=TradeSide.LONG,
+            entry_price=Decimal("100"),
+            balance_at_entry=Decimal("100"),
+            quantity=Decimal("0.2"),
+            fee_rate_pct=Decimal("0"),
+        )
+        assert stop == Decimal("75")
 
-    def test_long_50pct_stop_halves_entry(self):
-        strategy = DefaultRiskManagedStrategy(no_sl_loss_pct=Decimal("50"))
-        stop = strategy.get_synthetic_stop(side=TradeSide.LONG, entry_price=Decimal("1000"))
-        assert stop == Decimal("500")
+    def test_short_stop_respects_balance_loss_budget(self):
+        strategy = DefaultRiskManagedStrategy(
+            synthetic_stop_max_loss_pct_of_balance=Decimal("5")
+        )
+        stop = strategy.get_synthetic_stop(
+            side=TradeSide.SHORT,
+            entry_price=Decimal("100"),
+            balance_at_entry=Decimal("100"),
+            quantity=Decimal("0.2"),
+            fee_rate_pct=Decimal("0"),
+        )
+        assert stop == Decimal("125")
 
-    def test_short_100pct_stop_doubles_entry(self):
-        strategy = DefaultRiskManagedStrategy(no_sl_loss_pct=Decimal("100"))
-        stop = strategy.get_synthetic_stop(side=TradeSide.SHORT, entry_price=Decimal("1000"))
-        assert stop == Decimal("2000")
-
-    def test_short_50pct_stop(self):
-        strategy = DefaultRiskManagedStrategy(no_sl_loss_pct=Decimal("50"))
-        stop = strategy.get_synthetic_stop(side=TradeSide.SHORT, entry_price=Decimal("1000"))
-        assert stop == Decimal("1500")
-
-    def test_long_stop_never_negative(self):
-        strategy = DefaultRiskManagedStrategy(no_sl_loss_pct=Decimal("200"))
-        stop = strategy.get_synthetic_stop(side=TradeSide.LONG, entry_price=Decimal("100"))
-        assert stop == Decimal("0")
+    def test_fee_only_budget_collapse_returns_entry(self):
+        strategy = DefaultRiskManagedStrategy(
+            synthetic_stop_max_loss_pct_of_balance=Decimal("5")
+        )
+        stop = strategy.get_synthetic_stop(
+            side=TradeSide.LONG,
+            entry_price=Decimal("100"),
+            balance_at_entry=Decimal("100"),
+            quantity=Decimal("1.25"),
+            fee_rate_pct=Decimal("2"),
+        )
+        assert stop == Decimal("100")
 
 
 # ------------------------------------------------------------------ #
@@ -185,49 +199,53 @@ class TestTrailingTakeProfitStrategy:
 
 
 class TestSyntheticTakeProfits:
-    def test_long_synthetic_targets_use_r_multiples(self):
+    def test_long_synthetic_targets_use_notional_profit_steps(self):
         strategy = DefaultRiskManagedStrategy(
-            synthetic_tp_r_multiples=[Decimal("1"), Decimal("2"), Decimal("3")]
+            synthetic_tp_profit_pct_steps=[Decimal("2"), Decimal("4"), Decimal("6")]
         )
         targets = strategy.get_synthetic_take_profits(
             side=TradeSide.LONG,
             entry_price=Decimal("100"),
             stop_loss=Decimal("95"),
+            notional_value=Decimal("120"),
         )
-        assert targets == [Decimal("105"), Decimal("110"), Decimal("115")]
+        assert targets == [Decimal("102"), Decimal("104"), Decimal("106")]
 
-    def test_short_synthetic_targets_use_r_multiples(self):
+    def test_short_synthetic_targets_use_notional_profit_steps(self):
         strategy = DefaultRiskManagedStrategy(
-            synthetic_tp_r_multiples=[Decimal("1"), Decimal("2")]
+            synthetic_tp_profit_pct_steps=[Decimal("2"), Decimal("4")]
         )
         targets = strategy.get_synthetic_take_profits(
             side=TradeSide.SHORT,
             entry_price=Decimal("100"),
             stop_loss=Decimal("105"),
+            notional_value=Decimal("120"),
         )
-        assert targets == [Decimal("95"), Decimal("90")]
+        assert targets == [Decimal("98"), Decimal("96")]
 
     def test_sell_side_treated_same_as_short(self):
         strategy = DefaultRiskManagedStrategy(
-            synthetic_tp_r_multiples=[Decimal("1"), Decimal("2")]
+            synthetic_tp_profit_pct_steps=[Decimal("2"), Decimal("4")]
         )
         targets = strategy.get_synthetic_take_profits(
             side=TradeSide.SELL,
             entry_price=Decimal("100"),
             stop_loss=Decimal("105"),
+            notional_value=Decimal("120"),
         )
-        assert targets == [Decimal("95"), Decimal("90")]
+        assert targets == [Decimal("98"), Decimal("96")]
 
     def test_buy_side_treated_same_as_long(self):
         strategy = DefaultRiskManagedStrategy(
-            synthetic_tp_r_multiples=[Decimal("1"), Decimal("2"), Decimal("3")]
+            synthetic_tp_profit_pct_steps=[Decimal("2"), Decimal("4"), Decimal("6")]
         )
         targets = strategy.get_synthetic_take_profits(
             side=TradeSide.BUY,
             entry_price=Decimal("100"),
             stop_loss=Decimal("95"),
+            notional_value=Decimal("120"),
         )
-        assert targets == [Decimal("105"), Decimal("110"), Decimal("115")]
+        assert targets == [Decimal("102"), Decimal("104"), Decimal("106")]
 
 
 class TestTradeSideProperties:
@@ -276,20 +294,28 @@ class TestLoadStrategyFromDict:
             "active_strategy": "default_risk_managed",
             "strategies": {
                 "default_risk_managed": {
-                    "no_sl_loss_pct": "100",
+                    "synthetic_stop_max_loss_pct_of_balance": "5",
                     "risk_free_on_first_tp": True,
                     "tp_close_fractions": ["0.35", "0.40", "0.50"],
+                    "synthetic_tp_profit_pct_steps": ["2", "4", "6", "8", "10"],
                 }
             },
         }
         strategy = load_strategy_from_dict(cfg)
         assert isinstance(strategy, DefaultRiskManagedStrategy)
-        assert strategy.no_sl_loss_pct == Decimal("100")
+        assert strategy.synthetic_stop_max_loss_pct_of_balance == Decimal("5")
         assert strategy.risk_free_on_first_tp is True
         assert strategy.tp_close_fractions == [
             Decimal("0.35"),
             Decimal("0.40"),
             Decimal("0.50"),
+        ]
+        assert strategy.synthetic_tp_profit_pct_steps == [
+            Decimal("2"),
+            Decimal("4"),
+            Decimal("6"),
+            Decimal("8"),
+            Decimal("10"),
         ]
 
     def test_unknown_strategy_raises(self):
@@ -307,15 +333,16 @@ class TestLoadStrategyFromDict:
             "active_strategy": "tp_trailing_risk_managed",
             "strategies": {
                 "tp_trailing_risk_managed": {
-                    "no_sl_loss_pct": "70",
+                    "synthetic_stop_max_loss_pct_of_balance": "7",
                     "risk_free_on_first_tp": True,
                     "tp_close_fractions": ["0.35", "0.40", "0.50"],
+                    "synthetic_tp_profit_pct_steps": ["2", "4", "6"],
                 }
             },
         }
         strategy = load_strategy_from_dict(cfg)
         assert isinstance(strategy, TrailingTakeProfitStrategy)
-        assert strategy.no_sl_loss_pct == Decimal("70")
+        assert strategy.synthetic_stop_max_loss_pct_of_balance == Decimal("7")
 
 
 # ------------------------------------------------------------------ #

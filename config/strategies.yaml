@@ -9,11 +9,9 @@ active_strategy: tp_trailing_risk_managed
 strategies:
   default_risk_managed:
     # --- No Stop Loss ---
-    # When a signal has no explicit stop loss, place a synthetic stop this
-    # many percent away from the entry price.
-    # 100% means: LONG stop at price 0 (never hit in practice),
-    #             SHORT stop at 2x entry price (wide but real protection).
-    no_sl_loss_pct: "70"
+    # When a signal has no explicit stop loss, cap the worst-case net loss
+    # on that position to this percent of the account balance at entry.
+    synthetic_stop_max_loss_pct_of_balance: "5"
 
     # --- Risk-Free After First Target ---
     # When true: move the stop loss to the entry price (breakeven) as soon
@@ -37,13 +35,31 @@ strategies:
       - "0.40"
       - "0.50"
 
+    # --- Synthetic Take Profit Ladder ---
+    # Used only when the message has no explicit TP targets.
+    # Each value is a profit milestone as a percent of total position notional.
+    # Example with 120 USDT notional:
+    # 2 -> 2.4 USDT profit, 4 -> 4.8 USDT, ...
+    synthetic_tp_profit_pct_steps:
+      - "2"
+      - "4"
+      - "6"
+      - "8"
+      - "10"
+
   tp_trailing_risk_managed:
     # Same as default_risk_managed, but after each target hit the stop loss
     # advances to the previous target:
     # TP1 -> optional breakeven, TP2 -> SL to TP1, TP3 -> SL to TP2, ...
-    no_sl_loss_pct: "70"
+    synthetic_stop_max_loss_pct_of_balance: "5"
     risk_free_on_first_tp: true
     tp_close_fractions:
       - "0.35"
       - "0.40"
       - "0.50"
+    synthetic_tp_profit_pct_steps:
+      - "2"
+      - "4"
+      - "6"
+      - "8"
+      - "10"

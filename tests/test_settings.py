@@ -9,13 +9,19 @@ def test_settings_defaults_load() -> None:
     settings = Settings()
     assert settings.APP_NAME == "Triak_Trade"
     assert settings.EXECUTION_MODE in {"demo", "paper"}
+    assert settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE == 5
 
 
-def test_live_execution_mode_is_rejected() -> None:
+def test_live_execution_mode_is_allowed() -> None:
+    settings = Settings(EXECUTION_MODE="live")
+    assert settings.EXECUTION_MODE == "live"
+
+
+def test_invalid_execution_mode_is_rejected() -> None:
     try:
-        Settings(EXECUTION_MODE="live")
+        Settings(EXECUTION_MODE="production")
     except ValidationError as exc:
-        assert "blocked" in str(exc)
+        assert "not valid" in str(exc)
     else:
         raise AssertionError("Expected ValidationError")
 

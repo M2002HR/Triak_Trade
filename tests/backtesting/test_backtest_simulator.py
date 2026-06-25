@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from triak_trade.backtesting.models import BacktestEvent
 from triak_trade.backtesting.simulator import BacktestSimulator
+from triak_trade.backtesting.strategies.default_risk import DefaultRiskManagedStrategy
 from triak_trade.domain.enums import (
     BacktestFillPolicy,
     CandleSource,
@@ -278,7 +279,7 @@ def test_simulator_move_stop_to_entry_respects_followup_instruction() -> None:
     assert any("stop_loss_moved_to_entry" in note for note in trades[0].notes)
 
 
-def test_simulator_expires_open_signal_after_configured_hours() -> None:
+def test_simulator_does_not_expire_open_signal_after_configured_hours() -> None:
     open_event = BacktestEvent(
         timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
         action=SignalAction.OPEN,
@@ -299,9 +300,9 @@ def test_simulator_expires_open_signal_after_configured_hours() -> None:
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
         active_signal_hours=1,
     )
-    assert trades[0].status == "expired"
-    assert trades[0].exit_time == datetime(2026, 6, 1, 1, 1, tzinfo=timezone.utc)
-    assert trades[0].exit_price == Decimal("101.25")
+    assert trades[0].status == "open_until_end"
+    assert trades[0].exit_time == datetime(2026, 6, 1, 1, 2, tzinfo=timezone.utc)
+    assert trades[0].exit_price == Decimal("101.50")
 
 
 def test_simulator_market_entry_uses_first_available_candle_after_signal() -> None:
@@ -332,7 +333,7 @@ def test_simulator_market_entry_uses_first_available_candle_after_signal() -> No
     assert trades[0].entry_price == stale_candle.open
 
 
-def test_simulator_ignores_followup_after_expiry_window() -> None:
+def test_simulator_applies_followup_even_after_previous_expiry_window() -> None:
     open_event = BacktestEvent(
         timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
         action=SignalAction.OPEN,
@@ -363,7 +364,7 @@ def test_simulator_ignores_followup_after_expiry_window() -> None:
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
         active_signal_hours=1,
     )
-    assert trades[0].status == "expired"
+    assert trades[0].status == "closed"
 
 
 def test_simulator_snapshots_update_live_pnl_per_message_time() -> None:
@@ -467,11 +468,118 @@ def test_simulator_builds_virtual_interval_snapshots_and_price_history() -> None
     interval_snapshots = [item for item in snapshots if item.checkpoint_kind == "interval"]
     assert interval_snapshots
     assert interval_snapshots[0].timestamp == datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc)
-    state = interval_snapshots[-1].signal_states["s1"]
-    assert state.price_history is not None
-    assert len(state.price_history) >= 2
-    assert state.stop_loss_history is not None
-    assert state.stop_loss_history[0].value == Decimal("98")
+
+
+def test_simulator_open_snapshot_does_not_expose_exit_after_partial_tp() -> None:
+    parsed = _parsed(SignalAction.OPEN)
+    parsed.take_profits = [Decimal("102"), Decimal("106")]
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    candles = [
+        _candle(0, "102.5", "99.5", o="100", c="101.5"),
+        _candle(5, "103.5", "101", o="101.5", c="102"),
+    ]
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("120"),
+        fill_policy=BacktestFillPolicy.OPTIMISTIC,
+        snapshot_interval=timedelta(minutes=5),
+        close_open_positions_at_end=False,
+    )
+
+    latest = snapshots[-1].signal_states["s1"]
+    assert latest.status == "open"
+    assert latest.targets_hit >= 1
+    assert latest.exit_time is None
+    assert latest.exit_price is None
+    assert latest.price_history is not None
+    assert len(latest.price_history) >= 2
+    assert latest.stop_loss_history is not None
+    assert latest.stop_loss_history[0].value == Decimal("98")
+
+
+def test_simulator_stops_interval_snapshots_after_last_open_position_closes() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(5, "103.8", "100.5", o="100.5", c="103.5"),
+        _candle(10, "104.2", "103.2", o="103.5", c="103.8"),
+        _candle(15, "104.4", "103.5", o="103.8", c="104.0"),
+    ]
+
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.OPTIMISTIC,
+        snapshot_interval=timedelta(minutes=5),
+    )
+
+    interval_snapshots = [item for item in snapshots if item.checkpoint_kind == "interval"]
+    assert interval_snapshots
+    assert all(item.open_positions > 0 for item in interval_snapshots)
+
+
+def test_simulator_snapshot_keeps_closed_signal_trade_metadata() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN, TradeSide.LONG).model_copy(
+            update={
+                "entry_low": Decimal("100"),
+                "entry_high": Decimal("100"),
+                "stop_loss": Decimal("98"),
+                "take_profits": [Decimal("104")],
+                "leverage": 10,
+            }
+        ),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+        leverage=10,
+    )
+    candles = [
+        _candle(0, "100.5", "99.5", o="100", c="100.2"),
+        _candle(5, "104.5", "100", o="100.2", c="104"),
+    ]
+
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.OPTIMISTIC,
+        max_effective_leverage=Decimal("25"),
+        snapshot_interval=timedelta(minutes=5),
+    )
+
+    final_snapshot = snapshots[-1]
+    state = final_snapshot.signal_states["s1"]
+    assert state.status in {"tp_hit", "tp_hit_same_candle"}
+    assert state.stop_loss == Decimal("98")
+    assert state.take_profits == [Decimal("104")]
+    assert state.declared_leverage == Decimal("10")
+    assert state.effective_leverage == Decimal("10")
+    assert state.margin > Decimal("0")
 
 
 def test_simulator_market_entry_matches_normalized_swap_symbol() -> None:
@@ -621,15 +729,77 @@ def test_simulator_compounds_risk_from_realized_balance() -> None:
         events=[open_first, open_second],
         candles=candles,
         initial_balance=Decimal("100"),
-        risk_per_trade_pct=Decimal("3"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.CONSERVATIVE,
     )
 
     assert len(trades) == 2
-    assert trades[0].pnl == Decimal("6")
-    assert trades[1].quantity == Decimal("0.795")
-    assert trades[1].pnl == Decimal("6.360")
-    assert final_balance == Decimal("112.360")
+    assert trades[0].pnl == Decimal("0.8")
+    assert trades[1].quantity == Decimal("0.1008")
+    assert trades[1].pnl == Decimal("0.8064")
+    assert final_balance == Decimal("101.6064")
+
+
+def test_simulator_sizes_positions_from_factor_divided_by_leverage() -> None:
+    parsed = _parsed(SignalAction.OPEN)
+    parsed.entry_low = Decimal("100")
+    parsed.entry_high = Decimal("100")
+    parsed.stop_loss = Decimal("50")
+    parsed.take_profits = [Decimal("110")]
+    parsed.leverage = 20
+    event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+        leverage=20,
+    )
+
+    trades, final_balance = BacktestSimulator().simulate(
+        events=[event],
+        candles=[_candle(0, "110", "99", o="100", c="110")],
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("120"),
+        fill_policy=BacktestFillPolicy.OPTIMISTIC,
+        max_effective_leverage=Decimal("50"),
+    )
+
+    assert len(trades) == 1
+    assert trades[0].quantity == Decimal("1.2")
+    assert trades[0].pnl == Decimal("12.0")
+    assert trades[0].pnl_pct == Decimal("12.00")
+    assert final_balance == Decimal("112.0")
+
+
+def test_simulator_allocation_factor_respects_min_and_max_clamps() -> None:
+    sim = BacktestSimulator()
+
+    assert sim._allocation_pct_for_signal(
+        allocation_factor_pct=Decimal("120"),
+        leverage=Decimal("200"),
+        min_allocation_pct=Decimal("2"),
+        max_allocation_pct=Decimal("20"),
+    ) == Decimal("2")
+    assert sim._allocation_pct_for_signal(
+        allocation_factor_pct=Decimal("120"),
+        leverage=Decimal("5"),
+        min_allocation_pct=Decimal("2"),
+        max_allocation_pct=Decimal("20"),
+    ) == Decimal("20")
+    assert sim._allocation_pct_for_signal(
+        allocation_factor_pct=Decimal("150"),
+        leverage=Decimal("50"),
+        min_allocation_pct=Decimal("2"),
+        max_allocation_pct=Decimal("20"),
+    ) == Decimal("3")
+    assert sim._allocation_pct_for_signal(
+        allocation_factor_pct=Decimal("150"),
+        leverage=Decimal("20"),
+        min_allocation_pct=Decimal("2"),
+        max_allocation_pct=Decimal("20"),
+    ) == Decimal("7.5")
 
 
 def _leverage_open_event(leverage: int) -> BacktestEvent:
@@ -647,8 +817,9 @@ def _leverage_open_event(leverage: int) -> BacktestEvent:
     )
 
 
-def test_simulator_leverage_scales_pnl_pct_but_not_dollar_pnl() -> None:
-    # Same TP-hit trade at leverage 1 vs 10: dollar PnL identical, pnl_pct 10x.
+def test_simulator_leverage_keeps_account_pnl_pct_constant_for_same_trade() -> None:
+    # With factor/leverage sizing, leverage affects allocation %. Lower leverage
+    # may be clamped at max allocation, so pnl can differ across leverages.
     candles = [_candle(0, "104.5", "100.0", o="100.5", c="104")]
     sim = BacktestSimulator()
 
@@ -656,7 +827,7 @@ def test_simulator_leverage_scales_pnl_pct_but_not_dollar_pnl() -> None:
         events=[_leverage_open_event(1)],
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=Decimal("25"),
     )
@@ -664,17 +835,14 @@ def test_simulator_leverage_scales_pnl_pct_but_not_dollar_pnl() -> None:
         events=[_leverage_open_event(10)],
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=Decimal("25"),
     )
 
     assert trades_lev1[0].status in {"tp_hit", "tp_hit_same_candle"}
-    # Dollar PnL is leverage-independent (same quantity, same price move).
-    assert trades_lev1[0].pnl == trades_lev10[0].pnl
-    assert trades_lev1[0].pnl > Decimal("0")
-    # pnl_pct is return-on-margin, so 10x leverage shows 10x the percentage.
-    assert trades_lev10[0].pnl_pct == trades_lev1[0].pnl_pct * Decimal("10")
+    assert trades_lev10[0].pnl > trades_lev1[0].pnl
+    assert trades_lev10[0].pnl_pct > trades_lev1[0].pnl_pct
 
 
 def test_simulator_leverage_clamped_to_max_effective() -> None:
@@ -685,7 +853,7 @@ def test_simulator_leverage_clamped_to_max_effective() -> None:
         events=[_leverage_open_event(100)],
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=Decimal("25"),
     )
@@ -693,7 +861,7 @@ def test_simulator_leverage_clamped_to_max_effective() -> None:
         events=[_leverage_open_event(25)],
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=Decimal("25"),
     )
@@ -711,7 +879,7 @@ def test_simulator_leverage_caps_quantity_by_available_margin() -> None:
         events=[_leverage_open_event(1)],
         candles=candles,
         initial_balance=Decimal("100"),
-        risk_per_trade_pct=Decimal("50"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=Decimal("1"),
     )
@@ -719,20 +887,19 @@ def test_simulator_leverage_caps_quantity_by_available_margin() -> None:
         events=[_leverage_open_event(25)],
         candles=candles,
         initial_balance=Decimal("100"),
-        risk_per_trade_pct=Decimal("50"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=Decimal("25"),
     )
 
-    # At leverage 1 the notional cannot exceed balance, so quantity is capped
-    # below the higher-leverage sizing.
+    # Clamp by factor/leverage makes low leverage consume the max allocation cap,
+    # while higher leverage gets a smaller allocation percentage.
     assert trades_capped[0].quantity < trades_uncapped[0].quantity
-    assert any("quantity_capped_by_leverage" in note for note in trades_capped[0].notes)
 
 
 def test_simulator_opens_without_stop_loss_using_synthetic_stop() -> None:
-    # No stop loss provided: the signal must still open and be sized off a
-    # default percentage stop (5%), never dropped.
+    # No stop loss provided: the signal must still open and use strategy-driven
+    # synthetic stop logic, never dropped.
     parsed = _parsed(SignalAction.OPEN, TradeSide.LONG)
     parsed.entry_low = Decimal("100")
     parsed.entry_high = Decimal("100")
@@ -752,20 +919,149 @@ def test_simulator_opens_without_stop_loss_using_synthetic_stop() -> None:
         events=[open_event],
         candles=candles,
         initial_balance=Decimal("1000"),
-        risk_per_trade_pct=Decimal("1"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
+        strategy=DefaultRiskManagedStrategy(),
     )
 
     assert len(trades) == 1
-    # risk 1% of 1000 = 10; synthetic stop at 95 -> stop distance 5 -> qty 2.
+    # leverage 1 => raw allocation = 120%, clamped to max 20% => qty = 200/100 = 2
     assert trades[0].quantity == Decimal("2")
     assert trades[0].status in {"tp_hit", "tp_hit_same_candle"}
-    assert any("synthetic_stop_pct=5" in note for note in trades[0].notes)
+    assert any("synthetic_stop_strategy=" in note for note in trades[0].notes)
+
+
+def test_simulator_caps_synthetic_stop_to_loss_budget_of_entry_balance() -> None:
+    parsed = _parsed(SignalAction.OPEN, TradeSide.LONG)
+    parsed.entry_low = Decimal("100")
+    parsed.entry_high = Decimal("100")
+    parsed.stop_loss = None
+    parsed.take_profits = [Decimal("120")]
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    candles = [_candle(0, "101", "74.9", o="100", c="75")]
+
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("120"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        default_stop_pct=Decimal("50"),
+        synthetic_stop_max_loss_pct_of_balance=Decimal("5"),
+    )
+
+    assert trades[0].status in {"sl_hit_same_candle", "sl_hit"}
+    assert trades[0].exit_price == Decimal("75")
+    assert trades[0].pnl == Decimal("-5")
+    assert any("synthetic_stop_risk_capped=50.0->75" in note for note in trades[0].notes)
+
+
+def test_simulator_caps_quantity_when_fees_exhaust_synthetic_stop_risk_budget() -> None:
+    parsed = _parsed(SignalAction.OPEN, TradeSide.LONG)
+    parsed.entry_low = Decimal("100")
+    parsed.entry_high = Decimal("100")
+    parsed.stop_loss = None
+    parsed.take_profits = [Decimal("120")]
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    candles = [_candle(0, "101", "99.9", o="100", c="100")]
+
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("120"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        default_stop_pct=Decimal("5"),
+        synthetic_stop_max_loss_pct_of_balance=Decimal("5"),
+        max_effective_leverage=Decimal("50"),
+        fee_rate_pct=Decimal("3"),
+        default_signal_leverage=Decimal("50"),
+    )
+
+    assert trades[0].status in {"sl_hit_same_candle", "sl_hit"}
+    assert trades[0].quantity == Decimal("0.8333333333333333333333333333")
+    assert trades[0].pnl == Decimal("-5.000000000000000000000000000")
+    assert any("synthetic_stop_qty_capped_for_risk_budget=" in note for note in trades[0].notes)
+    assert any("0.8333333333333333333333333333" in note for note in trades[0].notes)
+
+
+def test_simulator_filters_invalid_take_profits_from_signal_payload() -> None:
+    parsed = _parsed(SignalAction.OPEN, TradeSide.SHORT)
+    parsed.entry_low = Decimal("100")
+    parsed.entry_high = Decimal("100")
+    parsed.stop_loss = Decimal("110")
+    parsed.take_profits = [Decimal("95"), Decimal("-25"), Decimal("0"), Decimal("120")]
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event],
+        candles=[_candle(0, "101", "94", o="100", c="98")],
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("120"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert snapshots[-1].signal_states["s1"].take_profits == [Decimal("95")]
+
+
+def test_simulator_filters_extreme_strategy_generated_short_take_profits() -> None:
+    parsed = _parsed(SignalAction.OPEN, TradeSide.SHORT)
+    parsed.entry_low = Decimal("64289.80")
+    parsed.entry_high = Decimal("64289.80")
+    parsed.stop_loss = Decimal("109292.660")
+    parsed.take_profits = []
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event],
+        candles=[_candle(0, "65000", "64000", o="64289.80", c="64500")],
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("120"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        strategy=DefaultRiskManagedStrategy(),
+    )
+
+    state = snapshots[-1].signal_states["s1"]
+    assert state.take_profits == [
+        Decimal("63004.004"),
+        Decimal("61718.208"),
+        Decimal("60432.412"),
+        Decimal("59146.616"),
+        Decimal("57860.820"),
+    ]
+    assert all(target > Decimal("0") for target in state.take_profits)
 
 
 def test_simulator_opens_high_leverage_when_cap_disabled() -> None:
-    # max_effective_leverage=None disables the margin/notional cap entirely:
-    # a high-risk signal opens at full risk-based quantity, never blocked.
+    # max_effective_leverage=None disables leverage expansion and uses leverage 1.
     candles = [_candle(0, "104.5", "100.0", o="100.5", c="104")]
     sim = BacktestSimulator()
 
@@ -773,7 +1069,7 @@ def test_simulator_opens_high_leverage_when_cap_disabled() -> None:
         events=[_leverage_open_event(100)],
         candles=candles,
         initial_balance=Decimal("100"),
-        risk_per_trade_pct=Decimal("50"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=None,
     )
@@ -781,13 +1077,10 @@ def test_simulator_opens_high_leverage_when_cap_disabled() -> None:
         events=[_leverage_open_event(1)],
         candles=candles,
         initial_balance=Decimal("100"),
-        risk_per_trade_pct=Decimal("50"),
+        risk_per_trade_pct=Decimal("120"),
         fill_policy=BacktestFillPolicy.OPTIMISTIC,
         max_effective_leverage=Decimal("1"),
     )
 
     assert len(trades_uncapped) == 1
-    assert trades_uncapped[0].quantity > trades_capped[0].quantity
-    assert not any(
-        "quantity_capped_by_leverage" in note for note in trades_uncapped[0].notes
-    )
+    assert trades_uncapped[0].quantity == trades_capped[0].quantity

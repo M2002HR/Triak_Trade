@@ -46,6 +46,9 @@
 - `channel, from_date, to_date, initial_balance, interval, fill_policy, risk_per_trade_pct`
 - `use_ai_classifier, use_regex_fallback, max_messages, symbols`
 - اعتبارسنجی: `to_date > from_date`، `initial_balance > 0`، `risk_per_trade_pct > 0`، interval معتبر.
+- `risk_per_trade_pct` در مسیر فعلی یک `allocation factor` است، نه درصد مستقیم سرمایه.
+  درصد واقعی سرمایه‌ی درگیر در هر سیگنال از `factor / leverage` محاسبه می‌شود و سپس
+  بین `BACKTEST_MIN_ALLOCATION_PCT` و `BACKTEST_MAX_ALLOCATION_PCT` clamp می‌شود.
 
 ### `BacktestEvent` (`models.py:44`)
 واحد اتمی timeline که شبیه‌ساز مصرف می‌کند:

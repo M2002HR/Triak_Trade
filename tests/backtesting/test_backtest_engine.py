@@ -31,4 +31,7 @@ def test_backtest_engine_run_fixture_path() -> None:
 def test_backtest_engine_loads_strategy_from_config_by_default() -> None:
     engine = BacktestEngine()
     assert isinstance(engine.strategy, DefaultRiskManagedStrategy)
-    assert engine.strategy.no_sl_loss_pct == load_strategy().no_sl_loss_pct
+    assert (
+        engine.strategy.synthetic_stop_max_loss_pct_of_balance
+        == load_strategy().synthetic_stop_max_loss_pct_of_balance
+    )

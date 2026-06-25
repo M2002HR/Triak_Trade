@@ -24,14 +24,16 @@ _DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "active_strategy": "default_risk_managed",
     "strategies": {
         "default_risk_managed": {
-            "no_sl_loss_pct": "100",
+            "synthetic_stop_max_loss_pct_of_balance": "5",
             "risk_free_on_first_tp": True,
             "tp_close_fractions": ["0.35", "0.40", "0.50"],
+            "synthetic_tp_profit_pct_steps": ["2", "4", "6", "8", "10"],
         },
         "tp_trailing_risk_managed": {
-            "no_sl_loss_pct": "100",
+            "synthetic_stop_max_loss_pct_of_balance": "5",
             "risk_free_on_first_tp": True,
             "tp_close_fractions": ["0.35", "0.40", "0.50"],
+            "synthetic_tp_profit_pct_steps": ["2", "4", "6", "8", "10"],
         },
     },
 }
@@ -58,9 +60,10 @@ def load_strategy_from_dict(config: dict[str, Any]) -> TradeStrategy:
           "active_strategy": "default_risk_managed",
           "strategies": {
             "default_risk_managed": {
-              "no_sl_loss_pct": "100",
+              "synthetic_stop_max_loss_pct_of_balance": "5",
               "risk_free_on_first_tp": true,
-              "tp_close_fractions": ["0.35", "0.40", "0.50"]
+              "tp_close_fractions": ["0.35", "0.40", "0.50"],
+              "synthetic_tp_profit_pct_steps": ["2", "4", "6", "8", "10"]
             }
           }
         }
@@ -77,10 +80,19 @@ def load_strategy_from_dict(config: dict[str, Any]) -> TradeStrategy:
 
     if cls in {DefaultRiskManagedStrategy, TrailingTakeProfitStrategy}:
         fractions_raw = strategy_cfg.get("tp_close_fractions", ["0.35", "0.40", "0.50"])
+        tp_profit_pct_steps_raw = strategy_cfg.get(
+            "synthetic_tp_profit_pct_steps",
+            ["2", "4", "6", "8", "10"],
+        )
         return cls(
-            no_sl_loss_pct=Decimal(str(strategy_cfg.get("no_sl_loss_pct", "100"))),
+            synthetic_stop_max_loss_pct_of_balance=Decimal(
+                str(strategy_cfg.get("synthetic_stop_max_loss_pct_of_balance", "5"))
+            ),
             risk_free_on_first_tp=bool(strategy_cfg.get("risk_free_on_first_tp", True)),
             tp_close_fractions=[Decimal(str(f)) for f in fractions_raw],
+            synthetic_tp_profit_pct_steps=[
+                Decimal(str(item)) for item in tp_profit_pct_steps_raw
+            ],
         )
 
     raise ValueError(f"Strategy '{active}' has no loader registered.")

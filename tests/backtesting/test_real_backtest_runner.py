@@ -6,8 +6,14 @@ from pathlib import Path
 
 from triak_trade.backtesting.real_runner import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.report_store import BacktestReportStore
+from triak_trade.backtesting.simulator import (
+    PriceLevelSpan,
+    SignalPricePoint,
+    SimulationSignalState,
+    SimulationSnapshot,
+)
 from triak_trade.config.settings import Settings
-from triak_trade.domain.enums import CandleSource, SignalAction
+from triak_trade.domain.enums import CandleSource, SignalAction, TradeSide
 from triak_trade.domain.models import Candle, RawTelegramMessage
 from triak_trade.observability.errors import TelegramLogChannelError
 from triak_trade.telegram.client import FakeTelegramClient
@@ -462,6 +468,79 @@ def test_real_backtest_runner_starts_simulation_tracking_immediately_for_valid_s
     assert "Simulation tracking started" in (simulated_stage.detail or "")
 
 
+def test_real_backtest_runner_updates_live_state_on_new_message_before_refresh_interval(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    open_message = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    close_message = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="Close BTCUSDT now",
+        date=now + timedelta(minutes=10),
+        edited_at=None,
+        reply_to_msg_id=1,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [open_message, close_message]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path, BACKTEST_LIFECYCLE_REFRESH_INTERVAL="30m"),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)}),
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=20),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    simulate_message_events = [
+        event
+        for event in progress_events
+        if event.event_type == "message" and event.phase == "simulate"
+    ]
+    assert len(
+        [
+            event
+            for event in simulate_message_events
+            if event.summary == "Live simulation state updated for message 1."
+        ]
+    ) >= 2
+    assert any(
+        event.live_metrics is not None
+        and event.live_metrics.get("live_open_positions") == "0"
+        for event in simulate_message_events
+    )
+    assert not any(
+        event.event_type == "run"
+        and event.phase == "simulate"
+        and "Virtual lifecycle refresh checkpoint" in event.summary
+        for event in progress_events
+    )
+
+
 def test_real_backtest_runner_exposes_market_signal_fill_from_first_available_candle(
     tmp_path: Path,
 ) -> None:
@@ -501,11 +580,14 @@ def test_real_backtest_runner_exposes_market_signal_fill_from_first_available_ca
     assert any(event.counts.get("trades_filled") == 1 for event in progress_events)
     live_signal_events = [event.live_signals for event in progress_events if event.live_signals]
     assert live_signal_events
-    latest_signal = live_signal_events[-1][0]
-    assert latest_signal["signal_id"].startswith("sig_")
-    assert latest_signal["status"] == "open"
-    assert latest_signal["status_group"] == "active"
-    assert latest_signal["entry_price"] == "68010"
+    assert any(
+        signal["signal_id"].startswith("sig_")
+        and signal["entry_price"] == "68010"
+        and signal["status"] == "partial_tp_complete"
+        and signal["status_group"] == "inactive"
+        for signals in live_signal_events
+        for signal in signals
+    )
     assert any(
         event.trace is not None and event.trace.final_status == "simulation_tracking"
         for event in progress_events
@@ -710,6 +792,7 @@ def test_real_backtest_runner_activates_signal_after_follow_up_stop_loss(
     assert live_signal_events
     latest_signal = live_signal_events[-1][0]
     assert latest_signal["symbol"] == "HOMEUSDT"
+    assert latest_signal["status"] == "open"
     assert latest_signal["status_group"] == "active"
     traces = [event.trace for event in progress_events if event.trace is not None]
     originating = next(trace for trace in reversed(traces) if trace.message_id == 10)
@@ -986,6 +1069,163 @@ def test_real_backtest_runner_exposes_leverage_in_live_signal(
     latest = live_signal_events[-1][0]
     assert "leverage" in latest
     assert "margin" in latest
+
+
+def test_real_backtest_runner_keeps_closed_signal_levels_and_chart_metadata() -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    state = SimulationSignalState(
+        signal_id="sig_10",
+        symbol="HOMEUSDT",
+        side=TradeSide.LONG,
+        status="tp_hit",
+        original_quantity=Decimal("10"),
+        open_quantity=Decimal("0"),
+        entry_price=Decimal("1.00"),
+        stop_loss=Decimal("0.95"),
+        take_profits=[Decimal("1.04"), Decimal("1.08")],
+        notional_value=Decimal("10"),
+        risk_amount=Decimal("0.5"),
+        realized_pnl=Decimal("0.4"),
+        unrealized_pnl=Decimal("0"),
+        total_pnl_pct=Decimal("4"),
+        mark_price=Decimal("1.04"),
+        entry_time=now,
+        exit_time=now + timedelta(minutes=1),
+        exit_price=Decimal("1.04"),
+        targets_hit=1,
+        notes=["take_profit_hit=1.04"],
+        declared_leverage=Decimal("10"),
+        effective_leverage=Decimal("10"),
+        margin=Decimal("1"),
+        balance_basis=Decimal("10"),
+        margin_pnl_pct=Decimal("40"),
+        price_history=[
+            SignalPricePoint(
+                timestamp=now,
+                candle_open_time=now,
+                candle_close_time=now + timedelta(minutes=1),
+                open=Decimal("1.00"),
+                high=Decimal("1.05"),
+                low=Decimal("0.99"),
+                close=Decimal("1.04"),
+                stop_loss=Decimal("0.95"),
+                take_profits=[Decimal("1.04"), Decimal("1.08")],
+                mark_price=Decimal("1.04"),
+                source_message_id=10,
+            ),
+            SignalPricePoint(
+                timestamp=now + timedelta(minutes=1),
+                candle_open_time=now + timedelta(minutes=1),
+                candle_close_time=now + timedelta(minutes=2),
+                open=Decimal("1.04"),
+                high=Decimal("1.06"),
+                low=Decimal("1.03"),
+                close=Decimal("1.05"),
+                stop_loss=Decimal("0.95"),
+                take_profits=[Decimal("1.04"), Decimal("1.08")],
+                mark_price=Decimal("1.05"),
+                source_message_id=10,
+            ),
+        ],
+        stop_loss_history=[
+            PriceLevelSpan(
+                kind="stop_loss",
+                label="SL",
+                value=Decimal("0.95"),
+                started_at=now,
+            )
+        ],
+        take_profit_history=[
+            PriceLevelSpan(
+                kind="take_profit",
+                label="TP1",
+                value=Decimal("1.04"),
+                started_at=now,
+            )
+        ],
+    )
+    snapshot = SimulationSnapshot(
+        timestamp=now + timedelta(minutes=1),
+        source_message_id=10,
+        open_positions=0,
+        closed_trades=1,
+        wins=1,
+        losses=0,
+        realized_pnl=Decimal("0.4"),
+        unrealized_pnl=Decimal("0"),
+        total_pnl=Decimal("0.4"),
+        realized_balance=Decimal("100.4"),
+        current_balance=Decimal("100.4"),
+        signal_states={"sig_10": state},
+        checkpoint_kind="message",
+    )
+    latest = RealBacktestRunner._live_signals_from_snapshot(snapshot)[0]
+    assert latest["status"] == "tp_hit"
+    assert latest["leverage"] == "10"
+    assert latest["declared_leverage"] == "10"
+    assert latest["effective_leverage"] == "10"
+    assert latest["stop_loss"] == "0.95"
+    assert latest["take_profits"] == ["1.04", "1.08"]
+    assert latest["take_profit_levels"] == ["1.04", "1.08"]
+    assert latest["total_pnl_pct"] == "4"
+    assert latest["margin_pnl_pct"] == "40"
+    assert latest["balance_basis"] == "10"
+    assert latest["chart"]["interval"] == "1m"
+    assert latest["chart"]["candles"]
+    assert "timestamp_ms" in latest["chart"]["candles"][0]
+    assert "started_at_ms" in latest["chart"]["stop_loss_history"][0]
+
+
+def test_real_backtest_runner_skips_interval_progress_for_inactive_snapshots(
+    tmp_path: Path,
+) -> None:
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=FakeTelegramClient(),
+        market_data_provider=FakeMarketDataProvider(),
+    )
+    events: list[object] = []
+
+    runner._emit_interval_snapshots(
+        snapshots=[
+            SimulationSnapshot(
+                timestamp=datetime(2026, 6, 2, 0, 30, tzinfo=timezone.utc),
+                source_message_id=None,
+                open_positions=0,
+                closed_trades=1,
+                wins=1,
+                losses=0,
+                realized_pnl=Decimal("5"),
+                unrealized_pnl=Decimal("0"),
+                total_pnl=Decimal("5"),
+                realized_balance=Decimal("105"),
+                current_balance=Decimal("105"),
+                signal_states={},
+                checkpoint_kind="interval",
+            )
+        ],
+        latest_snapshot=SimulationSnapshot(
+            timestamp=datetime(2026, 6, 2, 0, 30, tzinfo=timezone.utc),
+            source_message_id=None,
+            open_positions=0,
+            closed_trades=1,
+            wins=1,
+            losses=0,
+            realized_pnl=Decimal("5"),
+            unrealized_pnl=Decimal("0"),
+            total_pnl=Decimal("5"),
+            realized_balance=Decimal("105"),
+            current_balance=Decimal("105"),
+            signal_states={},
+            checkpoint_kind="interval",
+        ),
+        counts={"total_messages": 1},
+        progress_callback=events.append,
+        live_metrics={"live_open_positions": "0"},
+        current_message_id=10,
+    )
+
+    assert events == []
 
 
 def test_real_backtest_runner_hydrates_caption_media_on_demand_only(tmp_path: Path) -> None:
@@ -1314,6 +1554,7 @@ def test_real_backtest_runner_simulates_noisy_market_signal_immediately(tmp_path
     assert latest_trace.final_status in {
         "tp_hit",
         "tp_hit_same_candle",
+        "simulation_tracking",
         "open_until_end",
         "partial_tp_open_until_end",
     }

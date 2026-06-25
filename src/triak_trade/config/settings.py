@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "mysql+pymysql://triak:triak_local_password@localhost:3306/triak_trade"
     TEST_DATABASE_URL: str = "mysql+pymysql://triak:triak_local_password@localhost:3306/triak_trade_test"
     REDIS_URL: str = "redis://localhost:6379/0"
-    EXECUTION_MODE: Literal["backtest", "paper", "demo"] = "demo"
+    EXECUTION_MODE: Literal["backtest", "paper", "demo", "live"] = "demo"
     TOOBIT_BASE_URL: str = "https://api.toobit.com"
     TOOBIT_KLINES_PATH: str = "/quote/v1/klines"
     TOOBIT_FUTURES_MARK_PRICE_KLINES_PATH: str = "/quote/v1/markPrice/klines"
@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     TELEGRAM_PROXY_RDNS: bool = True
     TELEGRAM_PROXY_USERNAME: str = ""
     TELEGRAM_PROXY_PASSWORD: SecretStr = Field(default=SecretStr(""))
+    # Docker-specific proxy overrides (set in docker-compose environment section)
+    TELEGRAM_PROXY_HOST_DOCKER: str = ""
+    TELEGRAM_PROXY_PORT_DOCKER: int = 0
     TELEGRAM_HISTORY_BATCH_SIZE: int = 100
     TELEGRAM_LIVE_CHANNELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     TELEGRAM_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
@@ -225,9 +228,11 @@ class Settings(BaseSettings):
     TELEGRAM_MEDIA_MAX_IMAGES: int = 1
     TELEGRAM_MEDIA_MAX_BYTES: int = 1_500_000
     BACKTEST_DEFAULT_INITIAL_BALANCE: Decimal = Decimal("100")
-    BACKTEST_DEFAULT_RISK_PER_TRADE_PCT: Decimal = Decimal("3")
+    BACKTEST_DEFAULT_RISK_PER_TRADE_PCT: Decimal = Decimal("120")
+    BACKTEST_MIN_ALLOCATION_PCT: Decimal = Decimal("2")
+    BACKTEST_MAX_ALLOCATION_PCT: Decimal = Decimal("20")
     BACKTEST_DEFAULT_INTERVAL: str = "1m"
-    BACKTEST_LIFECYCLE_REFRESH_INTERVAL: str = "5m"
+    BACKTEST_LIFECYCLE_REFRESH_INTERVAL: str = "30m"
     BACKTEST_DEFAULT_FILL_POLICY: str = "conservative"
     BACKTEST_MAX_MESSAGES: int = 5000
     BACKTEST_MAX_CANDLES: int = 200000
@@ -241,7 +246,7 @@ class Settings(BaseSettings):
     REAL_BACKTEST_DEFAULT_INTERVAL: str = "1m"
     REAL_BACKTEST_MAX_MESSAGES: int = 1000
     REAL_BACKTEST_MAX_CANDLES: int = 100000
-    REAL_BACKTEST_ACTIVE_SIGNAL_HOURS: int = 24
+    REAL_BACKTEST_ACTIVE_SIGNAL_HOURS: int = 0
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
     REAL_BACKTEST_USE_AI: bool = True
     REAL_BACKTEST_USE_REGEX_FALLBACK: bool = False
@@ -266,6 +271,10 @@ class Settings(BaseSettings):
     # stop this many percent away from entry (by side) so risk-per-trade sizing can
     # still size the position. The signal opens and is tracked normally.
     BACKTEST_DEFAULT_STOP_PCT: Decimal = Decimal("5")
+    # Cap the worst-case net loss for synthetic stop-loss positions to this percent
+    # of the account balance that existed when the position was opened. The cap is
+    # enforced after allocation/leverage sizing and includes modeled entry/exit fees.
+    BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE: Decimal = Decimal("5")
     # Per-side trading fee charged on entry and on each (partial) exit, as a
     # percent of the filled notional (e.g. Decimal("0.04") = 0.04% taker fee).
     # Default 0 keeps PnL gross (no behavior change); set it to model realistic
@@ -293,11 +302,50 @@ class Settings(BaseSettings):
     REQUIRE_STOP_LOSS: bool = True
     ADMIN_DASHBOARD_TOKEN: SecretStr = Field(default=SecretStr("replace_me"))
 
+    # ── Toobit Futures Trading API ──────────────────────────────────────────
+    TOOBIT_FUTURES_ACCOUNT_PATH: str = "/api/v1/contract/account"
+    TOOBIT_FUTURES_POSITIONS_PATH: str = "/api/v1/contract/positions"
+    TOOBIT_FUTURES_ORDER_PATH: str = "/api/v1/contract/order"
+    TOOBIT_FUTURES_CANCEL_ORDER_PATH: str = "/api/v1/contract/cancelOrder"
+    TOOBIT_FUTURES_OPEN_ORDERS_PATH: str = "/api/v1/contract/openOrders"
+    TOOBIT_FUTURES_LEVERAGE_PATH: str = "/api/v1/contract/leverage"
+    TOOBIT_FUTURES_ORDER_TEST_PATH: str = "/api/v1/contract/orderTest"
+    TOOBIT_FUTURES_TIMEOUT_SECONDS: int = 20
+
+    # ── Live / Demo Trading ─────────────────────────────────────────────────
+    LIVE_TRADING_ENABLED: bool = False
+    LIVE_TRADING_MODE: Literal["demo", "live"] = "demo"
+    LIVE_TRADING_RUNTIME_DIR: str = "runtime/live_trading"
+    LIVE_TRADING_DEFAULT_INITIAL_BALANCE: Decimal = Decimal("100")
+    LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT: Decimal = Decimal("120")
+    LIVE_TRADING_FEE_RATE_PCT: Decimal = Decimal("0.04")
+    LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE: int = 50
+    LIVE_TRADING_DEFAULT_SIGNAL_LEVERAGE: int = 50
+    LIVE_TRADING_DEFAULT_STOP_PCT: Decimal = Decimal("5")
+    LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT: Decimal = Decimal("5")
+    LIVE_TRADING_MIN_ALLOCATION_PCT: Decimal = Decimal("2")
+    LIVE_TRADING_MAX_ALLOCATION_PCT: Decimal = Decimal("20")
+    LIVE_TRADING_PRICE_REFRESH_SECONDS: int = 60
+    LIVE_TRADING_ACCOUNT_REFRESH_SECONDS: int = 60
+    LIVE_TRADING_DEFAULT_CHANNELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    LIVE_TRADING_USE_AI: bool = True
+    LIVE_TRADING_DEFAULT_STRATEGY_KEY: str = "tp_trailing_risk_managed"
+
+    @field_validator("LIVE_TRADING_DEFAULT_CHANNELS", mode="before")
+    @classmethod
+    def parse_live_channels(cls, value: str | list[str] | None) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [item.strip() for item in value if item.strip()]
+        return [item.strip() for item in value.split(",") if item.strip()]
+
     @field_validator("EXECUTION_MODE", mode="before")
     @classmethod
-    def reject_live_mode(cls, value: str) -> str:
-        if value == "live":
-            msg = "EXECUTION_MODE='live' is blocked. Allowed modes: backtest, paper, demo."
+    def validate_execution_mode(cls, value: str) -> str:
+        allowed = {"backtest", "paper", "demo", "live"}
+        if value not in allowed:
+            msg = f"EXECUTION_MODE='{value}' is not valid. Allowed: {', '.join(sorted(allowed))}."
             raise ValueError(msg)
         return value
 

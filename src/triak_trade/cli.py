@@ -50,6 +50,7 @@ from triak_trade.backtesting import (
     run_fixture_backtest,
 )
 from triak_trade.config.settings import Settings, get_settings
+from triak_trade.core.formatting import format_decimal
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
 from triak_trade.core.time import parse_user_datetime_to_utc
@@ -834,13 +835,15 @@ def backtest_dry_run_cmd(
     report = BacktestEngine().run(request)
     payload = {
         "channel": report.channel_id,
-        "final_balance": str(report.final_balance),
-        "max_drawdown": str(report.metrics.max_drawdown),
+        "final_balance": format_decimal(report.final_balance),
+        "max_drawdown": format_decimal(report.metrics.max_drawdown),
         "profit_factor": (
-            str(report.metrics.profit_factor) if report.metrics.profit_factor is not None else None
+            format_decimal(report.metrics.profit_factor)
+            if report.metrics.profit_factor is not None
+            else None
         ),
-        "total_pnl": str(report.metrics.total_pnl),
-        "win_rate": str(report.metrics.win_rate),
+        "total_pnl": format_decimal(report.metrics.total_pnl),
+        "win_rate": format_decimal(report.metrics.win_rate),
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
