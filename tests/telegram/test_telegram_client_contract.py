@@ -61,6 +61,30 @@ def test_telethon_client_instantiation_and_missing_credentials() -> None:
         client._validate_credentials()
 
 
+def test_telethon_client_falls_back_to_loopback_for_host_docker_internal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_API_ID=123,
+        TELEGRAM_API_HASH="hash",
+        TELEGRAM_PROXY_ENABLED=True,
+        TELEGRAM_PROXY_TYPE="http",
+        TELEGRAM_PROXY_HOST="host.docker.internal",
+        TELEGRAM_PROXY_PORT=3128,
+    )
+    client = TelethonTelegramClient(settings)
+
+    def _raise(name: str) -> str:
+        raise OSError(name)
+
+    monkeypatch.setattr("triak_trade.telegram.telethon_client.socket.gethostbyname", _raise)
+
+    proxy = client._proxy_tuple()
+    assert proxy is not None
+    assert proxy[1] == "127.0.0.1"
+
+
 @pytest.mark.asyncio
 async def test_telethon_client_ensure_media_payload_downloads_only_caption_media(
     monkeypatch: pytest.MonkeyPatch,

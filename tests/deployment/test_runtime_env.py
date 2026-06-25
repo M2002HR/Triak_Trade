@@ -27,6 +27,13 @@ def test_build_dashboard_runtime_env_uses_docker_overrides() -> None:
             "DASHBOARD_PORT": "9090",
             "TELEGRAM_SESSION_DIR_DOCKER": "/data/sessions",
             "HTTP_PROXY": "http://host.docker.internal:2080",
+            "HTTP_PROXY_DOCKER": "http://proxy-bridge:32080",
+            "TELEGRAM_PROXY_ENABLED": "true",
+            "TELEGRAM_PROXY_TYPE": "http",
+            "TELEGRAM_PROXY_HOST": "host.docker.internal",
+            "TELEGRAM_PROXY_PORT": "3128",
+            "TELEGRAM_PROXY_HOST_DOCKER": "proxy-bridge",
+            "TELEGRAM_PROXY_PORT_DOCKER": "32080",
         }
     )
     assert values["DATABASE_URL"] == "mysql+pymysql://x"
@@ -34,7 +41,9 @@ def test_build_dashboard_runtime_env_uses_docker_overrides() -> None:
     assert values["AI_GATEWAY_BASE_URL"] == "http://ai-gateway:8080"
     assert values["DASHBOARD_PORT"] == "9090"
     assert values["TELEGRAM_SESSION_DIR"] == "/data/sessions"
-    assert values["HTTP_PROXY"] == "http://host.docker.internal:2080"
+    assert values["HTTP_PROXY"] == "http://proxy-bridge:32080"
+    assert values["TELEGRAM_PROXY_HOST"] == "proxy-bridge"
+    assert values["TELEGRAM_PROXY_PORT"] == "32080"
 
 
 def test_build_ai_gateway_runtime_env_maps_root_ai_settings() -> None:

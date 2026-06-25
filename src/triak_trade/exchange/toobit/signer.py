@@ -12,8 +12,11 @@ class ToobitSigner:
         self._secret = secret
 
     def sign(self, params: dict[str, object]) -> str:
-        ordered = sorted((key, str(value)) for key, value in params.items())
-        query = urlencode(ordered)
+        # Toobit signs the query string IN INSERTION ORDER (same order sent in URL).
+        # Sorting alphabetically breaks the signature when recvWindow is present
+        # because 'recvWindow' sorts before 'timestamp' but the URL sends timestamp first.
+        pairs = [(key, str(value)) for key, value in params.items()]
+        query = urlencode(pairs)
         digest = hmac.new(self._secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256)
         return digest.hexdigest().lower()
 

@@ -122,12 +122,15 @@ class ToobitClient:
         except ValueError as exc:
             raise ToobitParseError("Toobit response is not valid JSON") from exc
 
-        if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0"):
-            raise ToobitAPIError("Toobit API returned error code")
+        if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0", 200):
+            raise ToobitAPIError(
+                f"Toobit API error code {payload.get('code')}: {payload.get('msg', '')}"
+            )
 
-        if not isinstance(payload, dict):
-            raise ToobitParseError("Toobit response must be a JSON object")
-        return payload
+        # Futures endpoints return lists directly (e.g. /api/v1/futures/balance)
+        if isinstance(payload, (dict, list)):
+            return payload  # type: ignore[return-value]
+        raise ToobitParseError("Toobit response must be JSON object or array")
 
     def __repr__(self) -> str:
         return "ToobitClient(api_key=**redacted**, api_secret=**redacted**)"

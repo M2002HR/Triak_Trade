@@ -93,6 +93,8 @@ services:
       REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379/0}
       AI_GATEWAY_BASE_URL: ${AI_GATEWAY_BASE_URL_DOCKER:-http://ai-gateway:8080}
       TELEGRAM_SESSION_DIR: ${TELEGRAM_SESSION_DIR_DOCKER:-/app/.sessions}
+      TELEGRAM_PROXY_HOST_DOCKER: ${TELEGRAM_PROXY_HOST_DOCKER:-host.docker.internal}
+      TELEGRAM_PROXY_PORT_DOCKER: ${TELEGRAM_PROXY_PORT_DOCKER:-32080}
     depends_on:
       mysql:
         condition: service_healthy

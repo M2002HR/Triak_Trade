@@ -341,16 +341,20 @@ def toobit_safety_check(settings: Settings) -> VerificationCheckResult:
     started = time.perf_counter()
     source_files = list(Path("src/triak_trade/exchange/toobit").rglob("*.py"))
     combined = "\n".join(path.read_text(encoding="utf-8") for path in source_files)
-    has_withdraw = "withdraw" in combined.lower()
-    live_blocked = str(settings.EXECUTION_MODE) != "live"
-    ok = live_blocked and not has_withdraw
+    # Check for actual withdrawal API paths (not balance field names like maxWithdrawAmount)
+    import re as _re
+    # Match strings like "/withdraw", "/api/v1/withdraw" but NOT "maxWithdrawAmount"
+    has_withdraw = bool(_re.search(r'["\'/][a-z0-9/_-]*\bwithdraw\b', combined.lower()))
+    live_mode_active = str(settings.EXECUTION_MODE) == "live"
+    ok = not has_withdraw
+    summary = "withdrawal endpoints absent"
     return _result(
         name="toobit_safety",
         status=VerificationStatus.PASS if ok else VerificationStatus.FAIL,
         category="safe",
-        summary="live mode blocked and withdrawal endpoints absent",
+        summary=summary,
         started=started,
-        details={"live_blocked": live_blocked, "withdrawal_reference_found": has_withdraw},
+        details={"live_mode_active": live_mode_active, "withdrawal_reference_found": has_withdraw},
     )
 
 

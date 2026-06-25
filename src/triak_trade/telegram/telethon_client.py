@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import socket
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -48,33 +50,80 @@ class TelethonTelegramClient:
         else:
             self.session_path.parent.mkdir(parents=True, exist_ok=True)
             session = str(self.session_path)
+
+        proxy = self._proxy_tuple()
+        # Convert http proxy tuple to dict form that python_socks understands
+        if proxy is not None and proxy[0] == "http":
+            proxy_kwargs: dict[str, Any] = {
+                "proxy_type": "http",
+                "addr": proxy[1],
+                "port": proxy[2],
+                "rdns": proxy[3],
+            }
+            if proxy[4]:
+                proxy_kwargs["username"] = proxy[4]
+            if proxy[5]:
+                proxy_kwargs["password"] = proxy[5]
+            effective_proxy: Any = proxy_kwargs
+        else:
+            effective_proxy = proxy
+
         return TelegramClient(
             session,
             self.settings.TELEGRAM_API_ID,
             self.settings.TELEGRAM_API_HASH.get_secret_value(),
-            proxy=self._proxy_tuple(),
+            proxy=effective_proxy,
         )
 
     def _proxy_tuple(self) -> tuple[str, str, int, bool, str | None, str | None] | None:
         if not self.settings.TELEGRAM_PROXY_ENABLED:
             return None
-        host = self.settings.TELEGRAM_PROXY_HOST.strip()
-        port = self.settings.TELEGRAM_PROXY_PORT
+
+        import os
+        # Inside Docker: prefer TELEGRAM_PROXY_HOST_DOCKER / TELEGRAM_PROXY_PORT_DOCKER
+        in_docker = os.path.exists("/.dockerenv")
+        if in_docker:
+            docker_host = getattr(self.settings, "TELEGRAM_PROXY_HOST_DOCKER", "").strip()
+            docker_port = getattr(self.settings, "TELEGRAM_PROXY_PORT_DOCKER", 0)
+            if docker_host and docker_port > 0:
+                host = self._resolve_proxy_host(docker_host)
+                port = docker_port
+            else:
+                host = self._resolve_proxy_host(self.settings.TELEGRAM_PROXY_HOST.strip())
+                port = self.settings.TELEGRAM_PROXY_PORT
+        else:
+            host = self._resolve_proxy_host(self.settings.TELEGRAM_PROXY_HOST.strip())
+            port = self.settings.TELEGRAM_PROXY_PORT
+
         if not host or port <= 0:
             raise TelegramCredentialError(
                 "TELEGRAM_PROXY_ENABLED=true requires TELEGRAM_PROXY_HOST and TELEGRAM_PROXY_PORT"
             )
+        proxy_type = self.settings.TELEGRAM_PROXY_TYPE.strip().lower()
+        # Telethon/python_socks supports: socks5, socks4, http
+        # Map common aliases
+        if proxy_type in ("http", "https", "http_connect"):
+            proxy_type = "http"
         username = self.settings.TELEGRAM_PROXY_USERNAME.strip() or None
         password_value = self.settings.TELEGRAM_PROXY_PASSWORD.get_secret_value().strip()
         password = password_value or None
         return (
-            self.settings.TELEGRAM_PROXY_TYPE.strip().lower(),
+            proxy_type,
             host,
             port,
             self.settings.TELEGRAM_PROXY_RDNS,
             username,
             password,
         )
+
+    def _resolve_proxy_host(self, host: str) -> str:
+        if host != "host.docker.internal":
+            return host
+        try:
+            socket.gethostbyname(host)
+        except OSError:
+            return "127.0.0.1"
+        return host
 
     async def _ensure_client(self) -> Any:
         if self._client is None:
@@ -119,23 +168,101 @@ class TelethonTelegramClient:
         channels: list[str],
         handler: Callable[[RawTelegramMessage], Awaitable[None]],
     ) -> None:
-        client = await self._ensure_client()
         try:
             from telethon import events
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("telethon is not installed") from exc
 
+        # Always build a fresh client for live listening (avoids stale state)
+        self._client = self._build_client()
+        client = self._client
+
+        # Build reverse lookup: username → channel_input
+        # So we can tag each message with the original channel URL
+        channel_lookup: dict[str, str] = {}
+        for ch in channels:
+            slug = ch.rsplit("/", 1)[-1].lstrip("@").lower()
+            if slug:
+                channel_lookup[slug] = ch
+            # Also store the raw input itself as a key
+            channel_lookup[ch.lower()] = ch
+
         async def _on_message(event: Any) -> None:
-            raw = telethon_message_to_raw(event.message)
-            self._cache_message(raw, event.message)
-            await handler(raw)
+            try:
+                msg = event.message
+                # Resolve the channel input from the chat entity
+                chat = getattr(msg, "chat", None) or getattr(event, "chat", None)
+                chat_username = getattr(chat, "username", None)
+                channel_ref: str | None = None
+                if chat_username:
+                    channel_ref = channel_lookup.get(chat_username.lower())
+                    if channel_ref is None:
+                        channel_ref = f"https://t.me/{chat_username}"
+
+                raw = telethon_message_to_raw(msg, channel=channel_ref)
+                self._cache_message(raw, msg)
+                import logging
+                logging.getLogger(__name__).debug(
+                    "New message %s from channel=%s text=%s",
+                    raw.message_id, raw.channel_id,
+                    (raw.text or "")[:60],
+                )
+                await handler(raw)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Error handling Telegram message %s",
+                    getattr(getattr(event, "message", None), "id", "?"),
+                    exc_info=True,
+                )
+
         client.add_event_handler(
             _on_message,
             events.NewMessage(chats=channels if channels else None),
         )
 
-        async with client:
+        try:
+            await client.start()
+            import logging
+            _log = logging.getLogger(__name__)
+
+            # Join any channels we're not yet a member of (required to receive updates)
+            for ch in channels:
+                try:
+                    entity = await client.get_entity(ch)
+                    left = getattr(entity, "left", False)
+                    if left:
+                        _log.info("Joining channel %s to receive updates", ch)
+                        await client(
+                            __import__(
+                                "telethon.tl.functions.channels",
+                                fromlist=["JoinChannelRequest"],
+                            ).JoinChannelRequest(entity)
+                        )
+                        _log.info("Joined channel %s", ch)
+                except Exception as exc:
+                    _log.warning("Could not join channel %s: %s", ch, exc)
+
+            _log.info("Telegram listener connected, watching %d channels", len(channels))
             await client.run_until_disconnected()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+
+    async def stop(self) -> None:
+        """Disconnect the active client (if any)."""
+        client = self._client
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            self._client = None
 
     async def ensure_media_payload(
         self,
