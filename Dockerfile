@@ -14,6 +14,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Prefer IPv4 during image builds; some hosts resolve PyPI over IPv6 but cannot
+# complete the connection, which stalls `pip install` for minutes.
+RUN printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
+
 # ── Layer 1: install deps (cached until pyproject.toml changes) ──────────────
 # Copy only the install manifests. Build a minimal stub package so setuptools
 # can resolve the project's dependencies without needing the real source tree.
