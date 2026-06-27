@@ -53,9 +53,38 @@
 
 نکته: `BACKTEST_MAX_CANDLES`/`REAL_BACKTEST_MAX_CANDLES` تعریف شده‌اند ولی در مسیر شبیه‌سازی **اعمال نمی‌شوند** (فایل ۰۸ W6).
 
+## تنظیمات لایو/دمو (`config/settings.py`)
+
+| کلید | پیش‌فرض | توضیح |
+|------|---------|-------|
+| `LIVE_TRADING_ENABLED` | `false` | سوییچ اصلی workspace لایو/دمو |
+| `LIVE_TRADING_MODE` | `demo` | mode پیش‌فرض dashboard |
+| `LIVE_TRADING_LIVE_MODE_ENABLED` | `false` | گارد اصلی برای اجازه‌ی باز کردن session واقعی |
+| `LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT` | `120` | risk factor sizing |
+| `LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT` | `120` | سقف سخت برای ریسک هر session |
+| `LIVE_TRADING_MAX_CONCURRENT_POSITIONS` | `10` | سقف تعداد پوزیشن هم‌زمان |
+| `LIVE_TRADING_DEFAULT_SIGNAL_LEVERAGE` | `50` | اهرم پیش‌فرض وقتی پیام leverage ندارد |
+| `LIVE_TRADING_DEFAULT_STOP_PCT` | `5` | استاپ مصنوعی برای سیگنال‌های بدون SL |
+| `LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT` | `5` | سقف worst-case loss برای استاپ مصنوعی |
+| `LIVE_TRADING_MIN_ALLOCATION_PCT` | `2` | کف allocation |
+| `LIVE_TRADING_MAX_ALLOCATION_PCT` | `20` | سقف allocation |
+| `LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS` | `12` | timeout انتظار fill از API |
+| `LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS` | `3` | تعداد تلاش برای جمع‌کردن residual بعد از full close |
+| `LIVE_TRADING_REQUIRE_AI_CLASSIFIER` | `true` | اگر true باشد، session واقعی بدون AI classifier باز نمی‌شود |
+| `LIVE_TRADING_FAIL_CLOSED_ON_LEVERAGE_SYNC_ERROR` | `true` | اگر set leverage fail شود، open fail-closed می‌شود |
+| `LIVE_TRADING_FAIL_CLOSED_ON_PROTECTION_SYNC_ERROR` | `true` | اگر ثبت protection fail شود، position auto-flatten می‌شود |
+| `LIVE_TRADING_AUTO_RESUME_SESSIONS` | `true` | بعد از restart داشبورد، sessionهای active دوباره بالا بیایند |
+| `TOOBIT_DEMO_PRIVATE_SYMBOL_MODE` | `tbv_only` | استراتژی نگاشت private symbolهای demo |
+
+- در هر دو mode `demo` و `live`، sizing از موجودی واقعی اکانت Toobit می‌آید و `initial_balance` دستی در dashboard دیگر مبنای sizing نیست.
+- mode `demo` برای endpointهای خصوصی همان production private API واقعی Toobit را با `TBV_...` و `business_type=VIRTUAL` صدا می‌زند؛ بنابراین balance/positions/order history از خود اکانت demo می‌آید.
+- برای targetها، هر پله به‌صورت close order جدا روی Toobit ثبت می‌شود و بعد از fill دوباره re-arm می‌شود؛ stop-loss روی `STOP_PROFIT_LOSS` مدیریت می‌شود.
+
 ## گاردهای امنیتی (طبق `AGENTS.md`)
 
-- `EXECUTION_MODE='live'` در `settings.py:285` به‌صراحت **مسدود** است (فقط backtest/paper/demo).
+- `EXECUTION_MODE` همچنان فقط بین `backtest/paper/demo/live` معتبر است، اما باز شدن session واقعی در dashboard فقط با `LIVE_TRADING_LIVE_MODE_ENABLED=true` مجاز می‌شود.
+- اگر `LIVE_TRADING_REQUIRE_AI_CLASSIFIER=true` باشد، session واقعی بدون AI gateway + AI classifier بالا نمی‌آید.
+- Kill Switch (`KILL_SWITCH_ENABLED=true`) شروع session جدید را مسدود می‌کند.
 - بک‌تست واقعی پشت چند گارد env (REAL_BACKTEST_ENABLED + سه گارد تست).
 - داده‌ی بازار فقط endpoint عمومی؛ هرگز private/signed.
 - گزارش‌ها non-secret؛ کانال لاگ همیشه انگلیسی و redact‌شده.

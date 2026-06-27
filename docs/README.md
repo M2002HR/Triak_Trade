@@ -22,8 +22,13 @@
 ## خلاصه‌ی اجرایی (TL;DR)
 
 Triak_Trade یک پلتفرم ماژولار برای **هوش سیگنال تلگرام + بک‌تست + دمو-تریدینگ + مانیتورینگ** است.
-هیچ معامله‌ی واقعی‌ای انجام نمی‌دهد؛ workspace جدید دمو-تریدینگ/لایو-مانیتورینگ در داشبورد فعلاً
-فقط sessionهای demo را اجازه می‌دهد و اجرای سفارش واقعی همچنان مسدود است.
+workspace جدید دمو-تریدینگ/لایو-مانیتورینگ در داشبورد
+برای sessionهای demo از endpointهای عمومی واقعی Toobit و نمادهای demo از جنس `TBV_...` استفاده می‌کند.
+برای endpointهای خصوصی هم همان production API واقعی Toobit با `TBV_...` و `business_type=VIRTUAL` صدا زده می‌شود، بنابراین balance/position/history از خود اکانت دمو Toobit می‌آید.
+در لایو/دمو، استاپ‌لاس روی خود Toobit به‌صورت `STOP_PROFIT_LOSS` ثبت می‌شود و از endpointهای واقعی `openOrders` و `order` واکشی/کنسل می‌شود.
+اگر سیگنال open ورودیِ صریح نداشته باشد، ورودی به‌صورت market-style از قیمت لحظه‌ای resolve می‌شود.
+برای targetها هم هر پله به‌صورت close order جداگانه روی Toobit ثبت و بعد از هر fill دوباره re-arm می‌شود.
+sessionهای live فقط با `LIVE_TRADING_LIVE_MODE_ENABLED=true` در `.env.local` باز می‌شوند.
 
 موتور بک‌تست از دو مسیر تشکیل شده:
 

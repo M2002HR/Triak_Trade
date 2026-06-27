@@ -116,22 +116,9 @@ mypy src
 
 - Signed Toobit client exists for safe checks and Spot `orderTest` only.
 - Unit tests use mocks only; real signed checks are guard-gated.
-- Live trading remains blocked.
+- Live trading is env-gated via `LIVE_TRADING_LIVE_MODE_ENABLED=true` in root `.env.local`.
 - Withdrawal endpoints are forbidden and not implemented.
 - Runtime secrets come only from root `.env.local`.
-
-## Admin Bot Approval
-
-- Admin auth is username-based via `ADMIN_TELEGRAM_USERNAMES` (case-insensitive, `@` optional).
-- `ADMIN_USER_IDS` is deprecated/backward-compatible only.
-- Admin must start the bot once so username→chat_id can be registered.
-- Real bot send tests are guard-gated with `RUN_TELEGRAM_BOT_INTEGRATION_TESTS=1`.
-- Approval flow records decisions only; it does not execute trades.
-- Runnable admin bot runtime is available but real polling is blocked unless `ADMIN_BOT_RUNTIME_ENABLED=true`.
-- Fake smoke/runtime commands do not call Telegram: `admin-bot-smoke-test`, `run-admin-bot --once`, and `run-admin-bot --watch --max-runtime-seconds 10`.
-- Real supervised start command: `triak-trade admin-bot-start --real --watch`.
-- Runtime files live under `runtime/admin_bot/` and are gitignored.
-- Bot logs/status must never include bot tokens, API keys, or session data.
 
 ## Backtesting
 
@@ -140,7 +127,6 @@ mypy src
 - `triak-trade real-backtest-check` shows readiness without printing secrets.
 - `triak-trade real-backtest-run` and `real-backtest-tofan` write JSON/Markdown reports under `runtime/reports/backtests`.
 - Dashboard `/backtests` and `/reports` surface the same real reports.
-- Admin bot can run a guarded 24h/7d real backtest and show the latest saved report.
 - Backtest is simulation-only and never executes trades.
 - AI classification is target architecture; regex remains fallback/safety.
 - `https://t.me/Tofan_Trade` is a guarded real-world test target, not a hard-coded rule.
@@ -159,7 +145,6 @@ mypy src
 - Telegram log-channel reports are English and target `@triak_logs` by default.
 - Real log-channel sending is disabled by default.
 - Enable real log-channel sending only with `TELEGRAM_LOG_CHANNEL_ENABLED=true`, `PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true`, and `RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1`.
-- The admin bot must be allowed to post to `@triak_logs`.
 - `triak-trade log-channel-format-dry-run` and `triak-trade process-message-audit-dry-run` never call Telegram.
 - No secrets, account data, live orders, or trade execution are included in processing audit reports.
 
@@ -170,6 +155,5 @@ mypy src
 - Auth uses `DASHBOARD_ADMIN_TOKEN`; the token is stored only in root `.env.local`.
 - Use `triak-trade dashboard-check` for safe non-secret config status.
 - Use `triak-trade dashboard-start`, `dashboard-status`, `dashboard-logs`, and `dashboard-stop` for runtime control.
-- The dashboard now includes a live-trading workspace for guarded multi-session monitoring, but real order execution remains blocked in this phase and sessions are demo-only.
-- Auto Mode and Kill Switch are runtime state toggles only; no live execution exists.
-- Dashboard approvals record/placeholder decisions only and never execute orders.
+- The dashboard now includes a live-trading workspace for multi-session monitoring with per-session message impact tracing, active/inactive signal state, exchange snapshots, and dashboard-side history cleanup. Demo sessions use real Toobit public endpoints plus the production private futures API with `TBV_...` symbols and `business_type=VIRTUAL`, so exchange balances, positions, and order history come from the real demo account. Live/demo sizing no longer uses a manual initial balance override; both modes size from the connected Toobit account state. Entry-less open signals are resolved as market-style entries from the current mark price. Live protection orders now use Toobit v1 futures order management: stop-loss stays on `STOP_PROFIT_LOSS`, while each take-profit ladder step is placed as its own close order and re-armed after exchange fills. Live sessions remain env-gated behind `LIVE_TRADING_LIVE_MODE_ENABLED=true` in root `.env.local`.
+- Auto Mode and Kill Switch are runtime state toggles only; they do not replace explicit live-execution gating.

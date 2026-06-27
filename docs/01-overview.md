@@ -33,8 +33,7 @@
 | `backtesting/` | **هسته‌ی بک‌تست** — موضوع اصلی این مستندات. |
 | `telegram/` | کلاینت Telethon، history sync، live listener، mapper. |
 | `exchange/toobit/` | امضاکننده، اکانت، spot، futures، demo execution، safety. |
-| `dashboard/` | UI کنترل محلی، runtime بک‌تست زنده، workspace دمو-تریدینگ، routes، realtime/WebSocket. |
-| `admin_bot/` | ربات تأیید ادمین (approve/reject/watch؛ بدون اجرای معامله). |
+| `dashboard/` | UI کنترل محلی، runtime بک‌تست زنده، workspace دمو-تریدینگ، جزییات سشن/سیگنال/پیام، routes، realtime/WebSocket. |
 | `observability/` | event bus، processing audit، کانال لاگ تلگرام، redaction. |
 | `verification/` | اجراکننده‌ی verify-system و گزارش‌های سلامت. |
 | `core/` | logging، health، symbols (نرمال‌سازی نماد)، time (TZ تهران)، errors. |
@@ -51,14 +50,14 @@
   - `real-backtest-run --channel … --hours … --interval …`
   - `real-backtest-tofan --hours …` — کانال پیش‌فرض پیکربندی‌شده.
   - `backtest-show-latest` — آخرین گزارش ذخیره‌شده.
-- **داشبورد**: اجرای بک‌تست زنده با progress لحظه‌ای، نمودار سیگنال، live metrics، امکان stop/rerun، و workspace دمو-تریدینگ چند-session.
-- پارس/طبقه‌بندی پیام، بررسی گیت‌وی AI، تاریخچه‌ی تلگرام، داده‌ی بازار، ربات ادمین، کانال لاگ، verify-system.
+- **داشبورد**: اجرای بک‌تست زنده با progress لحظه‌ای، نمودار سیگنال، live metrics، امکان stop/rerun، و workspace دمو-تریدینگ چند-session با modal جزییات سشن، اثر هر پیام روی سیگنال، snapshot اکسچنج، و پاک‌سازی history.
+- پارس/طبقه‌بندی پیام، بررسی گیت‌وی AI، تاریخچه‌ی تلگرام، داده‌ی بازار، کانال لاگ، verify-system.
 
 ## اصول طراحی غیرقابل‌مذاکره (از `AGENTS.md`)
 
 1. هر ماژول مستقلاً قابل‌تست؛ سرویس بیرونی پشت interface.
 2. تست‌های unit هرگز سرویس واقعی صدا نمی‌زنند؛ تست‌های integration پشت گارد env.
-3. هیچ سفارش واقعی/برداشت واقعی؛ workspace دمو-تریدینگ فعلاً demo-only است و live order execution همچنان مسدود می‌ماند.
+3. sessionهای `live` فقط وقتی باز می‌شوند که `LIVE_TRADING_LIVE_MODE_ENABLED=true` در `.env.local` تنظیم شده باشد. sessionهای `demo` برای داده/اعتبارسنجی عمومی از API واقعی Toobit و نمادهای `TBV_...` استفاده می‌کنند. برای endpointهای خصوصی هم همان production API واقعی صدا زده می‌شود، اما با symbolهای `TBV_...` و پارامتر `business_type=VIRTUAL`؛ بنابراین balance/position/history از خود اکانت دمو Toobit می‌آید و در صورت نامعتبر بودن demo symbol، داشبورد همان خطای exchange-side واقعی را نشان می‌دهد.
 4. همه‌ی مقادیر مالی `Decimal`.
 5. هرگز چاپ/کامیت راز.
 6. بک‌تست simulation-only؛ از endpointهای خصوصی استفاده نمی‌کند.
