@@ -58,6 +58,44 @@ async def test_public_and_error_paths() -> None:
         await timeout_client.get_server_time()
 
 
+@pytest.mark.asyncio
+async def test_signed_request_resyncs_time_on_recv_window_error() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path == "/api/v1/time":
+            return httpx.Response(200, json={"serverTime": 1700000005000})
+        if len(calls) == 1:
+            return httpx.Response(
+                400,
+                json={
+                    "code": -1021,
+                    "msg": "Timestamp for this request is outside of the recvWindow.",
+                },
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    client = _client(httpx.MockTransport(handler))
+    result = await client.signed_request("GET", "/x", params={"symbol": "BTCUSDT"})
+    assert result == {"ok": True}
+    assert any("/api/v1/time" in call for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_http_error_preserves_status_code_and_payload() -> None:
+    client = _client(
+        httpx.MockTransport(
+            lambda request: httpx.Response(400, json={"code": -1, "msg": "bad request"})
+        )
+    )
+    with pytest.raises(ToobitAPIError) as exc_info:
+        await client.signed_request("GET", "/x", params={"symbol": "BTCUSDT"})
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.error_code == -1
+    assert exc_info.value.payload == {"code": -1, "msg": "bad request"}
+
+
 def test_client_repr_redacts() -> None:
     client = _client(httpx.MockTransport(lambda request: httpx.Response(200, json={})))
     text = repr(client)

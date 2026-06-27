@@ -38,6 +38,7 @@ class ToobitClient:
         self.exchange_info_path = exchange_info_path
         self.transport = transport
         self.signer = ToobitSigner(api_secret)
+        self._server_time_offset_ms = 0
 
     async def get_server_time(self) -> dict[str, Any]:
         return await self.public_request("GET", self.time_path)
@@ -60,21 +61,48 @@ class ToobitClient:
         params: dict[str, object] | None = None,
         data: dict[str, object] | None = None,
     ) -> dict[str, Any]:
-        signed_params = dict(params or {})
-        signed_params["timestamp"] = int(time.time() * 1000)
-        if self.recv_window > 0:
-            signed_params["recvWindow"] = self.recv_window
-        signature = self.signer.sign(signed_params)
-        signed_params["signature"] = signature
-        headers = {"X-BB-APIKEY": self.api_key}
-        return await self._request(
-            method=method,
-            path=path,
-            params=signed_params,
-            data=data,
-            signed=True,
-            extra_headers=headers,
-        )
+        for attempt in range(2):
+            signed_params = dict(params or {})
+            signed_params["timestamp"] = self._current_timestamp_ms()
+            if self.recv_window > 0:
+                signed_params["recvWindow"] = self.recv_window
+            signature = self.signer.sign(signed_params)
+            signed_params["signature"] = signature
+            headers = {"X-BB-APIKEY": self.api_key}
+            try:
+                return await self._request(
+                    method=method,
+                    path=path,
+                    params=signed_params,
+                    data=data,
+                    signed=True,
+                    extra_headers=headers,
+                )
+            except ToobitAPIError as exc:
+                if exc.error_code != -1021 or attempt > 0:
+                    raise
+                await self._sync_server_time_offset()
+        raise ToobitAPIError("Toobit signed request failed after timestamp resync")
+
+    def _current_timestamp_ms(self) -> int:
+        return int(time.time() * 1000) + self._server_time_offset_ms
+
+    async def _sync_server_time_offset(self) -> None:
+        payload = await self.get_server_time()
+        server_time = self._extract_server_time_ms(payload)
+        self._server_time_offset_ms = server_time - int(time.time() * 1000)
+
+    @staticmethod
+    def _extract_server_time_ms(payload: dict[str, Any]) -> int:
+        raw = payload.get("serverTime")
+        if raw is None and isinstance(payload.get("data"), dict):
+            raw = payload["data"].get("serverTime")
+        if raw is None:
+            raise ToobitParseError("Toobit server time payload missing serverTime")
+        try:
+            return int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ToobitParseError("Toobit server time is not a valid integer") from exc
 
     async def _request(
         self,
@@ -114,17 +142,39 @@ class ToobitClient:
         except httpx.ConnectError as exc:
             raise ToobitConnectionError("Toobit connection failed") from exc
 
-        if response.status_code >= 400:
-            raise ToobitAPIError(f"Toobit API HTTP error: {response.status_code}")
-
         try:
             payload = response.json()
         except ValueError as exc:
+            if response.status_code >= 400:
+                raise ToobitAPIError(
+                    f"Toobit API HTTP error: {response.status_code}: {response.text}",
+                    status_code=response.status_code,
+                    payload=response.text,
+                ) from exc
             raise ToobitParseError("Toobit response is not valid JSON") from exc
+
+        if response.status_code >= 400:
+            if isinstance(payload, dict):
+                code = payload.get("code")
+                msg = payload.get("msg") or payload.get("message") or ""
+                raise ToobitAPIError(
+                    f"Toobit API HTTP error: {response.status_code}: {msg}".rstrip(),
+                    status_code=response.status_code,
+                    error_code=code,
+                    payload=payload,
+                )
+            raise ToobitAPIError(
+                f"Toobit API HTTP error: {response.status_code}",
+                status_code=response.status_code,
+                payload=payload,
+            )
 
         if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0", 200):
             raise ToobitAPIError(
-                f"Toobit API error code {payload.get('code')}: {payload.get('msg', '')}"
+                f"Toobit API error code {payload.get('code')}: {payload.get('msg', '')}",
+                status_code=response.status_code,
+                error_code=payload.get("code"),
+                payload=payload,
             )
 
         # Futures endpoints return lists directly (e.g. /api/v1/futures/balance)
