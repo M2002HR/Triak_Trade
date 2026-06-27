@@ -21,10 +21,9 @@ class FakeAgent:
         return [
             ProposedAction(
                 action_id=f"{self.channel_id}-{raw_message.message_id}",
-                action_type=ProposedActionType.REQUEST_ADMIN_CONFIRMATION,
+                action_type=ProposedActionType.IGNORE_MESSAGE,
                 signal_id=None,
                 risk_increasing=False,
-                requires_admin_approval=True,
                 confidence=Decimal("0.55"),
                 reason="test",
                 payload={"mid": raw_message.message_id},

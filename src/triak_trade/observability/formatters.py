@@ -41,14 +41,13 @@ def format_processing_audit_for_telegram(event: ProcessingAuditEvent) -> str:
         "",
         "Decision:",
         f"Validation: {_bool_label(event.validation_passed)}",
-        f"Admin Approval Required: {_bool_label(event.admin_approval_required)}",
         f"Risk Increasing: {_bool_label(event.risk_increasing)}",
         f"Proposed Action: {_tg(_proposed_label(event))}",
     ]
     if event.status is ProcessingAuditStatus.IGNORED:
         lines.append("Decision Summary: No trading action was created.")
     if event.status is ProcessingAuditStatus.AMBIGUOUS:
-        lines.append("Decision Summary: No trade action created; admin review may be required.")
+        lines.append("Decision Summary: No trade action created; relation remained ambiguous.")
     if event.error_type is not None:
         lines.extend(["", "Error:", f"Type: {_tg(event.error_type)}"])
         if event.error_message_redacted:

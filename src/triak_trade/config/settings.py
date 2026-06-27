@@ -83,25 +83,6 @@ class Settings(BaseSettings):
     TELEGRAM_REAL_TEST_CHANNEL: str = "https://t.me/Tofan_Trade"
     RUN_TELEGRAM_INTEGRATION_TESTS: int = 0
     TELEGRAM_BOT_TOKEN: SecretStr = Field(default=SecretStr("replace_me"))
-    ADMIN_TELEGRAM_USERNAMES: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["@we_are_waiting_for_him"]
-    )
-    ADMIN_USER_IDS: Annotated[list[int], NoDecode] = Field(default_factory=list)
-    ADMIN_BOT_PARSE_MODE: str = "HTML"
-    ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW: bool = True
-    ADMIN_BOT_RUNTIME_ENABLED: bool = False
-    ADMIN_BOT_POLL_INTERVAL_SECONDS: int = 2
-    ADMIN_BOT_LONG_POLL_TIMEOUT_SECONDS: int = 30
-    ADMIN_BOT_SUPERVISOR_RESTART_ON_CRASH: bool = True
-    ADMIN_BOT_SUPERVISOR_MAX_RESTARTS: int = 20
-    ADMIN_BOT_SUPERVISOR_RESTART_DELAY_SECONDS: int = 3
-    ADMIN_BOT_RUNTIME_DIR: str = "runtime/admin_bot"
-    ADMIN_BOT_PID_FILE: str = "runtime/admin_bot/admin_bot.pid"
-    ADMIN_BOT_STATUS_FILE: str = "runtime/admin_bot/status.json"
-    ADMIN_BOT_LOG_FILE: str = "runtime/admin_bot/admin_bot.log"
-    ADMIN_BOT_OFFSET_FILE: str = "runtime/admin_bot/update_offset.json"
-    RUN_TELEGRAM_BOT_INTEGRATION_TESTS: int = 0
-    ADMIN_BOT_TEST_MESSAGE_TEXT: str = "Triak_Trade admin bot test: configuration OK"
     TELEGRAM_LOG_CHANNEL_USERNAME: str = "@triak_logs"
     TELEGRAM_LOG_CHANNEL_ENABLED: bool = False
     TELEGRAM_LOG_CHANNEL_SEND_FULL_TEXT: bool = False
@@ -250,7 +231,6 @@ class Settings(BaseSettings):
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
     REAL_BACKTEST_USE_AI: bool = True
     REAL_BACKTEST_USE_REGEX_FALLBACK: bool = False
-    REAL_BACKTEST_SEND_TO_ADMIN_BOT: bool = True
     REAL_BACKTEST_SEND_TO_LOG_CHANNEL: bool = True
     REAL_BACKTEST_LOG_PER_MESSAGE: bool = True
     # When a clear follow-up directive (close / risk-free / SL-TP update) cannot
@@ -315,11 +295,14 @@ class Settings(BaseSettings):
     # ── Live / Demo Trading ─────────────────────────────────────────────────
     LIVE_TRADING_ENABLED: bool = False
     LIVE_TRADING_MODE: Literal["demo", "live"] = "demo"
+    LIVE_TRADING_LIVE_MODE_ENABLED: bool = False
     LIVE_TRADING_RUNTIME_DIR: str = "runtime/live_trading"
-    LIVE_TRADING_DEFAULT_INITIAL_BALANCE: Decimal = Decimal("100")
+    LIVE_TRADING_DEFAULT_INITIAL_BALANCE: Decimal = Decimal("0")
     LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT: Decimal = Decimal("120")
     LIVE_TRADING_FEE_RATE_PCT: Decimal = Decimal("0.04")
     LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE: int = 50
+    LIVE_TRADING_MAX_CONCURRENT_POSITIONS: int = 10
+    LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT: Decimal = Decimal("120")
     LIVE_TRADING_DEFAULT_SIGNAL_LEVERAGE: int = 50
     LIVE_TRADING_DEFAULT_STOP_PCT: Decimal = Decimal("5")
     LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT: Decimal = Decimal("5")
@@ -327,9 +310,16 @@ class Settings(BaseSettings):
     LIVE_TRADING_MAX_ALLOCATION_PCT: Decimal = Decimal("20")
     LIVE_TRADING_PRICE_REFRESH_SECONDS: int = 60
     LIVE_TRADING_ACCOUNT_REFRESH_SECONDS: int = 60
+    LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS: int = 12
+    LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS: int = 3
     LIVE_TRADING_DEFAULT_CHANNELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     LIVE_TRADING_USE_AI: bool = True
+    LIVE_TRADING_REQUIRE_AI_CLASSIFIER: bool = True
+    LIVE_TRADING_FAIL_CLOSED_ON_LEVERAGE_SYNC_ERROR: bool = True
+    LIVE_TRADING_FAIL_CLOSED_ON_PROTECTION_SYNC_ERROR: bool = True
+    LIVE_TRADING_AUTO_RESUME_SESSIONS: bool = True
     LIVE_TRADING_DEFAULT_STRATEGY_KEY: str = "tp_trailing_risk_managed"
+    TOOBIT_DEMO_PRIVATE_SYMBOL_MODE: Literal["auto", "tbv_only", "live_only"] = "tbv_only"
 
     @field_validator("LIVE_TRADING_DEFAULT_CHANNELS", mode="before")
     @classmethod
@@ -349,22 +339,6 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
-    @field_validator("ADMIN_USER_IDS", mode="before")
-    @classmethod
-    def parse_admin_user_ids(cls, value: str | list[int] | None) -> list[int]:
-        if value is None or value == "":
-            return []
-        if isinstance(value, list):
-            return value
-        parsed: list[int] = []
-        for item in value.split(","):
-            stripped = item.strip()
-            if not stripped:
-                continue
-            if stripped.lstrip("+-").isdigit():
-                parsed.append(int(stripped))
-        return parsed
-
     @field_validator("GEMINI_API_KEYS", "GROQ_API_KEYS", mode="before")
     @classmethod
     def parse_secret_list(cls, value: str | list[str] | None) -> list[SecretStr]:
@@ -377,15 +351,6 @@ class Settings(BaseSettings):
     @field_validator("TELEGRAM_LIVE_CHANNELS", mode="before")
     @classmethod
     def parse_channel_list(cls, value: str | list[str] | None) -> list[str]:
-        if value is None or value == "":
-            return []
-        if isinstance(value, list):
-            return [item.strip() for item in value if item.strip()]
-        return [item.strip() for item in value.split(",") if item.strip()]
-
-    @field_validator("ADMIN_TELEGRAM_USERNAMES", mode="before")
-    @classmethod
-    def parse_admin_usernames(cls, value: str | list[str] | None) -> list[str]:
         if value is None or value == "":
             return []
         if isinstance(value, list):

@@ -158,9 +158,6 @@ class ProcessingAuditService:
             state_before=state_before,
             state_after=state_after,
             validation_passed=validation_passed,
-            admin_approval_required=(
-                first_action.requires_admin_approval if first_action is not None else False
-            ),
             risk_increasing=first_action.risk_increasing if first_action is not None else False,
             status=status,
             reason=reason,
@@ -197,7 +194,6 @@ class ProcessingAuditService:
             ),
             state_after="error",
             validation_passed=False,
-            admin_approval_required=False,
             risk_increasing=False,
             status=ProcessingAuditStatus.ERROR,
             reason="Message processing failed safely.",
@@ -353,7 +349,6 @@ def build_sample_processing_audit_event(settings: Settings) -> ProcessingAuditEv
         state_before=None,
         state_after="PENDING_CONSOLIDATION",
         validation_passed=True,
-        admin_approval_required=True,
         risk_increasing=True,
         status=ProcessingAuditStatus.SUCCESS,
         reason="New BTCUSDT LONG signal detected and queued for consolidation.",

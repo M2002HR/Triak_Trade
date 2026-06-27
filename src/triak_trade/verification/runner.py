@@ -70,7 +70,6 @@ class VerificationRunner:
             "app_env": self.settings.APP_ENV,
             "execution_mode": self.settings.EXECUTION_MODE,
             "ai_gateway_enabled": self.settings.AI_GATEWAY_ENABLED,
-            "admin_usernames_count": len(self.settings.ADMIN_TELEGRAM_USERNAMES),
             "telegram_credentials_present": (
                 self.settings.TELEGRAM_API_ID > 0
                 and self.settings.TELEGRAM_API_HASH.get_secret_value() != "replace_me"

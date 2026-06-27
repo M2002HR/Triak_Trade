@@ -43,7 +43,6 @@ class ProcessingAuditEvent(BaseModel):
     state_before: str | None = None
     state_after: str | None = None
     validation_passed: bool | None = None
-    admin_approval_required: bool | None = None
     risk_increasing: bool | None = None
     status: ProcessingAuditStatus
     reason: str | None = None

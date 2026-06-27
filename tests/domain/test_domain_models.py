@@ -110,7 +110,7 @@ def test_normalized_message_symbols_and_keywords() -> None:
 
 def test_parsed_signal_accepts_decimal_strings() -> None:
     signal = _parsed_signal()
-    assert signal.symbol == "BTC/USDT"
+    assert signal.symbol == "BTCUSDT"
     assert signal.entry_low == Decimal("100")
 
 
@@ -150,19 +150,18 @@ def test_signal_state_requires_origin_message_in_related_ids() -> None:
         )
 
 
-def test_proposed_action_risk_increasing_requires_approval() -> None:
-    with pytest.raises(ValidationError):
-        ProposedAction(
-            action_id="act_1",
-            action_type=ProposedActionType.CREATE_ORDER,
-            signal_id="sig_1",
-            risk_increasing=True,
-            requires_admin_approval=False,
-            confidence=Decimal("0.8"),
-            reason="need to enter",
-            payload={},
-            created_at=NOW,
-        )
+def test_proposed_action_accepts_risk_increasing_without_extra_flag() -> None:
+    action = ProposedAction(
+        action_id="act_1",
+        action_type=ProposedActionType.CREATE_ORDER,
+        signal_id="sig_1",
+        risk_increasing=True,
+        confidence=Decimal("0.8"),
+        reason="need to enter",
+        payload={},
+        created_at=NOW,
+    )
+    assert action.risk_increasing is True
 
 
 def test_candle_high_low_validation() -> None:

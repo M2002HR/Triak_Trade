@@ -77,7 +77,6 @@ def test_tick_before_and_after_consolidation_window() -> None:
     actions = agent.tick(clock.now())
     assert len(actions) == 1
     assert actions[0].action_type is ProposedActionType.CREATE_ORDER
-    assert actions[0].requires_admin_approval is True
 
 
 def test_related_messages_attached_in_consolidation() -> None:
@@ -226,7 +225,7 @@ def test_followup_mapping_after_proposal() -> None:
     assert tp_actions[0].action_type is ProposedActionType.UPDATE_TAKE_PROFIT
 
 
-def test_ambiguous_update_requests_confirmation() -> None:
+def test_ambiguous_update_is_ignored_safely() -> None:
     agent, clock, settings = _agent()
     agent.ingest_message(
         _raw(
@@ -242,7 +241,7 @@ def test_ambiguous_update_requests_confirmation() -> None:
     actions = agent.ingest_message(
         _raw(clock=clock, channel_id="chan-a", message_id=2, text="Entry updated", reply_to=1)
     )
-    assert actions[0].action_type is ProposedActionType.REQUEST_ADMIN_CONFIRMATION
+    assert actions[0].action_type is ProposedActionType.IGNORE_MESSAGE
 
 
 def test_multiple_channels_independent_and_multi_pending() -> None:

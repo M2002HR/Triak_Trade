@@ -226,29 +226,6 @@ def build_router(
         except Exception:
             await realtime_hub.disconnect(websocket)
 
-    @router.get("/approvals", response_class=HTMLResponse)
-    async def approvals(request: Request) -> Response:
-        redirect = auth.redirect_if_needed(request)
-        if redirect is not None:
-            return redirect
-        return templates.TemplateResponse(
-            request,
-            "approvals.html",
-            context(request, service.approvals()),
-        )
-
-    @router.post("/approvals/{action_id}/{decision}")
-    async def approval_decision(
-        request: Request,
-        action_id: str,
-        decision: str,
-    ) -> Response:
-        redirect = auth.redirect_if_needed(request)
-        if redirect is not None:
-            return redirect
-        _ = (action_id, decision)
-        return RedirectResponse(url="/approvals?decision_recorded=placeholder", status_code=303)
-
     @router.get("/logs", response_class=HTMLResponse)
     async def logs(request: Request) -> Response:
         redirect = auth.redirect_if_needed(request)
@@ -361,7 +338,13 @@ def build_router(
         return templates.TemplateResponse(
             request,
             "live_trading.html",
-            context(request, {"bootstrap": live_coordinator.bootstrap()}),
+            context(
+                request,
+                {
+                    "bootstrap": live_coordinator.bootstrap(),
+                    "live_mode_enabled": live_coordinator.live_mode_enabled(),
+                },
+            ),
         )
 
     @router.get("/api/live/readiness")
@@ -391,16 +374,6 @@ def build_router(
             trading_mode = str(
                 payload.get("trading_mode") or settings.LIVE_TRADING_MODE
             ).strip().lower()
-            initial_balance = (
-                Decimal(
-                    str(
-                        payload.get("initial_balance")
-                        or settings.LIVE_TRADING_DEFAULT_INITIAL_BALANCE
-                    )
-                )
-                if trading_mode == "demo"
-                else Decimal("0")
-            )
             risk_per_trade_pct = Decimal(
                 str(
                     payload.get("risk_per_trade_pct")
@@ -410,7 +383,7 @@ def build_router(
             config = LiveSessionConfig(
                 channels=channels,
                 trading_mode=trading_mode,
-                initial_balance=initial_balance,
+                initial_balance=Decimal("0"),
                 risk_per_trade_pct=risk_per_trade_pct,
                 strategy_key=str(
                     payload.get("strategy_key")
@@ -471,6 +444,14 @@ def build_router(
             return JSONResponse({"detail": "session_not_found"}, status_code=404)
         return JSONResponse({"detail": detail.model_dump(mode="json")})
 
+    @router.delete("/api/live/sessions/{session_id}")
+    async def delete_live_session_history(request: Request, session_id: str) -> JSONResponse:
+        auth.require_api(request)
+        deleted = live_coordinator.delete_session_history(session_id)
+        if not deleted:
+            return JSONResponse({"detail": "session_not_found"}, status_code=404)
+        return JSONResponse({"deleted": True, "session_id": session_id})
+
     @router.get("/api/live/snapshot")
     async def get_live_snapshot(request: Request, session_id: str | None = None) -> JSONResponse:
         auth.require_api(request)
@@ -506,6 +487,31 @@ def build_router(
         return JSONResponse(
             {"messages": [item.model_dump(mode="json") for item in detail.messages]}
         )
+
+    @router.delete("/api/live/sessions/{session_id}/trades/{trade_id}")
+    async def delete_live_trade_record(
+        request: Request,
+        session_id: str,
+        trade_id: str,
+    ) -> JSONResponse:
+        auth.require_api(request)
+        deleted = live_coordinator.delete_trade_record(session_id, trade_id)
+        if not deleted:
+            return JSONResponse({"detail": "trade_not_found"}, status_code=404)
+        return JSONResponse({"deleted": True, "trade_id": trade_id})
+
+    @router.delete("/api/live/sessions/{session_id}/messages/{message_id}")
+    async def delete_live_message_record(
+        request: Request,
+        session_id: str,
+        message_id: int,
+        channel_id: str,
+    ) -> JSONResponse:
+        auth.require_api(request)
+        deleted = live_coordinator.delete_message_record(session_id, message_id, channel_id)
+        if not deleted:
+            return JSONResponse({"detail": "message_not_found"}, status_code=404)
+        return JSONResponse({"deleted": True, "message_id": message_id, "channel_id": channel_id})
 
     @router.get("/api/live/account")
     async def get_live_account(request: Request) -> JSONResponse:

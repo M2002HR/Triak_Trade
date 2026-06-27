@@ -107,12 +107,11 @@ class ChannelAgent:
         if classified.is_related_to_existing_signal:
             request = self._make_action(
                 signal_id=None,
-                action_type=ProposedActionType.REQUEST_ADMIN_CONFIRMATION,
+                action_type=ProposedActionType.IGNORE_MESSAGE,
                 confidence=parsed.confidence,
                 reason="ambiguous relation update",
                 payload={"message_id": raw_message.message_id, "action": parsed.action.value},
                 risk_increasing=False,
-                requires_admin_approval=True,
             )
             actions.append(request)
 
@@ -197,19 +196,17 @@ class ChannelAgent:
                         "related_message_ids": signal.related_message_ids,
                     },
                     risk_increasing=True,
-                    requires_admin_approval=True,
                 )
-                signal.status = SignalStatus.PROPOSED_TO_ADMIN
+                signal.status = SignalStatus.ORDER_PLANNED
                 actions.append(action)
             else:
                 action = self._make_action(
                     signal_id=signal.signal_id,
-                    action_type=ProposedActionType.REQUEST_ADMIN_CONFIRMATION,
+                    action_type=ProposedActionType.IGNORE_MESSAGE,
                     confidence=signal.current_signal.confidence,
                     reason="invalid after consolidation",
                     payload={"errors": errors},
                     risk_increasing=False,
-                    requires_admin_approval=True,
                 )
                 signal.status = SignalStatus.INVALID
                 actions.append(action)
@@ -247,12 +244,11 @@ class ChannelAgent:
             if parsed.action.value == "unknown":
                 return self._make_action(
                     signal_id=signal_id,
-                    action_type=ProposedActionType.REQUEST_ADMIN_CONFIRMATION,
+                    action_type=ProposedActionType.IGNORE_MESSAGE,
                     confidence=parsed.confidence,
                     reason="ambiguous follow-up",
                     payload={"source_action": parsed.action.value},
                     risk_increasing=False,
-                    requires_admin_approval=True,
                 )
             return None
 
@@ -268,7 +264,6 @@ class ChannelAgent:
             reason="related follow-up message",
             payload={"source_action": parsed.action.value},
             risk_increasing=risk_increasing,
-            requires_admin_approval=True,
         )
 
     def _make_action(
@@ -280,7 +275,6 @@ class ChannelAgent:
         reason: str,
         payload: dict[str, object],
         risk_increasing: bool,
-        requires_admin_approval: bool,
     ) -> ProposedAction:
         base_signal_id = signal_id or "global"
         action_id = make_action_id(base_signal_id, action_type.value, len(self.debug_events) + 1)
@@ -289,7 +283,6 @@ class ChannelAgent:
             action_type=action_type,
             signal_id=signal_id,
             risk_increasing=risk_increasing,
-            requires_admin_approval=requires_admin_approval,
             confidence=confidence,
             reason=reason,
             payload=payload,

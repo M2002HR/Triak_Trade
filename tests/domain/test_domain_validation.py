@@ -10,11 +10,10 @@ from triak_trade.domain.enums import (
     SignalAction,
     TradeSide,
 )
-from triak_trade.domain.models import ParsedSignal, ProposedAction
+from triak_trade.domain.models import ParsedSignal
 from triak_trade.domain.validation import (
     is_open_signal_structurally_complete,
     is_risk_increasing_action,
-    requires_admin_approval,
 )
 
 NOW = datetime.now(tz=timezone.utc)
@@ -61,18 +60,3 @@ def test_risk_increasing_action_true_cases() -> None:
 
 def test_risk_increasing_action_false_for_move_stop_loss() -> None:
     assert is_risk_increasing_action(ProposedActionType.MOVE_STOP_LOSS) is False
-
-
-def test_requires_admin_approval_calculated() -> None:
-    action = ProposedAction(
-        action_id="act-1",
-        action_type=ProposedActionType.CREATE_ORDER,
-        signal_id="sig-1",
-        risk_increasing=True,
-        requires_admin_approval=True,
-        confidence=Decimal("0.8"),
-        reason="entry",
-        payload={},
-        created_at=NOW,
-    )
-    assert requires_admin_approval(action) is True

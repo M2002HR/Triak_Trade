@@ -56,10 +56,7 @@ class EntryType(str, Enum):
 
 class SignalStatus(str, Enum):
     PENDING_CONSOLIDATION = "pending_consolidation"
-    PROPOSED_TO_ADMIN = "proposed_to_admin"
-    APPROVED = "approved"
     REJECTED = "rejected"
-    WATCH_ONLY = "watch_only"
     ORDER_PLANNED = "order_planned"
     ORDER_SUBMITTED = "order_submitted"
     OPEN = "open"
@@ -80,13 +77,6 @@ class ProposedActionType(str, Enum):
     CLOSE_POSITION_PARTIAL = "close_position_partial"
     CLOSE_POSITION_FULL = "close_position_full"
     IGNORE_MESSAGE = "ignore_message"
-    REQUEST_ADMIN_CONFIRMATION = "request_admin_confirmation"
-
-
-class AdminDecisionType(str, Enum):
-    APPROVE = "approve"
-    REJECT = "reject"
-    WATCH_ONLY = "watch_only"
 
 
 class CandleSource(str, Enum):

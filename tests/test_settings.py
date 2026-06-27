@@ -25,12 +25,6 @@ def test_invalid_execution_mode_is_rejected() -> None:
     else:
         raise AssertionError("Expected ValidationError")
 
-
-def test_admin_ids_are_parsed() -> None:
-    settings = Settings(ADMIN_USER_IDS="1, 2,3")
-    assert settings.ADMIN_USER_IDS == [1, 2, 3]
-
-
 def test_api_keys_are_parsed() -> None:
     settings = Settings(GEMINI_API_KEYS="a,b", GROQ_API_KEYS="x, y")
     assert [s.get_secret_value() for s in settings.GEMINI_API_KEYS] == ["a", "b"]
@@ -40,8 +34,3 @@ def test_api_keys_are_parsed() -> None:
 def test_telegram_live_channels_are_parsed() -> None:
     settings = Settings(TELEGRAM_LIVE_CHANNELS="a, b,https://t.me/Tofan_Trade")
     assert settings.TELEGRAM_LIVE_CHANNELS == ["a", "b", "https://t.me/Tofan_Trade"]
-
-
-def test_admin_telegram_usernames_are_parsed() -> None:
-    settings = Settings(ADMIN_TELEGRAM_USERNAMES="@A, b")
-    assert settings.ADMIN_TELEGRAM_USERNAMES == ["@A", "b"]

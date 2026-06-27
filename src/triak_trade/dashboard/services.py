@@ -9,7 +9,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from triak_trade.admin_bot.runtime import get_admin_bot_status, tail_admin_bot_logs
 from triak_trade.backtesting import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.engine import BacktestEngine
 from triak_trade.backtesting.models import BacktestRequest
@@ -259,17 +258,12 @@ class DashboardService:
         )
 
     def overview(self) -> dict[str, Any]:
-        admin_status = get_admin_bot_status(self.settings)
         log_status = TelegramLogChannelClient(settings=self.settings).safe_status()
         latest_report = self.real_runner.report_store.latest()
         auto_mode = self.state.get_auto_mode()
         kill_switch = self.state.get_kill_switch()
         return {
             "cards": [
-                {
-                    "label": "Admin Bot",
-                    "value": "running" if admin_status["running"] else "stopped",
-                },
                 {
                     "label": "Telegram Log Channel",
                     "value": "enabled" if log_status["enabled"] else "disabled",
@@ -289,12 +283,10 @@ class DashboardService:
                 {"label": "Kill Switch", "value": "active" if kill_switch.enabled else "inactive"},
                 {"label": "Auto Mode", "value": "active" if auto_mode.enabled else "inactive"},
             ],
-            "admin_status": admin_status,
             "log_status": log_status,
             "auto_mode": auto_mode,
             "kill_switch": kill_switch,
             "recent_audit_events": [],
-            "recent_proposed_actions": [],
         }
 
     def backtest_bootstrap(self) -> dict[str, Any]:
@@ -649,12 +641,9 @@ class DashboardService:
     def logs(self) -> dict[str, Any]:
         return {
             "log_channel": TelegramLogChannelClient(settings=self.settings).safe_status(),
-            "runtime_logs": tail_admin_bot_logs(self.settings, lines=100),
+            "runtime_logs": self._tail_dashboard_logs(lines=100),
             "audit_events": [],
         }
-
-    def approvals(self) -> dict[str, Any]:
-        return {"pending_actions": [], "empty_state": "No pending proposed actions."}
 
     def safe_settings(self) -> dict[str, Any]:
         token = self.settings.DASHBOARD_ADMIN_TOKEN.get_secret_value()
@@ -666,7 +655,7 @@ class DashboardService:
             "app_name": self.settings.APP_NAME,
             "app_env": self.settings.APP_ENV,
             "log_level": self.settings.LOG_LEVEL,
-            "live_trading_blocked": True,
+            "live_trading_blocked": not self.settings.LIVE_TRADING_LIVE_MODE_ENABLED,
             "execution_mode": self.settings.EXECUTION_MODE,
             "dashboard_enabled": self.settings.DASHBOARD_ENABLED,
             "dashboard_auth_enabled": self.settings.DASHBOARD_AUTH_ENABLED,
@@ -688,6 +677,12 @@ class DashboardService:
         key = self.settings.TOOBIT_API_KEY.get_secret_value()
         secret = self.settings.TOOBIT_API_SECRET.get_secret_value()
         return bool(key and key != "replace_me" and secret and secret != "replace_me")
+
+    def _tail_dashboard_logs(self, *, lines: int) -> list[str]:
+        path = Path(self.settings.DASHBOARD_LOG_FILE)
+        if not path.exists():
+            return []
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:

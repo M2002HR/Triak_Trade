@@ -8,8 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from triak_trade.core.symbols import canonical_market_symbol
 from triak_trade.domain.enums import (
-    AdminDecisionType,
     BacktestFillPolicy,
     CandleSource,
     EntryType,
@@ -111,7 +111,9 @@ class ParsedSignal(BaseModel):
         if value is None:
             return None
         normalized = value.strip().upper()
-        return normalized or None
+        if not normalized:
+            return None
+        return canonical_market_symbol(normalized) or normalized
 
     @field_validator("confidence")
     @classmethod
@@ -179,7 +181,6 @@ class ProposedAction(BaseModel):
     action_type: ProposedActionType
     signal_id: str | None
     risk_increasing: bool
-    requires_admin_approval: bool
     confidence: Decimal
     reason: str
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -199,28 +200,6 @@ class ProposedAction(BaseModel):
         if not stripped:
             raise ValueError("reason cannot be empty")
         return stripped
-
-    @model_validator(mode="after")
-    def validate_admin_requirement(self) -> ProposedAction:
-        if self.risk_increasing and not self.requires_admin_approval:
-            raise ValueError("risk increasing actions must require admin approval")
-        return self
-
-
-class AdminDecision(BaseModel):
-    action_id: str
-    decision: AdminDecisionType
-    admin_user_id: int
-    reason: str | None
-    decided_at: datetime
-
-    @field_validator("admin_user_id")
-    @classmethod
-    def validate_admin_user_id(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("admin_user_id must be positive")
-        return value
-
 
 class Candle(BaseModel):
     symbol: str

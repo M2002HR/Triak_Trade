@@ -14,21 +14,6 @@ import httpx
 import typer
 
 from triak_trade import __version__
-from triak_trade.admin_bot.auth import AdminAuthService, normalize_username
-from triak_trade.admin_bot.callbacks import parse_admin_callback
-from triak_trade.admin_bot.errors import AdminUnauthorizedError
-from triak_trade.admin_bot.formatter import AdminActionFormatter
-from triak_trade.admin_bot.runtime import (
-    dump_json,
-    get_admin_bot_status,
-    run_admin_bot_smoke_test,
-    run_admin_bot_sync,
-    start_admin_bot_process,
-    stop_admin_bot_process,
-    tail_admin_bot_logs,
-)
-from triak_trade.admin_bot.service import AdminApprovalService
-from triak_trade.admin_bot.telegram_bot import TelegramAdminBot
 from triak_trade.agents.channel_agent import ChannelAgent
 from triak_trade.agents.clock import FakeClock
 from triak_trade.agents.context import ChannelContext
@@ -68,10 +53,8 @@ from triak_trade.db.engine import build_engine_from_settings
 from triak_trade.domain.enums import (
     BacktestFillPolicy,
     CandleSource,
-    ProposedActionType,
-    SignalStatus,
 )
-from triak_trade.domain.models import Candle, ProposedAction, RawTelegramMessage, SignalState
+from triak_trade.domain.models import Candle, RawTelegramMessage
 from triak_trade.exchange.toobit.account import ToobitAccountClient
 from triak_trade.exchange.toobit.client import ToobitClient
 from triak_trade.exchange.toobit.demo_execution import DemoExecutionAdapter
@@ -101,6 +84,10 @@ def _load_settings() -> Settings:
     settings = get_settings()
     configure_logging(settings)
     return settings
+
+
+def _dump_json(payload: object) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def _build_toobit_client(settings: Settings) -> ToobitClient:
@@ -273,7 +260,7 @@ def agent_dry_run_cmd() -> None:
             "immediate_actions": len(immediate_actions),
             "tick_actions": len(tick_actions),
         },
-        "safety": {"requires_admin_approval_default": True, "no_execution": True},
+        "safety": {"no_execution": True},
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -404,7 +391,7 @@ def ai_classify_dry_run_cmd(message: str, real_gateway: bool = typer.Option(Fals
 def ai_gateway_check_cmd() -> None:
     """Show non-secret AI gateway configuration status."""
     settings = _load_settings()
-    typer.echo(dump_json(ai_gateway_safe_config(settings)))
+    typer.echo(_dump_json(ai_gateway_safe_config(settings)))
 
 
 @app.command("ai-gateway-start")
@@ -415,21 +402,21 @@ def ai_gateway_start_cmd() -> None:
         result = start_ai_gateway_process(settings)
     except RuntimeError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    typer.echo(dump_json(result))
+    typer.echo(_dump_json(result))
 
 
 @app.command("ai-gateway-status")
 def ai_gateway_status_cmd() -> None:
     """Print non-secret AI gateway runtime status."""
     settings = _load_settings()
-    typer.echo(dump_json(ai_gateway_status(settings)))
+    typer.echo(_dump_json(ai_gateway_status(settings)))
 
 
 @app.command("ai-gateway-stop")
 def ai_gateway_stop_cmd() -> None:
     """Stop local Ajil gateway background process if present."""
     settings = _load_settings()
-    typer.echo(dump_json(stop_ai_gateway_process(settings)))
+    typer.echo(_dump_json(stop_ai_gateway_process(settings)))
 
 
 @app.command("ai-gateway-restart")
@@ -441,7 +428,7 @@ def ai_gateway_restart_cmd() -> None:
         started = start_ai_gateway_process(settings)
     except RuntimeError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    typer.echo(dump_json({"stopped": stopped, "started": started}))
+    typer.echo(_dump_json({"stopped": stopped, "started": started}))
 
 
 @app.command("ai-gateway-logs")
@@ -854,7 +841,6 @@ def real_backtest_check_cmd() -> None:
     settings = _load_settings()
     runner = _build_real_backtest_runner(settings)
     readiness = runner.readiness().model_dump(mode="json")
-    readiness["admin_bot_running"] = get_admin_bot_status(settings)["running"]
     readiness["dashboard_running"] = dashboard_status(settings)["running"]
     typer.echo(json.dumps(readiness, indent=2, sort_keys=True))
 
@@ -955,7 +941,7 @@ def real_backtest_tofan_cmd(
         interval=interval,
         max_messages=max_messages,
         use_ai=use_ai,
-        send_telegram_summary=settings.REAL_BACKTEST_SEND_TO_ADMIN_BOT,
+        send_telegram_summary=False,
         send_log_channel=settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
     )
 
@@ -969,165 +955,6 @@ def backtest_show_latest_cmd() -> None:
     if payload is None:
         raise typer.BadParameter("No real backtest report found yet.")
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@app.command("admin-check")
-def admin_check_cmd() -> None:
-    settings = _load_settings()
-    usernames = [normalize_username(item) for item in settings.ADMIN_TELEGRAM_USERNAMES]
-    payload = {
-        "bot_token_present": bool(
-            settings.TELEGRAM_BOT_TOKEN.get_secret_value()
-            and settings.TELEGRAM_BOT_TOKEN.get_secret_value() != "replace_me"
-        ),
-        "admin_usernames_count": len(usernames),
-        "admin_usernames": sorted(usernames),
-        "deprecated_admin_user_ids_present": len(settings.ADMIN_USER_IDS) > 0,
-        "integration_guard": settings.RUN_TELEGRAM_BOT_INTEGRATION_TESTS == 1,
-    }
-    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@app.command("admin-format-dry-run")
-def admin_format_dry_run_cmd() -> None:
-    _load_settings()
-    formatter = AdminActionFormatter()
-    now = datetime.now(timezone.utc)
-    action = ProposedAction(
-        action_id="test_action_123",
-        action_type=ProposedActionType.CREATE_ORDER,
-        signal_id="sig_1",
-        risk_increasing=True,
-        requires_admin_approval=True,
-        confidence=Decimal("0.81"),
-        reason="consolidation completed",
-        payload={"channel_id": "chan", "symbol": "BTCUSDT", "side": "LONG", "entry": "68000-68200"},
-        created_at=now,
-    )
-    signal = SignalState(
-        signal_id="sig_1",
-        channel_id="chan",
-        status=SignalStatus.PENDING_CONSOLIDATION,
-        created_from_message_id=1,
-        related_message_ids=[1],
-        current_signal=None,
-        version=1,
-        created_at=now,
-        updated_at=now,
-        expires_at=None,
-    )
-    formatted = formatter.format_action(action, signal=signal)
-    payload = {
-        "text": formatted.text,
-        "buttons": [button.__dict__ for button in formatted.buttons],
-    }
-    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@app.command("admin-callback-dry-run")
-def admin_callback_dry_run_cmd(
-    callback_data: str,
-    username: str = typer.Option(..., "--username"),
-) -> None:
-    settings = _load_settings()
-    auth = AdminAuthService(settings.ADMIN_TELEGRAM_USERNAMES)
-    try:
-        auth.require_authorized_username(username)
-    except AdminUnauthorizedError as exc:
-        raise typer.BadParameter("username is not authorized") from exc
-    parsed = parse_admin_callback(callback_data)
-    payload = {
-        "authorized": True,
-        "username": normalize_username(username),
-        "action_id": parsed.action_id,
-        "decision": parsed.decision.value,
-    }
-    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@app.command("admin-register-dry-run")
-def admin_register_dry_run_cmd(
-    username: str = typer.Option(...),
-    chat_id: int = typer.Option(...),
-) -> None:
-    settings = _load_settings()
-    bot = TelegramAdminBot(
-        bot_token=settings.TELEGRAM_BOT_TOKEN.get_secret_value(),
-        parse_mode=settings.ADMIN_BOT_PARSE_MODE,
-        disable_web_preview=settings.ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW,
-    )
-    reg = bot.handle_start(username=username, chat_id=chat_id)
-    payload = {"username": reg.username, "chat_id": reg.chat_id, "registered": True}
-    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@app.command("admin-send-test")
-def admin_send_test_cmd(
-    real: bool = typer.Option(False, "--real"),
-    chat_id: int | None = None,
-) -> None:
-    settings = _load_settings()
-    if not real:
-        raise typer.BadParameter("Blocked by default. Pass --real and enable guard.")
-    if settings.RUN_TELEGRAM_BOT_INTEGRATION_TESTS != 1:
-        raise typer.BadParameter(
-            "Real admin bot mode requires RUN_TELEGRAM_BOT_INTEGRATION_TESTS=1 in .env.local"
-        )
-    if not settings.ADMIN_TELEGRAM_USERNAMES:
-        raise typer.BadParameter("ADMIN_TELEGRAM_USERNAMES is required")
-
-    token = settings.TELEGRAM_BOT_TOKEN.get_secret_value()
-    if not token or token == "replace_me":
-        raise typer.BadParameter("TELEGRAM_BOT_TOKEN is required")
-
-    bot = TelegramAdminBot(
-        bot_token=token,
-        parse_mode=settings.ADMIN_BOT_PARSE_MODE,
-        disable_web_preview=settings.ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW,
-    )
-    target_chat_id = chat_id
-    target_username: str | None = None
-    if target_chat_id is None:
-        normalized = normalize_username(settings.ADMIN_TELEGRAM_USERNAMES[0])
-        reg = bot.registrations.get(normalized)
-        if reg is None:
-            raise typer.BadParameter(
-                "Admin must start the bot first or pass --chat-id for guarded test."
-            )
-        target_chat_id = reg.chat_id
-        target_username = normalized
-
-    response = asyncio.run(
-        bot.send_test_message(target_chat_id, settings.ADMIN_BOT_TEST_MESSAGE_TEXT)
-    )
-    result = response.get("result")
-    message_id = result.get("message_id") if isinstance(result, dict) else None
-    payload = {
-        "message_sent": True,
-        "recipient_username": target_username,
-        "telegram_message_id": message_id,
-    }
-    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@app.command("admin-backtest-dry-run")
-def admin_backtest_dry_run_cmd(username: str = typer.Option(..., "--username")) -> None:
-    settings = _load_settings()
-    service = AdminApprovalService(
-        auth=AdminAuthService(settings.ADMIN_TELEGRAM_USERNAMES),
-        bot=TelegramAdminBot(
-            bot_token=settings.TELEGRAM_BOT_TOKEN.get_secret_value(),
-            parse_mode=settings.ADMIN_BOT_PARSE_MODE,
-            disable_web_preview=settings.ADMIN_BOT_DISABLE_WEB_PAGE_PREVIEW,
-        ),
-        settings=settings,
-    )
-    try:
-        menu = service.backtest_menu(username)
-        run = service.run_backtest_dry(username)
-    except AdminUnauthorizedError as exc:
-        raise typer.BadParameter("username is not authorized") from exc
-    typer.echo(json.dumps({"menu": menu, "run": run}, indent=2, sort_keys=True))
 
 
 @app.command("log-channel-check")
@@ -1285,86 +1112,6 @@ def dashboard_smoke_test_cmd() -> None:
 def dashboard_token_hint_cmd() -> None:
     """Show where the local dashboard token is stored without printing it."""
     typer.echo(dashboard_token_hint())
-
-
-@app.command("run-admin-bot")
-def run_admin_bot_cmd(
-    real: bool = typer.Option(False, "--real"),
-    watch: bool = typer.Option(False, "--watch"),
-    once: bool = typer.Option(False, "--once"),
-    max_runtime_seconds: int | None = typer.Option(None, "--max-runtime-seconds", min=1),
-) -> None:
-    """Run the admin bot runtime in foreground; fake mode is default."""
-    settings = _load_settings()
-    try:
-        result = run_admin_bot_sync(
-            settings,
-            real=real,
-            watch=watch,
-            once=once,
-            max_runtime_seconds=max_runtime_seconds,
-        )
-    except RuntimeError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    typer.echo(dump_json(result))
-
-
-@app.command("admin-bot-start")
-def admin_bot_start_cmd(
-    real: bool = typer.Option(False, "--real"),
-    watch: bool = typer.Option(False, "--watch"),
-) -> None:
-    """Start admin bot as a background process."""
-    settings = _load_settings()
-    try:
-        result = start_admin_bot_process(settings, real=real, watch=watch)
-    except RuntimeError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    typer.echo(dump_json(result))
-
-
-@app.command("admin-bot-status")
-def admin_bot_status_cmd() -> None:
-    """Print non-secret admin bot runtime status."""
-    settings = _load_settings()
-    typer.echo(dump_json(get_admin_bot_status(settings)))
-
-
-@app.command("admin-bot-stop")
-def admin_bot_stop_cmd() -> None:
-    """Stop background admin bot process if present."""
-    settings = _load_settings()
-    typer.echo(dump_json(stop_admin_bot_process(settings)))
-
-
-@app.command("admin-bot-restart")
-def admin_bot_restart_cmd(
-    real: bool = typer.Option(False, "--real"),
-    watch: bool = typer.Option(False, "--watch"),
-) -> None:
-    """Restart background admin bot process."""
-    settings = _load_settings()
-    stopped = stop_admin_bot_process(settings)
-    try:
-        started = start_admin_bot_process(settings, real=real, watch=watch)
-    except RuntimeError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    typer.echo(dump_json({"stopped": stopped, "started": started}))
-
-
-@app.command("admin-bot-logs")
-def admin_bot_logs_cmd(lines: int = typer.Option(100, "--lines", min=1)) -> None:
-    """Tail redacted admin bot runtime logs."""
-    settings = _load_settings()
-    for line in tail_admin_bot_logs(settings, lines=lines):
-        typer.echo(line)
-
-
-@app.command("admin-bot-smoke-test")
-def admin_bot_smoke_test_cmd() -> None:
-    """Run a fake admin bot smoke test without network calls."""
-    settings = _load_settings()
-    typer.echo(dump_json(run_admin_bot_smoke_test(settings)))
 
 
 @app.command("verify-system")

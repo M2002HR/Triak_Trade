@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from triak_trade.domain.enums import ProposedActionType, SignalAction, TradeSide
-from triak_trade.domain.models import ParsedSignal, ProposedAction
+from triak_trade.domain.models import ParsedSignal
 
 _RISK_INCREASING_ACTIONS = {
     ProposedActionType.CREATE_ORDER,
@@ -16,12 +16,6 @@ _RISK_INCREASING_ACTIONS = {
 def is_risk_increasing_action(action_type: ProposedActionType) -> bool:
     """Return conservative risk-increase classification."""
     return action_type in _RISK_INCREASING_ACTIONS
-
-
-def requires_admin_approval(action: ProposedAction) -> bool:
-    """Compute whether an action needs admin approval."""
-    return action.requires_admin_approval or is_risk_increasing_action(action.action_type)
-
 
 def is_open_signal_structurally_complete(signal: ParsedSignal) -> tuple[bool, str | None]:
     """Check minimal structural completeness for OPEN signals."""

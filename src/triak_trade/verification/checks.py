@@ -8,14 +8,11 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from pathlib import Path
 
 import httpx
 
 from triak_trade import __version__
-from triak_trade.admin_bot.auth import AdminAuthService
-from triak_trade.admin_bot.formatter import AdminActionFormatter
 from triak_trade.agents.channel_agent import ChannelAgent
 from triak_trade.agents.clock import FakeClock
 from triak_trade.ai.classifier import AIMessageClassifier
@@ -24,8 +21,7 @@ from triak_trade.backtesting.engine import run_fixture_backtest
 from triak_trade.cache.redis_client import build_redis_from_settings
 from triak_trade.config.settings import Settings
 from triak_trade.db.engine import build_engine_from_settings
-from triak_trade.domain.enums import ProposedActionType
-from triak_trade.domain.models import ProposedAction, RawTelegramMessage
+from triak_trade.domain.models import RawTelegramMessage
 from triak_trade.exchange.toobit.account import ToobitAccountClient
 from triak_trade.exchange.toobit.client import ToobitClient
 from triak_trade.market_data.binance_public import BinancePublicFuturesProvider
@@ -51,7 +47,6 @@ def safe_checks() -> list[CheckCallable]:
         telegram_dry_run_check,
         market_data_fake_check,
         toobit_safety_check,
-        admin_bot_dry_run_check,
         backtest_fixture_check,
     ]
 
@@ -358,35 +353,6 @@ def toobit_safety_check(settings: Settings) -> VerificationCheckResult:
     )
 
 
-def admin_bot_dry_run_check(settings: Settings) -> VerificationCheckResult:
-    started = time.perf_counter()
-    auth = AdminAuthService(settings.ADMIN_TELEGRAM_USERNAMES)
-    formatter = AdminActionFormatter()
-    action = ProposedAction(
-        action_id="verify_action",
-        action_type=ProposedActionType.CREATE_ORDER,
-        signal_id="sig",
-        risk_increasing=True,
-        requires_admin_approval=True,
-        confidence=Decimal("0.8"),
-        reason="verification",
-        payload={"symbol": "BTCUSDT"},
-        created_at=datetime.now(timezone.utc),
-    )
-    formatted = formatter.format_action(action)
-    authorized = auth.is_authorized_username(settings.ADMIN_TELEGRAM_USERNAMES[0])
-    unauthorized = auth.is_authorized_username("@not_allowed")
-    ok = authorized and not unauthorized and "Demo only" in formatted.text
-    return _result(
-        name="admin_bot_dry_run",
-        status=VerificationStatus.PASS if ok else VerificationStatus.FAIL,
-        category="safe",
-        summary="admin auth and formatter work",
-        started=started,
-        details={"buttons": len(formatted.buttons), "authorized_default_admin": authorized},
-    )
-
-
 def backtest_fixture_check(settings: Settings) -> VerificationCheckResult:
     started = time.perf_counter()
     report_json, summary = run_fixture_backtest()
@@ -656,18 +622,13 @@ def ai_gateway_real_check(settings: Settings) -> VerificationCheckResult:
 
 def telegram_bot_real_check(settings: Settings) -> VerificationCheckResult:
     started = time.perf_counter()
-    if (
-        settings.RUN_SYSTEM_REAL_SMOKE_TESTS != 1
-        or settings.RUN_TELEGRAM_BOT_INTEGRATION_TESTS != 1
-    ):
-        return _skip("telegram_bot_real", started, "enable system and Telegram bot guards")
     return _result(
         name="telegram_bot_real",
         status=VerificationStatus.SKIP,
         category="real",
-        summary="no registered admin chat_id available in verification context",
+        summary="legacy bot verification path removed from active runtime",
         started=started,
-        next_action="Admin must start the bot or provide chat_id.",
+        next_action="use Telegram log-channel guarded checks instead",
     )
 
 

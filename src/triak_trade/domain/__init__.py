@@ -1,7 +1,6 @@
 """Domain models and contracts."""
 
 from triak_trade.domain.enums import (
-    AdminDecisionType,
     BacktestFillPolicy,
     CandleSource,
     EntryType,
@@ -14,7 +13,6 @@ from triak_trade.domain.enums import (
 )
 from triak_trade.domain.ids import make_action_id, make_client_order_id, make_signal_id
 from triak_trade.domain.models import (
-    AdminDecision,
     BacktestReport,
     Candle,
     ChannelMetrics,
@@ -27,8 +25,6 @@ from triak_trade.domain.models import (
 )
 
 __all__ = [
-    "AdminDecision",
-    "AdminDecisionType",
     "BacktestFillPolicy",
     "BacktestReport",
     "Candle",
