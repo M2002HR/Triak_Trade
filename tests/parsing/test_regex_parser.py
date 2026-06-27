@@ -82,7 +82,7 @@ def test_extract_noisy_markdown_signal_fields() -> None:
         """
     )
     assert parsed.action is SignalAction.OPEN
-    assert parsed.symbol == "ZAMAUSD"
+    assert parsed.symbol == "ZAMAUSDT"
     assert parsed.entry_type is EntryType.MARKET
     assert parsed.stop_loss == Decimal("0.03495")
     assert parsed.take_profits == [
@@ -92,3 +92,13 @@ def test_extract_noisy_markdown_signal_fields() -> None:
         Decimal("0.04100"),
     ]
     assert parsed.leverage == 20
+
+
+def test_extract_persian_market_tag_as_market_entry() -> None:
+    message = "**$BTC**\n#SHORT\n#مارکت\nاهرم :70×"  # noqa: RUF001
+    parsed = _parse(message)
+    assert parsed.action is SignalAction.OPEN
+    assert parsed.symbol == "BTCUSDT"
+    assert parsed.side is TradeSide.SHORT
+    assert parsed.entry_type is EntryType.MARKET
+    assert parsed.leverage == 70

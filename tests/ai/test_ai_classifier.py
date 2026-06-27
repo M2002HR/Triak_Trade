@@ -366,3 +366,28 @@ def test_ai_classifier_backfills_missing_stop_loss_from_formatted_message() -> N
     assert result.parsed_signal.entry_type.value == "market"
     assert result.parsed_signal.stop_loss == Decimal("0.386")
     assert "regex_supplement=stop_loss" in result.debug_notes
+
+
+def test_ai_classifier_backfills_symbol_from_ticker_tag_without_using_side_tag() -> None:
+    payload = _result_payload("NEW_SIGNAL", "open")
+    payload["symbol"] = None
+    payload["side"] = "short"
+    payload["entry_type"] = "market"
+    payload["entry_low"] = None
+    payload["entry_high"] = None
+    payload["stop_loss"] = None
+    payload["take_profits"] = []
+    payload["leverage"] = 70
+    classifier = AIMessageClassifier(
+        settings=Settings(_env_file=None),
+        gateway_client=_client(payload),
+    )
+    message = "**$BTC**** 🕯\n****#SHORT****\n****#مارکت****\nاهرم :70× 🔫**"  # noqa: RUF001
+    result = classifier.classify(
+        _raw(message),
+        _context(),
+    )
+    assert result.parsed_signal.action is SignalAction.OPEN
+    assert result.parsed_signal.symbol == "BTCUSDT"
+    assert result.parsed_signal.entry_type.value == "market"
+    assert "regex_supplement=symbol" in result.debug_notes

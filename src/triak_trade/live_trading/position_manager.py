@@ -57,58 +57,32 @@ class LivePositionManager:
         strategy: TradeStrategy,
     ) -> PositionSizingResult:
         notes: list[str] = []
-        is_synthetic_stop = False
-
         side = signal.side
+        if current_balance <= Decimal("0"):
+            raise ValueError("Current account balance is zero; cannot size position")
+
         leverage_raw = signal.leverage or self.settings.LIVE_TRADING_DEFAULT_SIGNAL_LEVERAGE
-        leverage = min(leverage_raw, self.settings.LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE)
-        if leverage_raw > self.settings.LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE:
+        leverage = min(
+            max(leverage_raw, 1),
+            self.settings.LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE,
+        )
+        if leverage_raw != leverage:
             notes.append(
-                f"leverage clamped {leverage_raw}x → {leverage}x "
+                f"leverage clamped {leverage_raw}x -> {leverage}x "
                 f"(max={self.settings.LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE})"
             )
 
-        # Determine entry price
         entry_price = _resolve_entry_price(signal)
         if entry_price is None or entry_price <= 0:
             raise ValueError("Cannot determine entry price for position sizing")
 
-        # Determine stop_loss
-        stop_loss = signal.stop_loss
-        if stop_loss is None:
-            stop_loss = _synthetic_stop(
-                side=side,
-                entry_price=entry_price,
-                stop_pct=self.settings.LIVE_TRADING_DEFAULT_STOP_PCT,
-            )
-            is_synthetic_stop = True
-            notes.append(
-                "synthetic SL at "
-                f"{stop_loss} ({self.settings.LIVE_TRADING_DEFAULT_STOP_PCT}% from entry)"
-            )
-
-        # Determine take_profits
-        take_profits = list(signal.take_profits)
-        if not take_profits and stop_loss is not None:
-            try:
-                take_profits = strategy.get_synthetic_take_profits(
-                    side=side,
-                    entry_price=entry_price,
-                    stop_loss=stop_loss,
-                    notional_value=Decimal("0"),
-                )
-                notes.append(f"synthetic TPs generated: {[str(t) for t in take_profits]}")
-            except Exception:
-                notes.append("failed to generate synthetic TPs")
-
-        # Position sizing
-        allocation_pct = (session.risk_per_trade_pct / Decimal(str(leverage))).quantize(
-            Decimal("0.0001")
+        allocation_pct = _allocation_pct_for_signal(
+            allocation_factor_pct=session.risk_per_trade_pct,
+            leverage=Decimal(str(leverage)),
+            min_allocation_pct=self.settings.LIVE_TRADING_MIN_ALLOCATION_PCT,
+            max_allocation_pct=self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT,
         )
-        allocation_pct = max(
-            self.settings.LIVE_TRADING_MIN_ALLOCATION_PCT,
-            min(allocation_pct, self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT),
-        )
+        notes.append(f"allocation_pct={allocation_pct}")
         allocation_amount = current_balance * allocation_pct / Decimal("100")
         quantity = (allocation_amount * Decimal(str(leverage)) / entry_price).quantize(
             Decimal("0.00000001")
@@ -116,30 +90,67 @@ class LivePositionManager:
         if quantity <= 0:
             raise ValueError("Computed quantity is zero or negative")
 
-        margin = (entry_price * quantity / Decimal(str(leverage))).quantize(Decimal("0.00000001"))
+        stop_loss = signal.stop_loss
+        is_synthetic_stop = False
+        if stop_loss is None:
+            if strategy is not None:
+                stop_loss = strategy.get_synthetic_stop(
+                    side=side,
+                    entry_price=entry_price,
+                    balance_at_entry=current_balance,
+                    quantity=quantity,
+                    fee_rate_pct=self.settings.LIVE_TRADING_FEE_RATE_PCT,
+                )
+                notes.append(f"synthetic_stop_strategy={getattr(strategy, 'name', 'unknown')}")
+            else:
+                stop_loss = _synthetic_stop(
+                    side=side,
+                    entry_price=entry_price,
+                    stop_pct=self.settings.LIVE_TRADING_DEFAULT_STOP_PCT,
+                )
+                notes.append(f"synthetic_stop_pct={self.settings.LIVE_TRADING_DEFAULT_STOP_PCT}")
+                stop_loss, quantity, synthetic_stop_notes = _cap_synthetic_stop_loss_risk(
+                    side=side,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    quantity=quantity,
+                    balance_at_entry=current_balance,
+                    fee_rate_pct=self.settings.LIVE_TRADING_FEE_RATE_PCT,
+                    max_loss_pct_of_balance=self.settings.LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT,
+                )
+                notes.extend(synthetic_stop_notes)
+            is_synthetic_stop = True
+        if quantity <= 0:
+            raise ValueError("Quantity became zero after synthetic stop risk capping")
 
-        # Cap synthetic stop loss to max loss
-        if is_synthetic_stop:
-            max_loss = (
-                current_balance
-                * self.settings.LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT
-                / Decimal("100")
+        take_profits = _sanitize_take_profits(
+            take_profits=list(signal.take_profits),
+            side="long" if side.is_long else "short",
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+        )
+        if len(take_profits) < len(signal.take_profits):
+            notes.append(f"tp_direction_filtered={len(signal.take_profits) - len(take_profits)}")
+        if not take_profits and strategy is not None and stop_loss is not None:
+            strategy_tps = strategy.get_synthetic_take_profits(
+                side=side,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                notional_value=entry_price * quantity,
             )
-            fee_rate = self.settings.LIVE_TRADING_FEE_RATE_PCT / Decimal("100")
-            entry_fee = entry_price * quantity * fee_rate
-            available = max_loss - entry_fee * 2
-            if available > 0:
-                max_dist = available / quantity
-                if side.is_long:
-                    capped_stop = entry_price - max_dist
-                    if capped_stop > stop_loss:
-                        stop_loss = capped_stop
-                        notes.append(f"synthetic SL capped by max-loss budget to {stop_loss:.6f}")
-                else:
-                    capped_stop = entry_price + max_dist
-                    if capped_stop < stop_loss:
-                        stop_loss = capped_stop
-                        notes.append(f"synthetic SL capped by max-loss budget to {stop_loss:.6f}")
+            take_profits = _sanitize_take_profits(
+                take_profits=strategy_tps,
+                side="long" if side.is_long else "short",
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+            )
+            if take_profits:
+                notes.append(
+                    "synthetic_take_profits_strategy="
+                    + ",".join(str(item) for item in take_profits)
+                )
+
+        margin = (entry_price * quantity / Decimal(str(leverage))).quantize(Decimal("0.00000001"))
 
         return PositionSizingResult(
             quantity=quantity,
@@ -237,6 +248,27 @@ class LivePositionManager:
         trade.take_profits = trade.take_profits[: trade.targets_hit] + sanitized
         message.notes.append(f"TPs updated: {[str(t) for t in sanitized]}")
         trade.add_attribution(message)
+
+    def update_leverage(
+        self,
+        *,
+        trade: LiveTrade,
+        new_leverage: int | None,
+        message: MessageAttribution,
+    ) -> bool:
+        if new_leverage is None or new_leverage <= 0:
+            return False
+        clamped = min(new_leverage, self.settings.LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE)
+        trade.leverage = clamped
+        message.action = "set_leverage"
+        if clamped != new_leverage:
+            message.notes.append(
+                f"leverage clamped {new_leverage}x -> {clamped}x"
+            )
+        else:
+            message.notes.append(f"leverage updated to {clamped}x")
+        trade.add_attribution(message)
+        return True
 
     def apply_mark_price(
         self,
@@ -448,6 +480,99 @@ def _synthetic_stop(
     if side.is_long:
         return (entry_price - dist).quantize(Decimal("0.00000001"))
     return (entry_price + dist).quantize(Decimal("0.00000001"))
+
+
+def _allocation_pct_for_signal(
+    *,
+    allocation_factor_pct: Decimal,
+    leverage: Decimal,
+    min_allocation_pct: Decimal,
+    max_allocation_pct: Decimal,
+) -> Decimal:
+    effective_leverage = max(leverage, Decimal("1"))
+    raw_pct = allocation_factor_pct / effective_leverage
+    floor_pct = max(min_allocation_pct, Decimal("0"))
+    ceiling_pct = max(max_allocation_pct, floor_pct)
+    return min(max(raw_pct, floor_pct), ceiling_pct)
+
+
+def _cap_synthetic_stop_loss_risk(
+    *,
+    side: TradeSide,
+    entry_price: Decimal,
+    stop_loss: Decimal,
+    quantity: Decimal,
+    balance_at_entry: Decimal,
+    fee_rate_pct: Decimal,
+    max_loss_pct_of_balance: Decimal,
+) -> tuple[Decimal, Decimal, list[str]]:
+    notes: list[str] = []
+    if (
+        quantity <= Decimal("0")
+        or entry_price <= Decimal("0")
+        or balance_at_entry <= Decimal("0")
+    ):
+        return stop_loss, quantity, notes
+
+    max_loss_pct = max(max_loss_pct_of_balance, Decimal("0"))
+    risk_budget = balance_at_entry * max_loss_pct / Decimal("100")
+    if risk_budget <= Decimal("0"):
+        return stop_loss, quantity, notes
+
+    fee_rate = max(fee_rate_pct, Decimal("0")) / Decimal("100")
+    base_fee_loss = (
+        Decimal("2") * entry_price * quantity * fee_rate
+        if fee_rate > Decimal("0")
+        else Decimal("0")
+    )
+    if base_fee_loss >= risk_budget:
+        if fee_rate <= Decimal("0"):
+            return stop_loss, quantity, notes
+        denominator = Decimal("2") * entry_price * fee_rate
+        if denominator <= Decimal("0"):
+            return stop_loss, quantity, notes
+        capped_qty = risk_budget / denominator
+        if capped_qty <= Decimal("0"):
+            return stop_loss, Decimal("0"), ["synthetic_stop_risk_budget_exhausted_by_fees"]
+        notes.append(f"synthetic_stop_qty_capped_for_risk_budget={quantity}->{capped_qty}")
+        quantity = min(quantity, capped_qty)
+        base_fee_loss = (
+            Decimal("2") * entry_price * quantity * fee_rate
+            if fee_rate > Decimal("0")
+            else Decimal("0")
+        )
+
+    available_price_loss_budget = risk_budget - base_fee_loss
+    if available_price_loss_budget <= Decimal("0"):
+        capped_stop = entry_price
+        if stop_loss != capped_stop:
+            notes.append(
+                "synthetic_stop_risk_capped="
+                f"{stop_loss}->{capped_stop}; max_loss_pct={max_loss_pct_of_balance}"
+            )
+        return capped_stop, quantity, notes
+
+    distance_denominator = (
+        quantity * (Decimal("1") + fee_rate)
+        if side.is_short
+        else quantity * (Decimal("1") - fee_rate)
+    )
+    if distance_denominator <= Decimal("0"):
+        return stop_loss, quantity, notes
+    max_stop_distance = available_price_loss_budget / distance_denominator
+    current_stop_distance = abs(entry_price - stop_loss)
+    if current_stop_distance <= max_stop_distance:
+        return stop_loss, quantity, notes
+
+    if side.is_short:
+        capped_stop = entry_price + max_stop_distance
+    else:
+        capped_stop = max(entry_price - max_stop_distance, Decimal("0"))
+    notes.append(
+        "synthetic_stop_risk_capped="
+        f"{stop_loss}->{capped_stop}; max_loss_pct={max_loss_pct_of_balance}"
+    )
+    return capped_stop, quantity, notes
 
 
 def _calculate_unrealized_pnl(

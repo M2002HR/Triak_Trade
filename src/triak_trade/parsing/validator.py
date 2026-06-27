@@ -72,8 +72,15 @@ class ParsedSignalValidator:
             errors.append("missing symbol")
         if signal.side is TradeSide.UNKNOWN:
             errors.append("missing side")
-        if signal.entry_type.value != "market" and not (signal.entry_low or signal.entry_high):
-            errors.append("missing entry")
+        if (
+            signal.entry_type.value != "market"
+            and signal.entry_low is None
+            and signal.entry_high is None
+        ):
+            # Missing entry is treated as a market-style open downstream.
+            # The simulator/live engine resolves it from the first available
+            # candle or the current mark price instead of rejecting the signal.
+            pass
         if signal.confidence < min_confidence:
             errors.append("confidence too low")
         if signal.entry_low and signal.entry_high and signal.entry_low > signal.entry_high:
@@ -93,8 +100,12 @@ class ParsedSignalValidator:
             errors.append("missing symbol")
         if signal.side is TradeSide.UNKNOWN:
             errors.append("missing side")
-        if signal.entry_type.value != "market" and not (signal.entry_low or signal.entry_high):
-            errors.append("missing entry")
+        if (
+            signal.entry_type.value != "market"
+            and signal.entry_low is None
+            and signal.entry_high is None
+        ):
+            pass
         if signal.confidence < min_confidence:
             errors.append("confidence too low")
         if signal.entry_low and signal.entry_high and signal.entry_low > signal.entry_high:

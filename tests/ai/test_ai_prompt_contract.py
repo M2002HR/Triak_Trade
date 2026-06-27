@@ -29,3 +29,7 @@ def test_prompt_contract_contains_required_rules() -> None:
     assert "All price-like numeric fields must be strings" in prompt
     assert "ignored_numeric_tokens" in prompt
     assert "Never extract prices" in prompt
+    assert "$BTC" in prompt
+    assert "#SHORT" in prompt
+    assert "مارکت" in prompt
+    assert "do not downgrade it to AMBIGUOUS only because those fields are absent" in prompt

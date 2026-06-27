@@ -47,3 +47,11 @@ def test_markdown_links_and_decorations_are_removed_safely() -> None:
     assert "https://t.me/" not in normalized.normalized_text
     assert "**" not in normalized.normalized_text
     assert "BTCUSDT" in normalized.detected_symbols
+
+
+def test_side_tags_are_not_mistaken_for_symbols() -> None:
+    message = "**$BTC**\n#SHORT\n#مارکت\nاهرم :70×"  # noqa: RUF001
+    normalized = MessageNormalizer().normalize(
+        _raw(message)
+    )
+    assert normalized.detected_symbols == ["BTC"]

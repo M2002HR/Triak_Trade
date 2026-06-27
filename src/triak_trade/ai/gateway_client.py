@@ -16,6 +16,7 @@ from triak_trade.ai.prompts import build_telegram_signal_prompt
 from triak_trade.ai.schemas import AIClassificationResult, AIMessageContext
 
 logger = logging.getLogger("triak_trade.ai.gateway_client")
+_ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF]")
 
 
 class AIGatewayError(Exception):
@@ -67,11 +68,23 @@ class AjilGatewayClient:
                 model=self.vision_model,
                 multimodal=has_images,
             )
+        if self._prefer_multilingual_text_route(context.message_text):
+            return AIGatewayRoute(
+                provider=self.vision_provider,
+                model=self.vision_model,
+                multimodal=False,
+            )
         return AIGatewayRoute(
             provider=self.text_provider,
             model=self.text_model,
             multimodal=False,
         )
+
+    @staticmethod
+    def _prefer_multilingual_text_route(message_text: str | None) -> bool:
+        if not message_text:
+            return False
+        return bool(_ARABIC_SCRIPT_RE.search(message_text))
 
     def classify_message(self, context: AIMessageContext) -> AIClassificationResult:
         last_error: Exception | None = None

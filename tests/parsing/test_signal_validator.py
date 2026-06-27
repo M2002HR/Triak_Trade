@@ -101,3 +101,16 @@ def test_backtest_open_validator_allows_signal_without_take_profits() -> None:
     )
     assert ok is True
     assert errors == []
+
+
+def test_backtest_open_validator_allows_signal_without_entry_and_treats_it_as_market_style(
+) -> None:
+    ok, errors = ParsedSignalValidator().validate_for_backtest_open(
+        _signal(
+            entry_type=EntryType.UNKNOWN,
+            entry_low=None,
+            entry_high=None,
+        ),
+    )
+    assert ok is True
+    assert errors == []

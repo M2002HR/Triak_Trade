@@ -176,6 +176,21 @@ def test_resolve_reply_to_correlation() -> None:
     assert result.method == "reply_to"
 
 
+def test_resolve_reply_to_closed_signal_for_audit_visibility() -> None:
+    sig = _signal("sig_btc", "BTCUSDT", 10, _NOW)
+    sig.status = SignalStatus.INVALID
+    ctx = _ctx(sig)
+    result = resolve_related_signal_id(
+        context=ctx,
+        parsed=_parsed(None, SignalAction.UPDATE_SL),
+        raw_related_id=None,
+        message=_msg(11, reply_to=10),
+        action=SignalAction.UPDATE_SL,
+    )
+    assert result.signal_id == "sig_btc"
+    assert result.method == "reply_to"
+
+
 def test_resolve_multi_signal_same_symbol_picks_most_recent() -> None:
     older = _signal("sig_old", "BTCUSDT", 10, _NOW)
     newer = _signal("sig_new", "BTCUSDT", 20, _NOW + timedelta(hours=1))

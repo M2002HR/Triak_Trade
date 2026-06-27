@@ -107,11 +107,11 @@ def resolve_related_signal_id(
 
     # 2) reply_to chain.
     by_reply = context.find_signal_by_message_reply(message.reply_to_msg_id)
-    if by_reply is not None and _is_trackable(by_reply):
+    if by_reply is not None:
         return CorrelationResult(signal_id=by_reply.signal_id, method="reply_to", note=ai_note)
     for parent in context.get_reply_chain(message):
         owner = context.find_signal_by_message_reply(parent.message_id)
-        if owner is not None and _is_trackable(owner):
+        if owner is not None:
             return CorrelationResult(
                 signal_id=owner.signal_id, method="reply_chain", note=ai_note
             )

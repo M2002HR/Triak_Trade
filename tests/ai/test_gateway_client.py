@@ -163,6 +163,38 @@ def test_gateway_client_routes_caption_images_to_gemini_multimodal() -> None:
     assert "image_url" in payload
 
 
+def test_gateway_client_routes_arabic_text_requests_to_gemini_model() -> None:
+    observed: dict[str, object] = {}
+    message_text = "**$BTC**\n#SHORT\n#مارکت\nاهرم :70×"  # noqa: RUF001
+    context = AIMessageContext(
+        channel_id="c1",
+        channel_username="u1",
+        message_id=3,
+        message_text=message_text,
+        message_date="2026-01-01T00:00:00Z",
+        reply_chain_messages=[],
+        following_messages=[],
+        recent_messages=[],
+        active_signals=[],
+        parser_version="ai-v1",
+        notes=[],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["json"] = request.read().decode()
+        return httpx.Response(200, json=_ok_payload())
+
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(handler),
+    )
+    client.classify_message(context)
+    payload = str(observed["json"])
+    assert "gemini-3.1-flash-lite" in payload
+    assert "\"model\":\"gemini-3.1-flash-lite\"" in payload
+
+
 def test_gateway_client_timeout(context: AIMessageContext) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("timeout")

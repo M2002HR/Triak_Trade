@@ -48,6 +48,7 @@ def _make_long_signal(
     symbol: str = "BTCUSDT",
     entry: Decimal = Decimal("50000"),
     sl: Decimal | None = None,
+    tps: list[Decimal] | None = None,
     leverage: int | None = 10,
 ) -> ParsedSignal:
     return ParsedSignal(
@@ -59,7 +60,7 @@ def _make_long_signal(
         entry_low=entry,
         entry_high=entry,
         stop_loss=sl,
-        take_profits=[Decimal("52000"), Decimal("55000")],
+        take_profits=tps if tps is not None else [Decimal("52000"), Decimal("55000")],
         leverage=leverage,
         confidence=Decimal("0.95"),
         invalid_reason=None,
@@ -185,6 +186,7 @@ class TestPositionSizing:
         session = _make_session(Decimal("1000"))
         signal = _make_long_signal(leverage=100)
         strategy = MagicMock()
+        strategy.get_synthetic_stop.return_value = Decimal("49000")
         result = pm.compute_position_sizing(
             session=session, signal=signal, current_balance=Decimal("1000"), strategy=strategy
         )
@@ -197,6 +199,7 @@ class TestPositionSizing:
         session = _make_session(Decimal("1000"))
         signal = _make_long_signal(sl=None)
         strategy = MagicMock()
+        strategy.get_synthetic_stop.return_value = Decimal("49000")
         strategy.get_synthetic_take_profits.return_value = []
         result = pm.compute_position_sizing(
             session=session, signal=signal, current_balance=Decimal("1000"), strategy=strategy
@@ -205,6 +208,78 @@ class TestPositionSizing:
         assert result.stop_loss is not None
         # Synthetic SL is below entry for LONG (capped by max-loss budget)
         assert result.stop_loss < Decimal("50000")
+
+    def test_missing_stop_uses_strategy_synthetic_stop(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        session = _make_session(Decimal("1000"))
+        signal = _make_long_signal(sl=None)
+        strategy = MagicMock()
+        strategy.get_synthetic_stop.return_value = Decimal("48765")
+        strategy.get_synthetic_take_profits.return_value = []
+
+        result = pm.compute_position_sizing(
+            session=session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+
+        assert result.stop_loss == Decimal("48765")
+        strategy.get_synthetic_stop.assert_called_once()
+        assert any(note.startswith("synthetic_stop_strategy=") for note in result.notes)
+
+    def test_missing_take_profits_uses_strategy_notional_ladder(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        session = _make_session(Decimal("1000"))
+        signal = _make_long_signal(sl=Decimal("49000"), tps=[])
+        strategy = MagicMock()
+        strategy.get_synthetic_take_profits.return_value = [
+            Decimal("51000"),
+            Decimal("52000"),
+        ]
+
+        result = pm.compute_position_sizing(
+            session=session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+
+        assert result.take_profits == [Decimal("51000"), Decimal("52000")]
+        strategy.get_synthetic_take_profits.assert_called_once()
+        assert (
+            strategy.get_synthetic_take_profits.call_args.kwargs["notional_value"]
+            == result.entry_price * result.quantity
+        )
+
+    def test_risk_factor_changes_size_when_not_floor_clamped(self) -> None:
+        settings = _make_settings()
+        settings.LIVE_TRADING_MIN_ALLOCATION_PCT = Decimal("0")
+        pm = LivePositionManager(settings)
+        strategy = MagicMock()
+        signal = _make_long_signal(sl=Decimal("49000"), leverage=70)
+        low_risk_session = _make_session(Decimal("1000"))
+        low_risk_session.risk_per_trade_pct = Decimal("50")
+        high_risk_session = _make_session(Decimal("1000"))
+        high_risk_session.risk_per_trade_pct = Decimal("120")
+
+        low_risk = pm.compute_position_sizing(
+            session=low_risk_session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+        high_risk = pm.compute_position_sizing(
+            session=high_risk_session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+
+        assert high_risk.allocation_pct > low_risk.allocation_pct
+        assert high_risk.margin > low_risk.margin
 
     def test_zero_quantity_raises(self) -> None:
         settings = _make_settings()
@@ -317,3 +392,19 @@ class TestPositionOperations:
         )
         pm.update_stop_loss(trade=trade, new_sl=None, message=attr, move_to_entry=True)
         assert trade.stop_loss == trade.entry_price
+
+    def test_update_leverage(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        trade = self._make_trade()
+        attr = MessageAttribution(
+            message_id=3,
+            channel_id="c",
+            channel_label="@c",
+            message_preview="lev 20",
+            message_date=datetime.now(timezone.utc),
+            action="set_leverage",
+        )
+        updated = pm.update_leverage(trade=trade, new_leverage=20, message=attr)
+        assert updated is True
+        assert trade.leverage == 20

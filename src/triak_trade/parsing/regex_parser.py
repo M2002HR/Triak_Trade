@@ -19,6 +19,12 @@ _LEVERAGE_RE = re.compile(
     re.IGNORECASE,
 )
 _X_LEVERAGE_RE = re.compile(r"\b(\d+)\s*x\b", re.IGNORECASE)
+_MARKET_ENTRY_MARKERS = (
+    "market",
+    "now market",
+    "\u0645\u0627\u0631\u06a9\u062a",
+    "\u0645\u0627\u0631\u06a9\u062a\u06cc",
+)
 _TP_SECTION_MARKERS = (
     "tp",
     "target",
@@ -136,7 +142,7 @@ class RegexSignalParser:
 
     @staticmethod
     def _extract_entry(lower: str) -> tuple[EntryType, Decimal | None, Decimal | None]:
-        if "market" in lower or "now market" in lower:
+        if any(marker in lower for marker in _MARKET_ENTRY_MARKERS):
             return EntryType.MARKET, None, None
 
         range_match = re.search(

@@ -61,6 +61,25 @@ _KEYWORDS = {
     "\u0627\u0647\u0631\u0645",
     "\u0644\u063a\u0648",
     "\u0628\u0633\u062a\u0646",
+    "\u0645\u0627\u0631\u06a9\u062a",
+}
+
+_NON_SYMBOL_TAGS = {
+    "LONG",
+    "SHORT",
+    "BUY",
+    "SELL",
+    "MARKET",
+    "SPOT",
+    "FUTURES",
+    "ENTRY",
+    "ENTRIES",
+    "SL",
+    "TP",
+    "TARGET",
+    "TARGETS",
+    "LEV",
+    "LEVERAGE",
 }
 
 
@@ -94,6 +113,8 @@ class MessageNormalizer:
 
         for match in _TAG_SYMBOL_RE.finditer(normalized):
             symbol = self._compact_symbol(match.group(1))
+            if symbol in _NON_SYMBOL_TAGS:
+                continue
             if symbol and symbol not in seen:
                 seen.add(symbol)
                 symbols.append(symbol)
