@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session, sessionmaker
 
 from triak_trade.backtesting.strategies.registry import (
     build_strategy_from_key,
@@ -25,7 +26,11 @@ from triak_trade.dashboard.schemas import (
     StrategyCatalogEntry,
 )
 from triak_trade.exchange.toobit.futures import build_futures_client_from_settings
-from triak_trade.live_trading.engine import LiveTradingEngine, build_engine_from_config
+from triak_trade.live_trading.engine import (
+    LiveTradingEngine,
+    build_engine_from_config,
+    build_engine_from_session,
+)
 from triak_trade.live_trading.models import (
     LiveMessageTrace,
     LiveSession,
@@ -67,10 +72,14 @@ class DashboardLiveCoordinator:
         *,
         settings: Settings,
         store: LiveTradingStore | None = None,
+        session_factory: sessionmaker[Session] | None = None,
         notifier: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.settings = settings
-        self.store = store or LiveTradingStore(settings.LIVE_TRADING_RUNTIME_DIR)
+        self.store = store or LiveTradingStore(
+            settings.LIVE_TRADING_RUNTIME_DIR,
+            session_factory=session_factory,
+        )
         self.notifier = notifier
         self.runtime_root = Path(settings.LIVE_TRADING_RUNTIME_DIR)
         self.state_dir = self.runtime_root / "state"
@@ -79,6 +88,9 @@ class DashboardLiveCoordinator:
         self._engines: dict[str, LiveTradingEngine] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._recover_incomplete_sessions()
+
+    def live_mode_enabled(self) -> bool:
+        return bool(getattr(self.settings, "LIVE_TRADING_LIVE_MODE_ENABLED", False))
 
     def readiness(self) -> LiveTradingReadiness:
         issues: list[str] = []
@@ -104,9 +116,16 @@ class DashboardLiveCoordinator:
         ai_ready = bool(
             self.settings.AI_GATEWAY_ENABLED and self.settings.AI_CLASSIFIER_ENABLED
         )
+        if self.settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER and not ai_ready:
+            issues.append("AI classifier is required before enabling live capital execution.")
 
         return LiveTradingReadiness(
-            ready=live_trading_enabled and telegram_configured and toobit_configured,
+            ready=(
+                live_trading_enabled
+                and telegram_configured
+                and toobit_configured
+                and (ai_ready or not self.settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER)
+            ),
             live_trading_enabled=live_trading_enabled,
             telegram_configured=telegram_configured,
             toobit_configured=toobit_configured,
@@ -125,13 +144,16 @@ class DashboardLiveCoordinator:
         )
         active_sessions = self.list_active_sessions(limit=20)
         current_session = active_sessions[0] if active_sessions else self.get_current_session()
+        default_trading_mode = self.settings.LIVE_TRADING_MODE
+        if default_trading_mode == "live" and not self.live_mode_enabled():
+            default_trading_mode = "demo"
         return {
             "readiness": self.readiness().model_dump(mode="json"),
             "is_running": self.is_running(),
             "current_session": current_session.model_dump(mode="json") if current_session else None,
             "active_sessions": [item.model_dump(mode="json") for item in active_sessions],
-            "default_trading_mode": self.settings.LIVE_TRADING_MODE,
-            "default_initial_balance": str(self.settings.LIVE_TRADING_DEFAULT_INITIAL_BALANCE),
+            "default_trading_mode": default_trading_mode,
+            "live_mode_enabled": self.live_mode_enabled(),
             "default_risk_per_trade_pct": str(
                 self.settings.LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT
             ),
@@ -146,7 +168,6 @@ class DashboardLiveCoordinator:
                 item.model_dump(mode="json") for item in self._get_saved_channels_state().channels
             ],
             "available_strategies": strategies,
-            "live_initial_balance_locked": True,
         }
 
     def start_session(self, config: LiveSessionConfig) -> LiveSession:
@@ -157,8 +178,28 @@ class DashboardLiveCoordinator:
             raise ValueError("Telegram credentials are not fully configured.")
         if not readiness.toobit_configured:
             raise ValueError("Toobit credentials are not fully configured.")
-        if config.trading_mode == "live":
-            raise ValueError("Live mode remains blocked in this phase. Demo sessions only.")
+        if self.settings.KILL_SWITCH_ENABLED:
+            raise ValueError(
+                "Live trading start blocked because Kill Switch is active: "
+                + (self.settings.KILL_SWITCH_REASON or "no reason provided")
+            )
+        if config.trading_mode == "live" and not self.live_mode_enabled():
+            raise ValueError(
+                "Live mode requires LIVE_TRADING_LIVE_MODE_ENABLED=true in root .env.local"
+            )
+        if (
+            config.trading_mode == "live"
+            and self.settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER
+            and not readiness.ai_ready
+        ):
+            raise ValueError("Live mode requires AI gateway and AI classifier to be enabled.")
+        if config.trading_mode == "live" and not config.use_ai:
+            raise ValueError("Live mode requires use_ai=true.")
+        if config.risk_per_trade_pct > self.settings.LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT:
+            raise ValueError(
+                "risk_per_trade_pct exceeds LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT="
+                f"{self.settings.LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT}"
+            )
         if not config.strategy_key.strip():
             raise ValueError("strategy_key is required")
         build_strategy_from_key(config.strategy_key)
@@ -298,11 +339,20 @@ class DashboardLiveCoordinator:
         open_trades = self.store.list_open_trades(session_id)
         closed_trades = self.store.list_closed_trades(session_id, limit=closed_trade_limit)
         messages = self.store.list_message_traces(session_id, limit=message_limit)
+        signals = self.store.list_signal_snapshots(session_id, limit=200)
         messages.sort(key=lambda item: item.received_at or item.message_date, reverse=True)
+        signals.sort(
+            key=lambda item: (
+                item.status_group != "active",
+                item.closed_at or item.updated_at,
+            ),
+            reverse=True,
+        )
         return LiveSessionDetail(
             session=session,
             snapshot=snapshot,
             messages=messages,
+            signals=signals,
             open_trades=open_trades,
             closed_trades=closed_trades,
         )
@@ -324,6 +374,61 @@ class DashboardLiveCoordinator:
             messages.extend(self.store.list_message_traces(session.session_id, limit=20))
         messages.sort(key=lambda item: item.received_at or item.message_date, reverse=True)
         return messages[:limit]
+
+    def delete_session_history(self, session_id: str) -> bool:
+        return self.store.delete_session(session_id)
+
+    def delete_trade_record(self, session_id: str, trade_id: str) -> bool:
+        deleted = self.store.delete_trade(session_id, trade_id)
+        if deleted:
+            for signal in self.store.list_signal_snapshots(session_id, limit=500):
+                if signal.trade_id != trade_id:
+                    continue
+                updated = signal.model_copy(
+                    update={
+                        "trade_id": None,
+                        "trade_status": None,
+                        "exchange_position": None,
+                        "exchange_order_history": [],
+                        "notes": [*signal.notes, "trade_record_deleted_from_dashboard"],
+                    }
+                )
+                self.store.save_signal_snapshot(session_id, updated)
+        return deleted
+
+    def delete_message_record(
+        self,
+        session_id: str,
+        message_id: int,
+        channel_id: str,
+    ) -> bool:
+        deleted = self.store.delete_message_trace(session_id, message_id, channel_id)
+        if deleted:
+            for signal in self.store.list_signal_snapshots(session_id, limit=500):
+                if message_id not in signal.related_message_ids:
+                    continue
+                updated_related = [
+                    item for item in signal.related_message_ids if item != message_id
+                ]
+                updated = signal.model_copy(
+                    update={
+                        "related_message_ids": updated_related,
+                        "message_count": len(updated_related),
+                        "notes": [
+                            *signal.notes,
+                            f"message_{message_id}_deleted_from_dashboard",
+                        ],
+                    }
+                )
+                if signal.last_message_id == message_id:
+                    updated = updated.model_copy(
+                        update={
+                            "last_message_id": updated_related[-1] if updated_related else None,
+                            "last_message_date": None,
+                        }
+                    )
+                self.store.save_signal_snapshot(session_id, updated)
+        return deleted
 
     def get_saved_channels(self) -> list[dict[str, Any]]:
         state = self._get_saved_channels_state()
@@ -426,10 +531,28 @@ class DashboardLiveCoordinator:
 
     def _recover_incomplete_sessions(self) -> None:
         for session in self.store.list_active_sessions(limit=200):
-            session.mark_stopped(
-                error="Dashboard restart interrupted the in-memory worker for this session."
+            if not self.settings.LIVE_TRADING_AUTO_RESUME_SESSIONS:
+                session.mark_stopped(
+                    error="Dashboard restart interrupted the in-memory worker for this session."
+                )
+                self.store.save_session(session)
+                continue
+            recovered_session, engine = build_engine_from_session(
+                session=session,
+                settings=self.settings,
+                store=self.store,
+                notifier=self.notifier,
             )
-            self.store.save_session(session)
+            worker = threading.Thread(
+                target=self._run_engine,
+                args=(recovered_session.session_id, engine),
+                name=f"live-session-{recovered_session.session_id}",
+                daemon=True,
+            )
+            with self._lock:
+                self._engines[recovered_session.session_id] = engine
+                self._threads[recovered_session.session_id] = worker
+            worker.start()
 
     def _get_saved_channels_state(self) -> SavedChannelsState:
         if self.saved_channels_file.exists():

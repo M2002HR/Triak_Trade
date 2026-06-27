@@ -8,6 +8,8 @@ from triak_trade.dashboard.local_client import LocalASGIClient
 def settings() -> Settings:
     return Settings(
         _env_file=None,
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        TEST_DATABASE_URL="sqlite+pysqlite:///:memory:",
         DASHBOARD_ADMIN_TOKEN="test-token",
         DASHBOARD_SESSION_SECRET="session-secret",
     )

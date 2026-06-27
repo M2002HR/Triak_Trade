@@ -10,27 +10,28 @@ from sqlalchemy import and_, desc, select
 from sqlalchemy.orm import Session
 
 from triak_trade.db.models import (
-    AdminDecisionORM,
     AuditLogORM,
     CandleORM,
+    LiveMessageTraceORM,
+    LiveSessionORM,
+    LiveSignalSnapshotORM,
+    LiveTradeORM,
     LLMCallLogORM,
-    ProposedActionORM,
     SignalORM,
     TelegramMessageORM,
 )
-from triak_trade.domain.enums import (
-    AdminDecisionType,
-    CandleSource,
-    ProposedActionType,
-    SignalStatus,
-)
+from triak_trade.domain.enums import CandleSource, SignalStatus
 from triak_trade.domain.models import (
-    AdminDecision,
     Candle,
     ParsedSignal,
-    ProposedAction,
     RawTelegramMessage,
     SignalState,
+)
+from triak_trade.live_trading.models import (
+    LiveMessageTrace,
+    LiveSession,
+    LiveSignalSnapshot,
+    LiveTrade,
 )
 
 
@@ -226,103 +227,6 @@ class SignalRepository:
         return result
 
 
-class ProposedActionRepository:
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def save_action(self, action: ProposedAction) -> None:
-        row = self.session.execute(
-            select(ProposedActionORM).where(ProposedActionORM.action_id == action.action_id)
-        ).scalar_one_or_none()
-        if row is None:
-            row = ProposedActionORM(action_id=action.action_id)
-            self.session.add(row)
-
-        row.action_type = action.action_type.value
-        row.signal_id = action.signal_id
-        row.risk_increasing = action.risk_increasing
-        row.requires_admin_approval = action.requires_admin_approval
-        row.confidence = action.confidence
-        row.reason = action.reason
-        row.payload = action.payload
-        row.created_at = action.created_at
-        self.session.flush()
-
-    def get_action(self, action_id: str) -> ProposedAction | None:
-        row = self.session.execute(
-            select(ProposedActionORM).where(ProposedActionORM.action_id == action_id)
-        ).scalar_one_or_none()
-        if row is None:
-            return None
-        return ProposedAction(
-            action_id=row.action_id,
-            action_type=ProposedActionType(row.action_type),
-            signal_id=row.signal_id,
-            risk_increasing=row.risk_increasing,
-            requires_admin_approval=row.requires_admin_approval,
-            confidence=Decimal(str(row.confidence)),
-            reason=row.reason,
-            payload=row.payload,
-            created_at=row.created_at,
-        )
-
-    def list_pending_admin_actions(self) -> list[ProposedAction]:
-        stmt = (
-            select(ProposedActionORM)
-            .where(ProposedActionORM.requires_admin_approval.is_(True))
-            .where(~ProposedActionORM.action_id.in_(select(AdminDecisionORM.action_id)))
-            .order_by(ProposedActionORM.created_at.asc())
-        )
-        rows = self.session.execute(stmt).scalars().all()
-        return [
-            ProposedAction(
-                action_id=row.action_id,
-                action_type=ProposedActionType(row.action_type),
-                signal_id=row.signal_id,
-                risk_increasing=row.risk_increasing,
-                requires_admin_approval=row.requires_admin_approval,
-                confidence=Decimal(str(row.confidence)),
-                reason=row.reason,
-                payload=row.payload,
-                created_at=row.created_at,
-            )
-            for row in rows
-        ]
-
-
-class AdminDecisionRepository:
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def save_decision(self, decision: AdminDecision) -> None:
-        row = self.session.execute(
-            select(AdminDecisionORM).where(AdminDecisionORM.action_id == decision.action_id)
-        ).scalar_one_or_none()
-        if row is None:
-            row = AdminDecisionORM(action_id=decision.action_id)
-            self.session.add(row)
-
-        row.decision = decision.decision.value
-        row.admin_user_id = decision.admin_user_id
-        row.reason = decision.reason
-        row.decided_at = decision.decided_at
-        self.session.flush()
-
-    def get_decision(self, action_id: str) -> AdminDecision | None:
-        row = self.session.execute(
-            select(AdminDecisionORM).where(AdminDecisionORM.action_id == action_id)
-        ).scalar_one_or_none()
-        if row is None:
-            return None
-        return AdminDecision(
-            action_id=row.action_id,
-            decision=AdminDecisionType(row.decision),
-            admin_user_id=row.admin_user_id,
-            reason=row.reason,
-            decided_at=row.decided_at,
-        )
-
-
 class CandleRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -493,3 +397,217 @@ class LLMCallLogRepository:
             }
             for row in rows
         ]
+
+
+class LiveTradingRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def save_session(self, live_session: LiveSession) -> None:
+        row = self.session.execute(
+            select(LiveSessionORM).where(LiveSessionORM.session_id == live_session.session_id)
+        ).scalar_one_or_none()
+        payload = _model_to_json_payload(live_session)
+        if row is None:
+            row = LiveSessionORM(session_id=live_session.session_id)
+            self.session.add(row)
+        row.status = live_session.status
+        row.trading_mode = live_session.trading_mode
+        row.primary_channel_id = live_session.channels[0] if live_session.channels else None
+        row.started_at = live_session.started_at
+        row.stopped_at = live_session.stopped_at
+        row.last_update_at = live_session.last_update_at
+        row.payload = payload
+        self.session.flush()
+
+    def load_session(self, session_id: str) -> LiveSession | None:
+        row = self.session.execute(
+            select(LiveSessionORM).where(LiveSessionORM.session_id == session_id)
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return LiveSession.model_validate(row.payload)
+
+    def list_sessions(self, limit: int = 20) -> list[LiveSession]:
+        rows = self.session.execute(
+            select(LiveSessionORM)
+            .order_by(LiveSessionORM.last_update_at.desc())
+            .limit(limit)
+        ).scalars().all()
+        return [LiveSession.model_validate(row.payload) for row in rows]
+
+    def save_trade(self, trade: LiveTrade) -> None:
+        row = self.session.execute(
+            select(LiveTradeORM).where(LiveTradeORM.trade_id == trade.trade_id)
+        ).scalar_one_or_none()
+        payload = _model_to_json_payload(trade)
+        if row is None:
+            row = LiveTradeORM(trade_id=trade.trade_id)
+            self.session.add(row)
+        row.session_id = trade.session_id
+        row.signal_id = trade.signal_id
+        row.channel_id = trade.channel_id
+        row.symbol = trade.symbol
+        row.side = trade.side
+        row.status = trade.status
+        row.is_open = trade.is_open
+        row.opened_at = trade.opened_at
+        row.closed_at = trade.closed_at
+        row.updated_at = trade.updated_at
+        row.payload = payload
+        self.session.flush()
+
+    def load_trade(self, session_id: str, trade_id: str) -> LiveTrade | None:
+        row = self.session.execute(
+            select(LiveTradeORM).where(
+                LiveTradeORM.session_id == session_id,
+                LiveTradeORM.trade_id == trade_id,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return LiveTrade.model_validate(row.payload)
+
+    def list_trades(self, session_id: str, limit: int = 200) -> list[LiveTrade]:
+        rows = self.session.execute(
+            select(LiveTradeORM)
+            .where(LiveTradeORM.session_id == session_id)
+            .order_by(LiveTradeORM.updated_at.desc())
+            .limit(limit)
+        ).scalars().all()
+        return [LiveTrade.model_validate(row.payload) for row in rows]
+
+    def delete_trade(self, session_id: str, trade_id: str) -> bool:
+        row = self.session.execute(
+            select(LiveTradeORM).where(
+                LiveTradeORM.session_id == session_id,
+                LiveTradeORM.trade_id == trade_id,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        self.session.delete(row)
+        self.session.flush()
+        return True
+
+    def save_message_trace(self, session_id: str, trace: LiveMessageTrace) -> None:
+        row = self.session.execute(
+            select(LiveMessageTraceORM).where(
+                LiveMessageTraceORM.session_id == session_id,
+                LiveMessageTraceORM.channel_id == trace.channel_id,
+                LiveMessageTraceORM.message_id == trace.message_id,
+            )
+        ).scalar_one_or_none()
+        payload = _model_to_json_payload(trace)
+        if row is None:
+            row = LiveMessageTraceORM(
+                session_id=session_id,
+                channel_id=trace.channel_id,
+                message_id=trace.message_id,
+            )
+            self.session.add(row)
+        row.signal_id = trace.signal_id
+        row.trade_id = trace.trade_id
+        row.final_status = trace.final_status
+        row.message_date = trace.message_date
+        row.received_at = trace.received_at
+        row.payload = payload
+        self.session.flush()
+
+    def list_message_traces(self, session_id: str, limit: int = 200) -> list[LiveMessageTrace]:
+        rows = self.session.execute(
+            select(LiveMessageTraceORM)
+            .where(LiveMessageTraceORM.session_id == session_id)
+            .order_by(LiveMessageTraceORM.received_at.desc())
+            .limit(limit)
+        ).scalars().all()
+        return [LiveMessageTrace.model_validate(row.payload) for row in rows]
+
+    def delete_message_trace(self, session_id: str, message_id: int, channel_id: str) -> bool:
+        row = self.session.execute(
+            select(LiveMessageTraceORM).where(
+                LiveMessageTraceORM.session_id == session_id,
+                LiveMessageTraceORM.channel_id == channel_id,
+                LiveMessageTraceORM.message_id == message_id,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        self.session.delete(row)
+        self.session.flush()
+        return True
+
+    def save_signal_snapshot(self, session_id: str, signal: LiveSignalSnapshot) -> None:
+        row = self.session.execute(
+            select(LiveSignalSnapshotORM).where(
+                LiveSignalSnapshotORM.session_id == session_id,
+                LiveSignalSnapshotORM.signal_id == signal.signal_id,
+            )
+        ).scalar_one_or_none()
+        payload = _model_to_json_payload(signal)
+        if row is None:
+            row = LiveSignalSnapshotORM(session_id=session_id, signal_id=signal.signal_id)
+            self.session.add(row)
+        row.channel_id = signal.channel_id
+        row.status = signal.status
+        row.status_group = signal.status_group
+        row.trade_id = signal.trade_id
+        row.symbol = signal.symbol
+        row.updated_at = signal.updated_at
+        row.payload = payload
+        self.session.flush()
+
+    def load_signal_snapshot(self, session_id: str, signal_id: str) -> LiveSignalSnapshot | None:
+        row = self.session.execute(
+            select(LiveSignalSnapshotORM).where(
+                LiveSignalSnapshotORM.session_id == session_id,
+                LiveSignalSnapshotORM.signal_id == signal_id,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return LiveSignalSnapshot.model_validate(row.payload)
+
+    def list_signal_snapshots(
+        self,
+        session_id: str,
+        limit: int = 200,
+    ) -> list[LiveSignalSnapshot]:
+        rows = self.session.execute(
+            select(LiveSignalSnapshotORM)
+            .where(LiveSignalSnapshotORM.session_id == session_id)
+            .order_by(LiveSignalSnapshotORM.updated_at.desc())
+            .limit(limit)
+        ).scalars().all()
+        return [LiveSignalSnapshot.model_validate(row.payload) for row in rows]
+
+    def delete_signal_snapshot(self, session_id: str, signal_id: str) -> bool:
+        row = self.session.execute(
+            select(LiveSignalSnapshotORM).where(
+                LiveSignalSnapshotORM.session_id == session_id,
+                LiveSignalSnapshotORM.signal_id == signal_id,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        self.session.delete(row)
+        self.session.flush()
+        return True
+
+    def delete_session(self, session_id: str) -> bool:
+        removed = False
+        session_row = self.session.execute(
+            select(LiveSessionORM).where(LiveSessionORM.session_id == session_id)
+        ).scalar_one_or_none()
+        if session_row is not None:
+            self.session.delete(session_row)
+            removed = True
+        for model in (LiveTradeORM, LiveMessageTraceORM, LiveSignalSnapshotORM):
+            rows = self.session.execute(
+                select(model).where(model.session_id == session_id)
+            ).scalars().all()
+            for row in rows:
+                self.session.delete(row)
+                removed = True
+        self.session.flush()
+        return removed

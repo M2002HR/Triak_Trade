@@ -10,11 +10,13 @@ def test_all_required_tables_present() -> None:
         "telegram_messages",
         "normalized_messages",
         "signals",
-        "proposed_actions",
-        "admin_decisions",
         "candles",
         "channel_metrics",
         "audit_logs",
         "llm_call_logs",
+        "live_sessions",
+        "live_trades",
+        "live_message_traces",
+        "live_signal_snapshots",
     }
     assert expected.issubset(names)

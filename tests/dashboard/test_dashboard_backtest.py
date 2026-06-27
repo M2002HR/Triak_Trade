@@ -12,6 +12,8 @@ from triak_trade.dashboard.services import DashboardService
 def build_settings(tmp_path: Path, *, real_guard: int = 0) -> Settings:
     return Settings(
         _env_file=None,
+        DATABASE_URL=f"sqlite+pysqlite:///{tmp_path / 'dashboard.db'}",
+        TEST_DATABASE_URL=f"sqlite+pysqlite:///{tmp_path / 'dashboard_test.db'}",
         DASHBOARD_ADMIN_TOKEN="test-token",
         DASHBOARD_SESSION_SECRET="session-secret",
         RUN_BACKTEST_INTEGRATION_TESTS=real_guard,

@@ -16,6 +16,8 @@ pytestmark = pytest.mark.skip(
 def build_client(tmp_path: Path) -> TestClient:
     settings = Settings(
         _env_file=None,
+        DATABASE_URL=f"sqlite+pysqlite:///{tmp_path / 'dashboard.db'}",
+        TEST_DATABASE_URL=f"sqlite+pysqlite:///{tmp_path / 'dashboard_test.db'}",
         DASHBOARD_ADMIN_TOKEN="test-token",
         DASHBOARD_SESSION_SECRET="session-secret",
         DASHBOARD_RUNTIME_DIR=str(tmp_path / "dashboard"),

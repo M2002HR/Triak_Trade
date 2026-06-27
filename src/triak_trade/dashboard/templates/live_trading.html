@@ -7,7 +7,8 @@
     <p class="subtle hero-copy">
       Run multiple independent sessions in parallel. Each session tracks one Telegram channel with
       its own mode, strategy, risk profile, messages, and trade lifecycle.
-      Live order execution remains blocked in this phase; dashboard sessions are demo-only.
+      Demo sessions submit real API requests to Toobit using demo-market symbols. Live sessions
+      are available only when the root env live-execution flag is enabled.
     </p>
   </div>
   <div class="hero-stat-cluster">
@@ -44,18 +45,16 @@
           <button type="button" id="lt-show-saved-btn" class="btn-link">Choose from saved channels ▾</button>
         </div>
 
-        <div class="form-row form-row-2">
+        <div class="form-row">
           <div>
             <label for="lt-mode">Trading Mode</label>
             <select id="lt-mode" name="trading_mode">
-              <option value="demo" selected>Demo (Paper Trading)</option>
-              <option value="live" disabled>Live (Blocked In Current Phase)</option>
+              <option value="demo" selected>Demo (Toobit TBV API)</option>
+              <option value="live"{% if not live_mode_enabled %} disabled{% endif %}>
+                {% if live_mode_enabled %}Live (Real Toobit Account){% else %}Live (Enable Env Flag){% endif %}
+              </option>
             </select>
-          </div>
-          <div>
-            <label for="lt-balance">Initial Balance (USDT)</label>
-            <input id="lt-balance" name="initial_balance" type="number" step="0.01" min="1" value="100">
-            <p id="lt-balance-help" class="subtle">Demo mode uses this value. Live execution is blocked in the current phase.</p>
+            <p id="lt-balance-help" class="subtle">Sizing and PnL use the connected Toobit account balance in both demo and live modes.</p>
           </div>
         </div>
 
@@ -169,6 +168,7 @@
       <div class="lt-modal-actions">
         <span id="lt-session-modal-status" class="phase-pill phase-queued">Idle</span>
         <button type="button" class="btn btn-danger btn-sm" id="lt-session-modal-stop-btn">Stop Session</button>
+        <button type="button" class="btn btn-sm" id="lt-session-modal-delete-btn">Delete History</button>
       </div>
     </div>
     <div id="lt-session-modal-summary" class="metrics backtest-metrics"></div>
@@ -184,6 +184,14 @@
       <section>
         <h4>Closed Trades</h4>
         <div id="lt-session-modal-closed-trades" class="trade-list"></div>
+      </section>
+      <section>
+        <h4>Signals</h4>
+        <div id="lt-session-modal-signals" class="trade-list"></div>
+      </section>
+      <section>
+        <h4>Exchange Snapshot</h4>
+        <div id="lt-session-modal-exchange" class="trade-list"></div>
       </section>
     </div>
   </div>

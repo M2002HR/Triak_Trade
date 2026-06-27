@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
-from triak_trade.live_trading.models import LiveSession, LiveTrade
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from triak_trade.db.base import Base
+from triak_trade.live_trading.models import (
+    LiveMessageTrace,
+    LiveSession,
+    LiveSignalSnapshot,
+    LiveTrade,
+)
 from triak_trade.live_trading.store import LiveTradingStore
 
 
@@ -138,3 +149,132 @@ class TestLiveTradingStore:
             loaded = store.load_trade("sess1", "t1")
             assert loaded is not None
             assert loaded.realized_pnl == Decimal("42.5")
+
+    def test_save_and_list_signal_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LiveTradingStore(tmpdir)
+            signal = LiveSignalSnapshot(
+                signal_id="sig1",
+                channel_id="@c",
+                channel_label="@c",
+                created_from_message_id=1,
+                status="open",
+                status_group="active",
+                symbol="BTCUSDT",
+                side="long",
+                updated_at=datetime.now(timezone.utc),
+            )
+            store.save_signal_snapshot("sess1", signal)
+            loaded = store.load_signal_snapshot("sess1", "sig1")
+            assert loaded is not None
+            assert loaded.signal_id == "sig1"
+            assert store.list_signal_snapshots("sess1")[0].symbol == "BTCUSDT"
+
+    def test_delete_trade_message_and_session_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LiveTradingStore(tmpdir)
+            store.save_session(_make_session())
+            store.save_trade(_make_trade())
+            store.save_message_trace(
+                "sess1",
+                LiveMessageTrace(
+                    session_id="sess1",
+                    message_id=10,
+                    channel_id="@c",
+                    channel_label="@c",
+                    message_date=datetime.now(timezone.utc),
+                ),
+            )
+            store.save_signal_snapshot(
+                "sess1",
+                LiveSignalSnapshot(
+                    signal_id="sig1",
+                    channel_id="@c",
+                    channel_label="@c",
+                    created_from_message_id=10,
+                    status="open",
+                    status_group="active",
+                    updated_at=datetime.now(timezone.utc),
+                ),
+            )
+
+            assert store.delete_trade("sess1", "t1") is True
+            assert store.load_trade("sess1", "t1") is None
+            assert store.delete_message_trace("sess1", 10, "@c") is True
+            assert store.delete_session("sess1") is True
+            assert store.load_session("sess1") is None
+            assert store.list_signal_snapshots("sess1") == []
+
+    def test_message_traces_support_url_channel_ids_and_legacy_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LiveTradingStore(tmpdir)
+            trace = LiveMessageTrace(
+                session_id="sess1",
+                message_id=10,
+                channel_id="https://t.me/kiwibot_log",
+                channel_label="@kiwibot_log",
+                message_date=datetime.now(timezone.utc),
+            )
+
+            store.save_message_trace("sess1", trace)
+            saved = store.list_message_traces("sess1")
+            assert len(saved) == 1
+            assert saved[0].channel_id == "https://t.me/kiwibot_log"
+
+            legacy_path = (
+                Path(tmpdir)
+                / "messages"
+                / "sess1"
+                / "11_https:"
+                / "t.me"
+                / "kiwibot_log.json"
+            )
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_trace = trace.model_copy(update={"message_id": 11})
+            legacy_path.write_text(legacy_trace.model_dump_json(indent=2), encoding="utf-8")
+
+            listed = store.list_message_traces("sess1")
+            assert {item.message_id for item in listed} == {10, 11}
+            assert store.delete_message_trace("sess1", 11, "https://t.me/kiwibot_log") is True
+
+    def test_store_supports_database_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite+pysqlite:///{Path(tmpdir) / 'live.db'}", future=True)
+            Base.metadata.create_all(engine)
+            factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+            store = LiveTradingStore(tmpdir, session_factory=factory)
+
+            session = _make_session()
+            trade = _make_trade()
+            signal = LiveSignalSnapshot(
+                signal_id="sig1",
+                channel_id="@c",
+                channel_label="@c",
+                created_from_message_id=10,
+                related_message_ids=[10],
+                status="open",
+                status_group="active",
+                symbol="BTCUSDT",
+                side="long",
+                updated_at=datetime.now(timezone.utc),
+            )
+            trace = LiveMessageTrace(
+                session_id="sess1",
+                message_id=10,
+                channel_id="@c",
+                channel_username="c",
+                channel_label="@c",
+                reply_to_msg_id=None,
+                message_date=datetime.now(timezone.utc),
+                full_text="BUY BTCUSDT",
+            )
+
+            store.save_session(session)
+            store.save_trade(trade)
+            store.save_signal_snapshot("sess1", signal)
+            store.save_message_trace("sess1", trace)
+
+            assert store.load_session("sess1") is not None
+            assert store.load_trade("sess1", "t1") is not None
+            assert store.load_signal_snapshot("sess1", "sig1") is not None
+            assert store.list_message_traces("sess1")[0].channel_username == "c"

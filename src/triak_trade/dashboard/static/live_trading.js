@@ -140,7 +140,8 @@
       document.getElementById("lt-history-list"),
       state.closedTrades,
       false,
-      "No closed trades yet."
+      "No closed trades yet.",
+      { allowDelete: true }
     );
     setText("lt-positions-count", `${state.openTrades.length} open`);
     setText("lt-msg-count", `${state.recentMessages.length} messages`);
@@ -220,6 +221,8 @@
     document.getElementById("lt-session-modal-messages").innerHTML = '<p class="subtle">Loading…</p>';
     document.getElementById("lt-session-modal-open-trades").innerHTML = '<p class="subtle">Loading…</p>';
     document.getElementById("lt-session-modal-closed-trades").innerHTML = '<p class="subtle">Loading…</p>';
+    document.getElementById("lt-session-modal-signals").innerHTML = '<p class="subtle">Loading…</p>';
+    document.getElementById("lt-session-modal-exchange").innerHTML = '<p class="subtle">Loading…</p>';
     await fetchSessionDetail(sessionId);
   }
 
@@ -257,23 +260,35 @@
       stopBtn.style.display = session.status === "running" || session.status === "starting" ? "" : "none";
       stopBtn.onclick = () => stopSession(session.session_id);
     }
+    const deleteBtn = document.getElementById("lt-session-modal-delete-btn");
+    if (deleteBtn) {
+      deleteBtn.onclick = () => deleteSessionHistory(session.session_id);
+    }
     renderSessionSummary(detail);
     renderMessages(
       detail.messages || [],
       document.getElementById("lt-session-modal-messages"),
-      "No messages recorded for this session yet."
+      "No messages recorded for this session yet.",
+      { allowDelete: true }
     );
     renderTradeCollection(
       document.getElementById("lt-session-modal-open-trades"),
       detail.open_trades || [],
       true,
-      "No open positions in this session."
+      "No open positions in this session.",
+      { allowDelete: false }
     );
     renderTradeCollection(
       document.getElementById("lt-session-modal-closed-trades"),
       detail.closed_trades || [],
       false,
-      "No closed trades in this session."
+      "No closed trades in this session.",
+      { allowDelete: true }
+    );
+    renderSignalCollection(document.getElementById("lt-session-modal-signals"), detail.signals || []);
+    renderExchangeSnapshot(
+      document.getElementById("lt-session-modal-exchange"),
+      session.exchange_snapshot || detail.snapshot?.session?.exchange_snapshot || null
     );
   }
 
@@ -285,7 +300,7 @@
       return;
     }
     const balance = session.trading_mode === "demo"
-      ? fmtUSDT(session.paper_balance || session.initial_balance || 0)
+      ? fmtUSDT(session.account_info?.available_balance || session.account_info?.wallet_balance || session.paper_balance || 0)
       : fmtUSDT(session.account_info?.available_balance || session.account_info?.wallet_balance || 0);
     const realizedClass = parseFloat(session.total_realized_pnl || 0) >= 0 ? "metric-pos" : "metric-neg";
     const unrealizedClass = parseFloat(session.total_unrealized_pnl || 0) >= 0 ? "metric-pos" : "metric-neg";
@@ -294,6 +309,7 @@
       <div class="metric"><span>Mode</span><strong>${session.trading_mode === "live" ? "Live" : "Demo"}</strong></div>
       <div class="metric"><span>Balance</span><strong>${balance}</strong></div>
       <div class="metric"><span>Strategy</span><strong>${esc(session.strategy_key || "—")}</strong></div>
+      <div class="metric"><span>Last Error</span><strong>${esc(session.last_error || "—")}</strong></div>
       <div class="metric"><span>Risk / Trade</span><strong>${esc(session.risk_per_trade_pct || "0")}%</strong></div>
       <div class="metric"><span>Open Positions</span><strong>${(snapshot.open_trades || detail.open_trades || []).length}</strong></div>
       <div class="metric"><span>Closed Trades</span><strong>${session.closed_trades_count || 0}</strong></div>
@@ -305,7 +321,7 @@
     `;
   }
 
-  function renderMessages(messages, target, emptyText) {
+  function renderMessages(messages, target, emptyText, options = {}) {
     if (!target) {
       return;
     }
@@ -314,10 +330,22 @@
       target.innerHTML = `<p class="empty-state">${esc(emptyText)}</p>`;
       return;
     }
-    target.innerHTML = items.map(renderMessageCard).join("");
+    target.innerHTML = items.map((message) => renderMessageCard(message, options)).join("");
+    if (options.allowDelete) {
+      target.querySelectorAll("[data-delete-message]").forEach((button) => {
+        button.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await deleteMessageRecord(
+            button.dataset.sessionId,
+            button.dataset.messageId,
+            button.dataset.channelId
+          );
+        });
+      });
+    }
   }
 
-  function renderMessageCard(message) {
+  function renderMessageCard(message, options = {}) {
     const statusClass = messageBadgeClass(message.final_status);
     const side = message.side
       ? `<span class="badge ${message.side === "long" ? "side-long" : "side-short"}">${esc(message.side.toUpperCase())}</span>`
@@ -328,6 +356,15 @@
     const trade = message.trade_id
       ? `<span class="subtle">trade ${esc(message.trade_id.slice(-8))}</span>`
       : "";
+    const impactNotes = Array.isArray(message.impact_notes) && message.impact_notes.length
+      ? `<span class="subtle effect-summary">${esc(message.impact_notes.join(" · "))}</span>`
+      : "";
+    const correlation = message.correlation_method
+      ? `<span class="subtle">link ${esc(message.correlation_method)}${message.correlation_note ? ` · ${esc(message.correlation_note)}` : ""}</span>`
+      : "";
+    const deleteButton = options.allowDelete
+      ? `<button type="button" class="btn btn-sm" data-delete-message="1" data-session-id="${esc(message.session_id)}" data-message-id="${esc(message.message_id)}" data-channel-id="${esc(message.channel_id)}">Delete</button>`
+      : "";
     return `
       <article class="msg-card">
         <div class="msg-card-header">
@@ -336,17 +373,20 @@
           ${symbol}
           <span class="subtle">${esc(message.channel_label || message.channel_id || "—")}</span>
           <span class="subtle msg-time">${fmtDate(message.message_date)}</span>
+          ${deleteButton}
         </div>
         <div class="msg-card-body">
           ${message.preview_text ? `<span class="msg-preview">${esc(message.preview_text.slice(0, 160))}</span>` : ""}
           ${message.effect_summary ? `<span class="subtle effect-summary">${esc(message.effect_summary)}</span>` : ""}
+          ${impactNotes}
+          ${correlation}
           ${trade}
         </div>
       </article>
     `;
   }
 
-  function renderTradeCollection(target, trades, isOpen, emptyText) {
+  function renderTradeCollection(target, trades, isOpen, emptyText, options = {}) {
     if (!target) {
       return;
     }
@@ -354,13 +394,26 @@
       target.innerHTML = `<p class="empty-state">${esc(emptyText)}</p>`;
       return;
     }
-    target.innerHTML = trades.slice(0, 40).map((trade) => tradeCard(trade, isOpen)).join("");
+    target.innerHTML = trades.slice(0, 40).map((trade) => tradeCard(trade, isOpen, options)).join("");
     target.querySelectorAll(".trade-card").forEach((card) => {
-      card.addEventListener("click", () => openTradeModal(card.dataset.tradeId, card.dataset.sessionId));
+      card.addEventListener("click", (event) => {
+        if (event.target.closest("[data-delete-trade]")) {
+          return;
+        }
+        openTradeModal(card.dataset.tradeId, card.dataset.sessionId);
+      });
     });
+    if (options.allowDelete) {
+      target.querySelectorAll("[data-delete-trade]").forEach((button) => {
+        button.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await deleteTradeRecord(button.dataset.sessionId, button.dataset.tradeId);
+        });
+      });
+    }
   }
 
-  function tradeCard(trade, isOpen) {
+  function tradeCard(trade, isOpen, options = {}) {
     const pnl = parseFloat(isOpen ? trade.unrealized_pnl || 0 : trade.realized_pnl || 0);
     const pnlClass = pnl >= 0 ? "metric-pos" : "metric-neg";
     const sideClass = trade.side === "long" ? "side-long" : "side-short";
@@ -368,21 +421,125 @@
     const badge = isOpen
       ? '<span class="trade-status-badge open">OPEN</span>'
       : `<span class="trade-status-badge closed">${esc(trade.close_reason || "closed")}</span>`;
+    const exchangePill = trade.exchange_position
+      ? '<span class="badge badge-blue">API synced</span>'
+      : "";
+    const deleteButton = options.allowDelete
+      ? `<button type="button" class="btn btn-sm" data-delete-trade="1" data-session-id="${esc(trade.session_id)}" data-trade-id="${esc(trade.trade_id)}">Delete</button>`
+      : "";
     return `
       <article class="trade-card msg-card" data-trade-id="${esc(trade.trade_id)}" data-session-id="${esc(trade.session_id)}">
         <div class="msg-card-header">
           <span class="badge ${sideClass}">${esc((trade.side || "").toUpperCase())} ${esc(trade.symbol || "")}</span>
           ${badge}
+          ${exchangePill}
           <span class="subtle">${esc(channel)}</span>
+          ${deleteButton}
         </div>
         <div class="msg-card-body">
           <span>Entry: ${fmtPrice(trade.entry_price)}</span>
           <span>Lev: ${esc(trade.leverage || 1)}x</span>
+          ${trade.exchange_symbol ? `<span class="subtle">API symbol: ${esc(trade.exchange_symbol)}</span>` : ""}
           <span class="${pnlClass}">${isOpen ? "Unrealized" : "PnL"}: ${fmtUSDT(pnl)}</span>
           ${trade.stop_loss ? `<span class="subtle">SL: ${fmtPrice(trade.stop_loss)}</span>` : ""}
+          ${trade.last_exchange_sync_error ? `<span class="error-note">Exchange error: ${esc(trade.last_exchange_sync_error)}</span>` : ""}
         </div>
         <div class="msg-card-footer subtle">${esc(trade.session_id.slice(-8))} · ${fmtDate(trade.opened_at)}</div>
       </article>
+    `;
+  }
+
+  function renderSignalCollection(target, signals) {
+    if (!target) {
+      return;
+    }
+    if (!signals.length) {
+      target.innerHTML = '<p class="empty-state">No signal state recorded yet.</p>';
+      return;
+    }
+    target.innerHTML = signals.slice(0, 60).map((signal) => {
+      const latestNote = Array.isArray(signal.notes) && signal.notes.length
+        ? signal.notes[signal.notes.length - 1]
+        : "";
+      const sideBadge = signal.side
+        ? `<span class="badge ${signal.side === "long" ? "side-long" : "side-short"}">${esc(signal.side.toUpperCase())}</span>`
+        : "";
+      return `
+        <article class="msg-card">
+          <div class="msg-card-header">
+            <span class="badge ${signal.status_group === "active" ? "badge-green" : "badge-gray"}">${esc(signal.status || "unknown")}</span>
+            ${sideBadge}
+            ${signal.symbol ? `<span class="badge badge-neutral">${esc(signal.symbol)}</span>` : ""}
+            ${signal.exchange_symbol ? `<span class="subtle">API ${esc(signal.exchange_symbol)}</span>` : ""}
+            <span class="subtle">signal ${esc(signal.signal_id.slice(-8))}</span>
+          </div>
+          <div class="msg-card-body">
+            <span>SL: ${signal.stop_loss ? fmtPrice(signal.stop_loss) : "—"}</span>
+            <span>TPs: ${(signal.take_profits || []).map(fmtPrice).join(", ") || "—"}</span>
+            <span>Lev: ${esc(signal.leverage || "—")}x</span>
+            <span>Msgs: ${esc(signal.message_count || 0)}</span>
+            ${signal.trade_id ? `<span class="subtle">trade ${esc(signal.trade_id.slice(-8))}</span>` : ""}
+            ${latestNote ? `<span class="subtle effect-summary">${esc(latestNote)}</span>` : ""}
+          </div>
+          <div class="msg-card-footer subtle">${fmtDate(signal.updated_at)}</div>
+        </article>
+      `;
+    }).join("");
+  }
+
+  function renderExchangeSnapshot(target, snapshot) {
+    if (!target) {
+      return;
+    }
+    if (!snapshot) {
+      target.innerHTML = '<p class="empty-state">No exchange snapshot has been synced yet.</p>';
+      return;
+    }
+    const positions = Array.isArray(snapshot.positions) ? snapshot.positions : [];
+    const orders = Array.isArray(snapshot.recent_orders) ? snapshot.recent_orders : [];
+    const error = snapshot.error ? `<p class="error-note">${esc(snapshot.error)}</p>` : "";
+    target.innerHTML = `
+      <article class="msg-card">
+        <div class="msg-card-header">
+          <span class="badge badge-neutral">Sync</span>
+          <span class="subtle">${fmtDate(snapshot.fetched_at)}</span>
+        </div>
+        <div class="msg-card-body">
+          <span>Open Positions: ${positions.length}</span>
+          <span>Recent Orders: ${orders.length}</span>
+        </div>
+      </article>
+      ${error}
+      ${positions.map((position) => `
+        <article class="msg-card">
+          <div class="msg-card-header">
+            <span class="badge ${position.side === "LONG" ? "side-long" : "side-short"}">${esc(position.side)}</span>
+            <span class="badge badge-neutral">${esc(position.symbol)}</span>
+            ${position.exchange_symbol ? `<span class="subtle">API ${esc(position.exchange_symbol)}</span>` : ""}
+          </div>
+          <div class="msg-card-body">
+            <span>Qty: ${esc(position.quantity)}</span>
+            <span>Avg: ${fmtPrice(position.avg_price)}</span>
+            <span>Mark: ${fmtPrice(position.mark_price)}</span>
+            <span>uPnL: ${fmtUSDT(position.unrealized_pnl || 0)}</span>
+          </div>
+        </article>
+      `).join("")}
+      ${orders.slice(0, 12).map((order) => `
+        <article class="msg-card">
+          <div class="msg-card-header">
+            <span class="badge badge-blue">${esc(order.status || "unknown")}</span>
+            <span class="badge badge-neutral">${esc(order.symbol)}</span>
+            ${order.exchange_symbol ? `<span class="subtle">API ${esc(order.exchange_symbol)}</span>` : ""}
+            <span class="subtle">${esc(order.side)}</span>
+          </div>
+          <div class="msg-card-body">
+            <span>Executed: ${esc(order.executed_qty || 0)} / ${esc(order.orig_qty || 0)}</span>
+            <span>Avg: ${fmtPrice(order.avg_price)}</span>
+            <span>Lev: ${esc(order.leverage || 1)}x</span>
+          </div>
+        </article>
+      `).join("")}
     `;
   }
 
@@ -411,12 +568,22 @@
         <td class="subtle">${esc((item.notes || []).join("; "))}</td>
       </tr>
     `).join("");
+    const exchangeOrders = (trade.exchange_order_history || []).map((item) => `
+      <tr>
+        <td class="mono">${esc(item.order_id || "—")}</td>
+        <td>${esc(item.side || "—")}</td>
+        <td>${esc(item.status || "—")}</td>
+        <td>${esc(item.executed_qty || "0")} / ${esc(item.orig_qty || "0")}</td>
+        <td>${fmtPrice(item.avg_price)}</td>
+      </tr>
+    `).join("");
     const realized = parseFloat(trade.realized_pnl || 0);
     const unrealized = parseFloat(trade.unrealized_pnl || 0);
     return `
       <div class="modal-metrics">
         <div class="metric"><span>Session</span><strong>${esc(trade.session_id)}</strong></div>
         <div class="metric"><span>Symbol</span><strong>${esc(trade.symbol)}</strong></div>
+        <div class="metric"><span>API Symbol</span><strong>${esc(trade.exchange_symbol || "—")}</strong></div>
         <div class="metric"><span>Side</span><strong class="${trade.side === "long" ? "side-long" : "side-short"}">${esc((trade.side || "").toUpperCase())}</strong></div>
         <div class="metric"><span>Leverage</span><strong>${esc(trade.leverage || 1)}x</strong></div>
         <div class="metric"><span>Entry</span><strong>${fmtPrice(trade.entry_price)}</strong></div>
@@ -429,9 +596,23 @@
         <div class="metric"><span>Unrealized PnL</span><strong class="${unrealized >= 0 ? "metric-pos" : "metric-neg"}">${fmtUSDT(unrealized)}</strong></div>
         <div class="metric"><span>Fees</span><strong>${fmtUSDT(trade.fees || 0)}</strong></div>
         <div class="metric"><span>Channel</span><strong>${esc(trade.channel_label || trade.channel_id || "—")}</strong></div>
+        <div class="metric"><span>Exchange Sync</span><strong>${trade.exchange_position ? "Yes" : "No"}</strong></div>
+        <div class="metric"><span>Last Exchange Error</span><strong>${esc(trade.last_exchange_sync_error || "—")}</strong></div>
       </div>
+      ${trade.exchange_position ? `
+        <h4 style="margin-top:1rem">Exchange Position Snapshot</h4>
+        <div class="modal-metrics">
+          <div class="metric"><span>Exchange Side</span><strong>${esc(trade.exchange_position.side || "—")}</strong></div>
+          <div class="metric"><span>Exchange Qty</span><strong>${esc(trade.exchange_position.quantity || "0")}</strong></div>
+          <div class="metric"><span>Exchange Avg</span><strong>${fmtPrice(trade.exchange_position.avg_price)}</strong></div>
+          <div class="metric"><span>Exchange Mark</span><strong>${fmtPrice(trade.exchange_position.mark_price)}</strong></div>
+          <div class="metric"><span>Exchange uPnL</span><strong>${fmtUSDT(trade.exchange_position.unrealized_pnl || 0)}</strong></div>
+        </div>
+      ` : ""}
       <h4 style="margin-top:1rem">Message Attribution History</h4>
       ${history ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>Date</th><th>Action</th><th>Channel</th><th>Message</th><th>Preview</th><th>Notes</th></tr></thead><tbody>${history}</tbody></table></div>` : "<p class='subtle'>No history.</p>"}
+      <h4 style="margin-top:1rem">Exchange Order History</h4>
+      ${exchangeOrders ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>Order</th><th>Side</th><th>Status</th><th>Executed</th><th>Avg Price</th></tr></thead><tbody>${exchangeOrders}</tbody></table></div>` : "<p class='subtle'>No exchange orders synced for this trade.</p>"}
     `;
   }
 
@@ -458,9 +639,9 @@
     if (!state.bootstrap) {
       return;
     }
-    setVal("lt-balance", state.bootstrap.default_initial_balance || "100");
     setVal("lt-risk", state.bootstrap.default_risk_per_trade_pct || "120");
     setVal("lt-mode", state.bootstrap.default_trading_mode || "demo");
+    syncModeOptions();
     const ai = document.getElementById("lt-use-ai");
     if (ai) {
       ai.checked = !!state.bootstrap.use_ai_default;
@@ -476,20 +657,35 @@
     syncBalanceControls();
   }
 
+  function syncModeOptions() {
+    const select = document.getElementById("lt-mode");
+    if (!select) {
+      return;
+    }
+    const liveOption = [...select.options].find((item) => item.value === "live");
+    const enabled = !!state.bootstrap?.live_mode_enabled;
+    if (liveOption) {
+      liveOption.disabled = !enabled;
+      liveOption.textContent = enabled
+        ? "Live (Real Toobit Account)"
+        : "Live (Enable Env Flag)";
+    }
+    if (!enabled && select.value === "live") {
+      select.value = "demo";
+    }
+  }
+
   function syncBalanceControls() {
     const mode = document.getElementById("lt-mode")?.value || "demo";
-    const input = document.getElementById("lt-balance");
     const help = document.getElementById("lt-balance-help");
     const liveMode = mode === "live";
-    if (input) {
-      input.disabled = liveMode;
-      input.readOnly = liveMode;
-      input.style.opacity = liveMode ? "0.6" : "";
-    }
+    const liveEnabled = !!state.bootstrap?.live_mode_enabled;
     if (help) {
       help.textContent = liveMode
-        ? "Live mode derives capital from the connected Toobit account balance."
-        : "Demo mode uses this value.";
+        ? "Live mode derives capital, sizing, and PnL from the connected Toobit account."
+        : !liveEnabled
+          ? "Demo mode also uses the connected Toobit demo account balance. Enable LIVE_TRADING_LIVE_MODE_ENABLED in root .env.local to unlock live sessions."
+        : "Demo mode also uses the connected Toobit demo account balance.";
     }
   }
 
@@ -508,7 +704,6 @@
     const payload = {
       channels: [channel],
       trading_mode: tradingMode,
-      initial_balance: tradingMode === "demo" ? (document.getElementById("lt-balance")?.value || "100") : null,
       risk_per_trade_pct: document.getElementById("lt-risk")?.value || "120",
       strategy_key: document.getElementById("lt-strategy")?.value || null,
       use_ai: document.getElementById("lt-use-ai")?.checked ?? true,
@@ -550,6 +745,74 @@
       const result = await response.json();
       if (!response.ok || !result.stopped) {
         showError(result.detail || "Failed to stop session.");
+        return;
+      }
+      await fetchOverview();
+      if (state.selectedSessionId === sessionId) {
+        await fetchSessionDetail(sessionId, { silent: true });
+      }
+    } catch (error) {
+      showError(`Network error: ${error.message}`);
+    }
+  }
+
+  async function deleteSessionHistory(sessionId) {
+    if (!sessionId || !confirm("Delete this session and its stored history from the dashboard?")) {
+      return;
+    }
+    try {
+      const response = await api(`/api/live/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      });
+      const result = await response.json();
+      if (!response.ok || !result.deleted) {
+        showError(result.detail || "Failed to delete session history.");
+        return;
+      }
+      closeSessionModal();
+      await fetchOverview();
+    } catch (error) {
+      showError(`Network error: ${error.message}`);
+    }
+  }
+
+  async function deleteTradeRecord(sessionId, tradeId) {
+    if (!sessionId || !tradeId || !confirm("Delete this trade record from dashboard history?")) {
+      return;
+    }
+    try {
+      const response = await api(
+        `/api/live/sessions/${encodeURIComponent(sessionId)}/trades/${encodeURIComponent(tradeId)}`,
+        { method: "DELETE" }
+      );
+      const result = await response.json();
+      if (!response.ok || !result.deleted) {
+        showError(result.detail || "Failed to delete trade record.");
+        return;
+      }
+      await fetchOverview();
+      if (state.selectedSessionId === sessionId) {
+        await fetchSessionDetail(sessionId, { silent: true });
+      }
+      closeTradeModal();
+    } catch (error) {
+      showError(`Network error: ${error.message}`);
+    }
+  }
+
+  async function deleteMessageRecord(sessionId, messageId, channelId) {
+    if (!sessionId || !messageId || !channelId || !confirm("Delete this message record from dashboard history?")) {
+      return;
+    }
+    try {
+      const query = new URLSearchParams({ channel_id: channelId });
+      const response = await api(
+        `/api/live/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}?${query.toString()}`,
+        { method: "DELETE" }
+      );
+      const result = await response.json();
+      if (!response.ok || !result.deleted) {
+        showError(result.detail || "Failed to delete message record.");
         return;
       }
       await fetchOverview();
@@ -821,7 +1084,11 @@
       partial_close: "badge-orange",
       updated_sl: "badge-blue",
       updated_tp: "badge-blue",
+      updated_leverage: "badge-blue",
+      cancelled_trade: "badge-red",
       invalid: "badge-red",
+      invalid_symbol: "badge-red",
+      invalid_sizing: "badge-red",
       no_match: "badge-gray",
       no_open_trade: "badge-gray",
       processing: "badge-yellow",

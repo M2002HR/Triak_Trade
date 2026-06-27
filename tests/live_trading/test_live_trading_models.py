@@ -117,9 +117,10 @@ class TestLiveSession:
             interval="1m",
         )
 
-    def test_paper_balance_defaults_to_initial(self) -> None:
+    def test_paper_balance_defaults_to_zero_until_account_sync(self) -> None:
         s = self._make_session()
-        assert s.paper_balance == s.initial_balance
+        assert s.paper_balance == Decimal("0")
+        assert s.paper_initial_balance == Decimal("0")
 
     def test_is_running_when_status_running(self) -> None:
         s = self._make_session()
@@ -152,7 +153,7 @@ class TestLiveSessionConfig:
     def test_default_values(self) -> None:
         config = LiveSessionConfig(channels=["https://t.me/ch"])
         assert config.trading_mode == "demo"
-        assert config.initial_balance == Decimal("100")
+        assert config.initial_balance == Decimal("0")
         assert config.use_ai
 
     def test_live_mode_locks_initial_balance(self) -> None:

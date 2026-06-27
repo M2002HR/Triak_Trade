@@ -16,16 +16,22 @@ from triak_trade.dashboard.realtime import DashboardRealtimeHub
 from triak_trade.dashboard.routes import build_router
 from triak_trade.dashboard.services import DashboardService
 from triak_trade.dashboard.templates import STATIC_DIR, TEMPLATE_DIR
+from triak_trade.db.base import Base
+from triak_trade.db.engine import build_engine_from_settings, create_session_factory
 
 
 def create_dashboard_app(settings: Settings) -> FastAPI:
     realtime_hub = DashboardRealtimeHub()
+    db_engine = build_engine_from_settings(settings)
+    Base.metadata.create_all(db_engine)
+    db_session_factory = create_session_factory(db_engine)
     service = DashboardService(
         settings,
         realtime_notifier=realtime_hub.broadcast_threadsafe,
     )
     live_coordinator = DashboardLiveCoordinator(
         settings=settings,
+        session_factory=db_session_factory,
         notifier=realtime_hub.broadcast_threadsafe,
     )
 

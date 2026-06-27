@@ -12,19 +12,28 @@ from triak_trade.live_trading.models import (
     LiveMessageTrace,
     LiveSession,
     LiveSessionConfig,
+    LiveSignalSnapshot,
     LiveTrade,
 )
 
 
-def _make_settings(live_enabled: bool = True) -> MagicMock:
+def _make_settings(
+    live_enabled: bool = True,
+    *,
+    live_mode_enabled: bool = False,
+) -> MagicMock:
     s = MagicMock()
     s.LIVE_TRADING_ENABLED = live_enabled
+    s.LIVE_TRADING_LIVE_MODE_ENABLED = live_mode_enabled
     s.LIVE_TRADING_RUNTIME_DIR = "/tmp/test_live"
     s.LIVE_TRADING_MODE = "demo"
     s.LIVE_TRADING_DEFAULT_INITIAL_BALANCE = Decimal("100")
     s.LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT = Decimal("120")
     s.LIVE_TRADING_DEFAULT_STRATEGY_KEY = "tp_trailing_risk_managed"
     s.LIVE_TRADING_USE_AI = False
+    s.LIVE_TRADING_REQUIRE_AI_CLASSIFIER = False
+    s.LIVE_TRADING_AUTO_RESUME_SESSIONS = False
+    s.LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT = Decimal("120")
     s.LIVE_TRADING_DEFAULT_CHANNELS = []
     s.TELEGRAM_API_ID = 12345
     s.TELEGRAM_API_HASH = MagicMock()
@@ -40,6 +49,8 @@ def _make_settings(live_enabled: bool = True) -> MagicMock:
     s.AI_GATEWAY_ENABLED = False
     s.AI_CLASSIFIER_ENABLED = False
     s.EXECUTION_MODE = "demo"
+    s.KILL_SWITCH_ENABLED = False
+    s.KILL_SWITCH_REASON = ""
     return s
 
 
@@ -116,9 +127,8 @@ class TestDashboardLiveCoordinatorState:
                 bootstrap = coord.bootstrap()
             assert "readiness" in bootstrap
             assert "is_running" in bootstrap
-            assert "default_initial_balance" in bootstrap
             assert "available_strategies" in bootstrap
-            assert bootstrap["live_initial_balance_locked"] is True
+            assert bootstrap["live_mode_enabled"] is False
 
     def test_stop_nonexistent_session_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -158,9 +168,46 @@ class TestDashboardLiveCoordinatorState:
                     )
                 )
             except ValueError as exc:
-                assert "demo sessions only" in str(exc).lower()
+                assert "live_trading_live_mode_enabled" in str(exc).lower()
             else:
                 raise AssertionError("Expected ValueError")
+
+    def test_start_session_allows_live_mode_when_flag_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings(live_enabled=True, live_mode_enabled=True)
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+            fake_session = LiveSession(
+                session_id="ls_live_enabled",
+                channels=["https://t.me/live"],
+                channel_labels=["@live"],
+                trading_mode="live",
+                initial_balance=Decimal("0"),
+                risk_per_trade_pct=Decimal("120"),
+                strategy_key="tp_trailing_risk_managed",
+                use_ai=False,
+                interval="1m",
+            )
+            fake_engine = MagicMock()
+            fake_thread = MagicMock()
+            with (
+                patch(
+                    "triak_trade.dashboard.live_runtime.build_engine_from_config",
+                    return_value=(fake_session, fake_engine),
+                ),
+                patch(
+                    "triak_trade.dashboard.live_runtime.threading.Thread",
+                    return_value=fake_thread,
+                ),
+            ):
+                session = coord.start_session(
+                    LiveSessionConfig(
+                        channels=["https://t.me/live"],
+                        trading_mode="live",
+                    )
+                )
+            assert session.session_id == "ls_live_enabled"
+            fake_thread.start.assert_called_once()
 
     def test_overview_aggregates_multiple_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -296,9 +343,112 @@ class TestDashboardLiveCoordinatorState:
                     final_status="opened_trade",
                 ),
             )
+            coord.store.save_signal_snapshot(
+                "ls_detail",
+                LiveSignalSnapshot(
+                    signal_id="sig-detail",
+                    channel_id="@detail",
+                    channel_label="@detail",
+                    created_from_message_id=25,
+                    status="open",
+                    status_group="active",
+                    symbol="BTCUSDT",
+                    side="long",
+                    updated_at=datetime.now(timezone.utc),
+                ),
+            )
 
             detail = coord.get_session_detail("ls_detail")
             assert detail is not None
             assert detail.session.session_id == "ls_detail"
             assert len(detail.open_trades) == 1
             assert detail.messages[0].session_id == "ls_detail"
+            assert detail.signals[0].signal_id == "sig-detail"
+
+    def test_delete_trade_and_message_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+
+            coord.store.save_session(
+                LiveSession(
+                    session_id="ls_delete",
+                    channels=["https://t.me/detail"],
+                    channel_labels=["@detail"],
+                    trading_mode="demo",
+                    initial_balance=Decimal("100"),
+                    risk_per_trade_pct=Decimal("120"),
+                    strategy_key="tp_trailing_risk_managed",
+                    use_ai=False,
+                    interval="1m",
+                )
+            )
+            coord.store.save_trade(
+                LiveTrade(
+                    trade_id="trade_delete",
+                    session_id="ls_delete",
+                    signal_id="sig-delete",
+                    channel_id="@detail",
+                    channel_input="https://t.me/detail",
+                    channel_label="@detail",
+                    symbol="BTCUSDT",
+                    side="long",
+                    leverage=4,
+                    entry_price=Decimal("25000"),
+                    quantity=Decimal("0.1"),
+                    status="closed",
+                )
+            )
+            coord.store.save_message_trace(
+                "ls_delete",
+                LiveMessageTrace(
+                    session_id="ls_delete",
+                    message_id=11,
+                    channel_id="@detail",
+                    channel_label="@detail",
+                    message_date=datetime.now(timezone.utc),
+                ),
+            )
+
+            assert coord.delete_trade_record("ls_delete", "trade_delete") is True
+            assert coord.delete_message_record("ls_delete", 11, "@detail") is True
+
+    def test_recover_incomplete_sessions_resumes_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.LIVE_TRADING_AUTO_RESUME_SESSIONS = True
+
+            initial = DashboardLiveCoordinator(settings=settings)
+            initial.store.save_session(
+                LiveSession(
+                    session_id="ls_resume",
+                    channels=["https://t.me/resume"],
+                    channel_labels=["@resume"],
+                    trading_mode="demo",
+                    initial_balance=Decimal("0"),
+                    risk_per_trade_pct=Decimal("120"),
+                    strategy_key="tp_trailing_risk_managed",
+                    use_ai=False,
+                    interval="1m",
+                    status="running",
+                )
+            )
+
+            fake_engine = MagicMock()
+            fake_thread = MagicMock()
+            with (
+                patch(
+                    "triak_trade.dashboard.live_runtime.build_engine_from_session",
+                    return_value=(initial.store.load_session("ls_resume"), fake_engine),
+                ),
+                patch(
+                    "triak_trade.dashboard.live_runtime.threading.Thread",
+                    return_value=fake_thread,
+                ),
+            ):
+                recovered = DashboardLiveCoordinator(settings=settings)
+
+            assert "ls_resume" in recovered._engines
+            fake_thread.start.assert_called_once()

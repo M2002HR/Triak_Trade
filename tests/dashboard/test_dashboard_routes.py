@@ -13,10 +13,12 @@ from triak_trade.live_trading.models import (
 )
 
 
-def settings(tmp_path: Path) -> Settings:
+def settings(tmp_path: Path, *, live_mode_enabled: bool = False) -> Settings:
     runtime = tmp_path / "dashboard"
     return Settings(
         _env_file=None,
+        DATABASE_URL=f"sqlite+pysqlite:///{tmp_path / 'dashboard.db'}",
+        TEST_DATABASE_URL=f"sqlite+pysqlite:///{tmp_path / 'dashboard_test.db'}",
         DASHBOARD_ADMIN_TOKEN="test-token",
         DASHBOARD_SESSION_SECRET="session-secret",
         DASHBOARD_RUNTIME_DIR=str(runtime),
@@ -27,6 +29,7 @@ def settings(tmp_path: Path) -> Settings:
         ROOT_ENV_FILE=str(tmp_path / ".env.local"),
         VERIFICATION_REPORT_DIR=str(tmp_path / "reports"),
         REAL_BACKTEST_REPORT_DIR=str(tmp_path / "backtests"),
+        LIVE_TRADING_LIVE_MODE_ENABLED=live_mode_enabled,
     )
 
 
@@ -41,7 +44,7 @@ def headers() -> dict[str, str]:
 def test_dashboard_main_page_includes_status_cards(tmp_path: Path) -> None:
     response = client(tmp_path).get("/", headers=headers())
     assert response.status_code == 200
-    assert "Admin Bot" in response.text
+    assert "AI Gateway" in response.text
     assert "Kill Switch" in response.text
     assert "Auto Mode" in response.text
 
@@ -66,12 +69,6 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     assert "checked" in log_per_message_slice
 
 
-def test_approvals_page_renders_empty_state(tmp_path: Path) -> None:
-    response = client(tmp_path).get("/approvals", headers=headers())
-    assert response.status_code == 200
-    assert "No pending proposed actions" in response.text
-
-
 def test_logs_page_renders_log_channel_status(tmp_path: Path) -> None:
     response = client(tmp_path).get("/logs", headers=headers())
     assert response.status_code == 200
@@ -92,6 +89,14 @@ def test_status_json_contains_no_secrets(tmp_path: Path) -> None:
     assert "test-token" not in text
     assert "session-secret" not in text
     assert response.json()["live_trading_blocked"] is True
+
+
+def test_status_json_reflects_live_mode_flag(tmp_path: Path) -> None:
+    app = create_dashboard_app(settings(tmp_path, live_mode_enabled=True))
+    client_obj = LocalASGIClient(app)
+    response = client_obj.get("/status", headers=headers())
+    assert response.status_code == 200
+    assert response.json()["live_trading_blocked"] is False
 
 
 def test_login_page_renders(tmp_path: Path) -> None:
@@ -133,6 +138,21 @@ def test_live_trading_page_is_english_only(tmp_path: Path) -> None:
     assert "سشن" not in text
 
 
+def test_live_trading_page_disables_live_option_without_flag(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/live-trading", headers=headers())
+    assert response.status_code == 200
+    assert 'option value="live" disabled' in response.text
+
+
+def test_live_trading_page_enables_live_option_with_flag(tmp_path: Path) -> None:
+    app = create_dashboard_app(settings(tmp_path, live_mode_enabled=True))
+    client_obj = LocalASGIClient(app)
+    response = client_obj.get("/live-trading", headers=headers())
+    assert response.status_code == 200
+    assert 'option value="live"' in response.text
+    assert 'option value="live" disabled' not in response.text
+
+
 def test_live_session_start_uses_submitted_balance_in_demo_mode(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -142,7 +162,7 @@ def test_live_session_start_uses_submitted_balance_in_demo_mode(
 
     def fake_start_session(config):
         assert config.trading_mode == "demo"
-        assert config.initial_balance == Decimal("9999")
+        assert config.initial_balance == Decimal("0")
         return LiveSession(
             session_id="ls_test",
             channels=config.channels,
@@ -170,7 +190,7 @@ def test_live_session_start_uses_submitted_balance_in_demo_mode(
         },
     )
     assert response.status_code == 202
-    assert response.json()["session"]["initial_balance"] == "9999"
+    assert response.json()["session"]["initial_balance"] == "0"
 
 
 def test_live_session_start_rejects_live_mode(tmp_path: Path) -> None:
@@ -189,8 +209,48 @@ def test_live_session_start_rejects_live_mode(tmp_path: Path) -> None:
     assert response.status_code == 400
     assert any(
         item in response.json()["detail"].lower()
-        for item in ("blocked", "disabled")
+        for item in ("blocked", "disabled", "live_trading_live_mode_enabled")
     )
+
+
+def test_live_session_start_accepts_live_mode_when_flag_enabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = create_dashboard_app(settings(tmp_path, live_mode_enabled=True))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+
+    def fake_start_session(config):
+        assert config.trading_mode == "live"
+        assert config.initial_balance == Decimal("0")
+        assert config.use_ai is True
+        return LiveSession(
+            session_id="ls_live",
+            channels=config.channels,
+            channel_labels=["@chan"],
+            trading_mode=config.trading_mode,
+            initial_balance=config.initial_balance,
+            risk_per_trade_pct=config.risk_per_trade_pct,
+            strategy_key=config.strategy_key,
+            use_ai=config.use_ai,
+            interval=config.interval,
+        )
+
+    monkeypatch.setattr(live_coordinator, "start_session", fake_start_session)
+
+    response = client_obj.post(
+        "/api/live/sessions/start",
+        headers=headers(),
+        json={
+            "channels": ["https://t.me/chan"],
+            "trading_mode": "live",
+            "risk_per_trade_pct": "120",
+            "strategy_key": "tp_trailing_risk_managed",
+            "use_ai": True,
+        },
+    )
+    assert response.status_code == 202
+    assert response.json()["session"]["trading_mode"] == "live"
 
 
 def test_live_session_start_rejects_multiple_channels(tmp_path: Path) -> None:
@@ -279,3 +339,53 @@ def test_live_session_detail_endpoint_is_session_specific(tmp_path: Path, monkey
     payload = response.json()["detail"]
     assert payload["session"]["session_id"] == "ls_modal"
     assert payload["messages"][0]["session_id"] == "ls_modal"
+
+
+def test_live_session_history_delete_endpoint(tmp_path: Path, monkeypatch) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+    monkeypatch.setattr(
+        live_coordinator,
+        "delete_session_history",
+        lambda session_id: session_id == "ls_x",
+    )
+
+    response = client_obj.delete("/api/live/sessions/ls_x", headers=headers())
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+
+
+def test_live_trade_record_delete_endpoint(tmp_path: Path, monkeypatch) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+    monkeypatch.setattr(
+        live_coordinator,
+        "delete_trade_record",
+        lambda session_id, trade_id: session_id == "ls_x" and trade_id == "tr_1",
+    )
+
+    response = client_obj.delete("/api/live/sessions/ls_x/trades/tr_1", headers=headers())
+    assert response.status_code == 200
+    assert response.json()["trade_id"] == "tr_1"
+
+
+def test_live_message_record_delete_endpoint(tmp_path: Path, monkeypatch) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+    monkeypatch.setattr(
+        live_coordinator,
+        "delete_message_record",
+        lambda session_id, message_id, channel_id: (
+            session_id == "ls_x" and message_id == 10 and channel_id == "@chan"
+        ),
+    )
+
+    response = client_obj.delete(
+        "/api/live/sessions/ls_x/messages/10?channel_id=%40chan",
+        headers=headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["message_id"] == 10

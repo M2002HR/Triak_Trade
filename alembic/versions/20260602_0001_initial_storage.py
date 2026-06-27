@@ -84,34 +84,6 @@ def upgrade() -> None:
     op.create_index("ix_signals_channel_id", "signals", ["channel_id"])
 
     op.create_table(
-        "proposed_actions",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("action_id", sa.String(length=64), nullable=False),
-        sa.Column("action_type", sa.String(length=64), nullable=False),
-        sa.Column("signal_id", sa.String(length=64), nullable=True),
-        sa.Column("risk_increasing", sa.Boolean(), nullable=False),
-        sa.Column("requires_admin_approval", sa.Boolean(), nullable=False),
-        sa.Column("confidence", sa.Numeric(10, 6), nullable=False),
-        sa.Column("reason", sa.Text(), nullable=False),
-        sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint("action_id"),
-    )
-    op.create_index("ix_proposed_actions_action_id", "proposed_actions", ["action_id"])
-    op.create_index("ix_proposed_actions_signal_id", "proposed_actions", ["signal_id"])
-
-    op.create_table(
-        "admin_decisions",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("action_id", sa.String(length=64), nullable=False),
-        sa.Column("decision", sa.String(length=32), nullable=False),
-        sa.Column("admin_user_id", sa.Integer(), nullable=False),
-        sa.Column("reason", sa.Text(), nullable=True),
-        sa.Column("decided_at", sa.DateTime(timezone=True), nullable=False),
-    )
-    op.create_index("ix_admin_decisions_action_id", "admin_decisions", ["action_id"])
-
-    op.create_table(
         "candles",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("symbol", sa.String(length=64), nullable=False),
@@ -198,13 +170,6 @@ def downgrade() -> None:
     op.drop_index("ix_candles_interval", table_name="candles")
     op.drop_index("ix_candles_symbol", table_name="candles")
     op.drop_table("candles")
-
-    op.drop_index("ix_admin_decisions_action_id", table_name="admin_decisions")
-    op.drop_table("admin_decisions")
-
-    op.drop_index("ix_proposed_actions_signal_id", table_name="proposed_actions")
-    op.drop_index("ix_proposed_actions_action_id", table_name="proposed_actions")
-    op.drop_table("proposed_actions")
 
     op.drop_index("ix_signals_channel_id", table_name="signals")
     op.drop_index("ix_signals_signal_id", table_name="signals")
