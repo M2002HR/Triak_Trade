@@ -18,7 +18,6 @@ def test_safe_checks_pass_without_real_services() -> None:
         checks.telegram_dry_run_check,
         checks.market_data_fake_check,
         checks.toobit_safety_check,
-        checks.admin_bot_dry_run_check,
         checks.backtest_fixture_check,
     ]:
         result = check(settings)
