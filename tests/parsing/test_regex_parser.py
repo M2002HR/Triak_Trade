@@ -102,3 +102,17 @@ def test_extract_persian_market_tag_as_market_entry() -> None:
     assert parsed.side is TradeSide.SHORT
     assert parsed.entry_type is EntryType.MARKET
     assert parsed.leverage == 70
+
+
+def test_extract_signal_with_numeric_token_prefix_symbol() -> None:
+    parsed = _parse(
+        "1000SHIB/USDT BUY Entry zone: 0.005979 SL: 0.005680 TP1 0.006054 TP2 0.006128 TP3 0.006278"
+    )
+    assert parsed.action is SignalAction.OPEN
+    assert parsed.symbol == "1000SHIBUSDT"
+    assert parsed.side is TradeSide.BUY
+    assert parsed.take_profits == [
+        Decimal("0.006054"),
+        Decimal("0.006128"),
+        Decimal("0.006278"),
+    ]

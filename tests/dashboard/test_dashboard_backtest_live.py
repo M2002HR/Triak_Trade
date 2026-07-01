@@ -207,6 +207,7 @@ def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> No
     response = build_client(tmp_path, monkeypatch).get("/backtests", headers=_headers())
     assert response.status_code == 200
     assert "Live Telegram Backtest Monitor" in response.text
+    assert "AI-Ready Classification" in response.text
     assert "Start Backtest" in response.text
     assert "Start From Message Link" in response.text
     assert "Per-Message Trace" in response.text
@@ -262,6 +263,18 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
     assert loaded["signals"][0]["status_group"] == "active"
     assert loaded["report_path"] == "runtime/reports/backtests/report.json"
 
+    listed = client.get("/api/backtests/runs?limit=8", headers=_headers())
+    assert listed.status_code == 200
+    listed_payload = listed.json()
+    listed_runs = listed_payload["runs"]
+    assert listed_runs
+    assert listed_runs[0]["run_id"] == run_id
+    assert listed_payload["total_runs"] >= 1
+    assert listed_payload["has_more"] is False
+    assert "messages" not in listed_runs[0]
+    assert "events" not in listed_runs[0]
+    assert "signals" not in listed_runs[0]
+
 
 def test_backtest_start_api_defaults_log_per_message_to_enabled(
     tmp_path: Path,
@@ -284,6 +297,38 @@ def test_backtest_start_api_defaults_log_per_message_to_enabled(
     assert start.status_code == 202
     body = start.json()
     assert body["run"]["log_per_message"] is True
+
+
+def test_backtest_run_populates_dashboard_log_tail(tmp_path: Path, monkeypatch) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    start = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "channel": "@Tofan_Trade",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "interval": "1m",
+            "max_messages": 1000,
+            "use_ai": False,
+            "send_log_channel": True,
+            "log_per_message": True,
+        },
+    )
+    assert start.status_code == 202
+
+    for _ in range(50):
+        tail = client.get("/api/logs/tail?lines=50", headers=_headers())
+        assert tail.status_code == 200
+        entries = tail.json()["entries"]
+        if any("dashboard.backtest.progress" in entry["message"] for entry in entries):
+            break
+        time.sleep(0.02)
+
+    entries = client.get("/api/logs/tail?lines=50", headers=_headers()).json()["entries"]
+    assert entries
+    assert any(entry["module"] == "backtest" for entry in entries)
+    assert any("dashboard.backtest.progress" in entry["message"] for entry in entries)
 
 
 def test_backtest_start_api_accepts_start_message_link(

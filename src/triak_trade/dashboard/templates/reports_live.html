@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div class="backtest-hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Live Trading Reports</p>
+      <h1>Per-Channel Performance</h1>
+      <p class="subtle">
+        Real-time aggregated reports for every live trading channel.
+        Includes trade counts, PnL, win rate, and session history.
+      </p>
+    </div>
+    {% if has_data %}
+    <div class="hero-stat-cluster">
+      <div class="hero-stat">
+        <span>Channels</span>
+        <strong>{{ summary.total_channels }}</strong>
+      </div>
+      <div class="hero-stat">
+        <span>Sessions</span>
+        <strong>{{ summary.total_sessions }}</strong>
+      </div>
+      <div class="hero-stat">
+        <span>Total Trades</span>
+        <strong>{{ summary.total_trades }}</strong>
+      </div>
+      <div class="hero-stat">
+        <span>Net PnL</span>
+        <strong class="{{ 'metric-pos' if summary.total_pnl > 0 else ('metric-neg' if summary.total_pnl < 0 else '') }}">
+          {{ summary.total_pnl_label }}
+        </strong>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{% if has_data %}
+<section class="status-card-grid">
+  <article class="status-card">
+    <span class="status-card-label">Win Rate</span>
+    <strong>{{ summary.overall_win_rate_label }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Total Wins</span>
+    <strong class="metric-pos">{{ summary.total_wins }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Active Channels</span>
+    <strong>{{ summary.active_channels }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Net PnL</span>
+    <strong class="{{ 'metric-pos' if summary.total_pnl > 0 else ('metric-neg' if summary.total_pnl < 0 else '') }}">{{ summary.total_pnl_label }}</strong>
+  </article>
+</section>
+
+{% for report in channel_reports %}
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Channel</p>
+      <h2>{{ report.channel_label }}</h2>
+      <p class="subtle">{{ report.channel }}</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      {% if report.open_trades > 0 %}
+      <span class="status-badge ok">{{ report.open_trades }} Open</span>
+      {% endif %}
+      <span class="badge {% if report.pnl_positive %}badge-green{% elif report.total_pnl < 0 %}badge-red{% else %}badge-neutral{% endif %}">
+        {{ report.total_pnl_label }}
+      </span>
+    </div>
+  </div>
+
+  <div class="backtest-metrics" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin:0 0 16px">
+    <div class="metric-card">
+      <span>Sessions</span>
+      <strong>{{ report.session_count }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Total Trades</span>
+      <strong>{{ report.total_trades }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Wins</span>
+      <strong class="metric-pos">{{ report.wins }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Losses</span>
+      <strong class="metric-neg">{{ report.losses }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Win Rate</span>
+      <strong>{{ report.win_rate_label }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Net PnL</span>
+      <strong class="{{ 'metric-pos' if report.pnl_positive else ('metric-neg' if report.total_pnl < 0 else '') }}">
+        {{ report.total_pnl_label }}
+      </strong>
+    </div>
+    <div class="metric-card">
+      <span>Messages</span>
+      <strong>{{ report.total_messages }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Signals</span>
+      <strong>{{ report.total_signals }}</strong>
+    </div>
+  </div>
+
+  {% if report.sessions %}
+  <details>
+    <summary style="cursor:pointer;font-weight:600;color:var(--muted-light);font-size:0.88rem;margin-bottom:8px">
+      Session History ({{ report.session_count }})
+    </summary>
+    <div class="table-scroll" style="margin-top:10px">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Session ID</th>
+            <th>Mode</th>
+            <th>Status</th>
+            <th>Started</th>
+            <th>Trades</th>
+            <th>Open</th>
+            <th>Messages</th>
+            <th>PnL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in report.sessions %}
+          {% set m = s.get("metrics") or {} %}
+          <tr>
+            <td class="mono" style="font-size:0.78rem">{{ (s.get("session_id") or "")[:12] }}…</td>
+            <td>
+              <span class="badge {% if s.get('trading_mode') == 'live' %}mode-live{% else %}mode-demo{% endif %}">
+                {{ (s.get("trading_mode") or "demo") | upper }}
+              </span>
+            </td>
+            <td>
+              <span class="phase-pill phase-{{ s.get('status') or 'idle' }}">{{ s.get("status") or "idle" }}</span>
+            </td>
+            <td class="mono" style="font-size:0.78rem">{{ (s.get("started_at") or s.get("created_at") or "")[:16] | replace("T"," ") }}</td>
+            <td>{{ m.get("total_trades") or 0 }}</td>
+            <td>{{ m.get("open_positions") or 0 }}</td>
+            <td>{{ m.get("messages_processed") or 0 }}</td>
+            <td class="{{ 'metric-pos' if (m.get('total_pnl') or 0)|float > 0 else ('metric-neg' if (m.get('total_pnl') or 0)|float < 0 else '') }}">
+              {{ "%+.2f"|format((m.get("total_pnl") or 0)|float) }}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endif %}
+</section>
+{% endfor %}
+
+{% else %}
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">No Data</p>
+      <h2>No Live Sessions Yet</h2>
+    </div>
+  </div>
+  <div class="empty-state-box">
+    No live trading sessions found. Start a session from the
+    <a href="/live-trading" style="color:var(--accent)">Live Trading</a> page to generate reports here.
+  </div>
+</section>
+{% endif %}
+
+<section class="panel subtle-panel">
+  <div class="action-row">
+    <div>
+      <strong>Go to Live Trading</strong>
+      <p class="subtle" style="margin:4px 0 0">Start or monitor live sessions.</p>
+    </div>
+    <a href="/live-trading" class="button ghost-button">Open Live Trading →</a>
+  </div>
+</section>
+{% endblock %}

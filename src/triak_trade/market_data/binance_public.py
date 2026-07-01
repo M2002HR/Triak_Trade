@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import httpx
 
+from triak_trade.core.logging import log_event
 from triak_trade.core.symbols import canonical_market_symbol
 from triak_trade.domain.enums import CandleSource
 from triak_trade.domain.models import Candle
@@ -23,6 +25,8 @@ from triak_trade.market_data.errors import (
     MarketDataTimeoutError,
 )
 from triak_trade.market_data.intervals import interval_to_milliseconds, validate_interval
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -64,11 +68,30 @@ class BinancePublicFuturesProvider:
         start_utc = _to_utc(start_time)
         end_utc = _to_utc(end_time)
         if end_utc <= start_utc:
+            log_event(
+                _log,
+                logging.DEBUG,
+                "binance_public_market_data.empty_window",
+                symbol=normalized_symbol,
+                interval=normalized_interval,
+                start_time=start_utc.isoformat(),
+                end_time=end_utc.isoformat(),
+            )
             return []
 
         specs = _build_archive_specs(start_utc, end_utc, normalized_symbol, normalized_interval)
         if not specs:
             return []
+        log_event(
+            _log,
+            logging.INFO,
+            "binance_public_market_data.get_klines.started",
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            archive_spec_count=len(specs),
+            start_time=start_utc.isoformat(),
+            end_time=end_utc.isoformat(),
+        )
 
         all_candles: dict[tuple[str, str, datetime, str], Candle] = {}
         async with httpx.AsyncClient(
@@ -90,6 +113,13 @@ class BinancePublicFuturesProvider:
                     key = (candle.symbol, candle.interval, candle.open_time, candle.source.value)
                     all_candles[key] = candle
         if not all_candles:
+            log_event(
+                _log,
+                logging.INFO,
+                "binance_public_market_data.archive_empty_using_rest_fallback",
+                symbol=normalized_symbol,
+                interval=normalized_interval,
+            )
             recent_candles = await self._load_recent_rest_candles(
                 symbol=normalized_symbol,
                 interval=normalized_interval,
@@ -99,10 +129,25 @@ class BinancePublicFuturesProvider:
             for candle in recent_candles:
                 key = (candle.symbol, candle.interval, candle.open_time, candle.source.value)
                 all_candles[key] = candle
-        return sorted(all_candles.values(), key=lambda item: item.open_time)
+        result = sorted(all_candles.values(), key=lambda item: item.open_time)
+        log_event(
+            _log,
+            logging.INFO,
+            "binance_public_market_data.get_klines.completed",
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            candle_count=len(result),
+        )
+        return result
 
     async def get_latest_price(self, symbol: str) -> Decimal:
         normalized_symbol = self._normalize_symbol(symbol)
+        log_event(
+            _log,
+            logging.INFO,
+            "binance_public_market_data.get_latest_price.started",
+            symbol=normalized_symbol,
+        )
         async with httpx.AsyncClient(
             base_url=self.rest_base_url,
             timeout=self.timeout_seconds,
@@ -132,7 +177,15 @@ class BinancePublicFuturesProvider:
             raise MarketDataParseError("Binance public market data JSON parse error") from exc
         if not isinstance(payload, dict) or "price" not in payload:
             raise MarketDataParseError("Unsupported Binance latest price payload format")
-        return Decimal(str(payload["price"]))
+        price = Decimal(str(payload["price"]))
+        log_event(
+            _log,
+            logging.INFO,
+            "binance_public_market_data.get_latest_price.completed",
+            symbol=normalized_symbol,
+            price=str(price),
+        )
+        return price
 
     def _normalize_symbol(self, symbol: str) -> str:
         normalized = canonical_market_symbol(symbol)
@@ -148,11 +201,32 @@ class BinancePublicFuturesProvider:
         cache_path = self.cache_dir / spec.path
         missing_marker = cache_path.with_suffix(cache_path.suffix + ".missing")
         if cache_path.exists():
+            log_event(
+                _log,
+                logging.DEBUG,
+                "binance_public_market_data.archive_cache_hit",
+                label=spec.label,
+                cache_path=str(cache_path),
+            )
             return cache_path.read_bytes()
         if missing_marker.exists():
+            log_event(
+                _log,
+                logging.DEBUG,
+                "binance_public_market_data.archive_missing_marker_hit",
+                label=spec.label,
+                marker_path=str(missing_marker),
+            )
             return None
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
+        log_event(
+            _log,
+            logging.DEBUG,
+            "binance_public_market_data.archive_download_started",
+            label=spec.label,
+            path=spec.path,
+        )
         try:
             response = await client.get("/" + spec.path.lstrip("/"))
         except httpx.TimeoutException as exc:
@@ -162,6 +236,13 @@ class BinancePublicFuturesProvider:
 
         if response.status_code == 404:
             missing_marker.write_text(spec.label, encoding="utf-8")
+            log_event(
+                _log,
+                logging.INFO,
+                "binance_public_market_data.archive_not_found",
+                label=spec.label,
+                path=spec.path,
+            )
             return None
         if response.status_code >= 400:
             raise MarketDataHTTPError(
@@ -170,6 +251,14 @@ class BinancePublicFuturesProvider:
 
         payload = response.content
         cache_path.write_bytes(payload)
+        log_event(
+            _log,
+            logging.DEBUG,
+            "binance_public_market_data.archive_cached",
+            label=spec.label,
+            cache_path=str(cache_path),
+            bytes_written=len(payload),
+        )
         return payload
 
     async def _load_recent_rest_candles(
@@ -182,6 +271,14 @@ class BinancePublicFuturesProvider:
     ) -> list[Candle]:
         cache_path = self._recent_cache_path(symbol, interval, start_time, end_time)
         if cache_path.exists():
+            log_event(
+                _log,
+                logging.DEBUG,
+                "binance_public_market_data.rest_cache_hit",
+                symbol=symbol,
+                interval=interval,
+                cache_path=str(cache_path),
+            )
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
             return self._parse_rest_rows(
                 rows=payload,
@@ -195,6 +292,13 @@ class BinancePublicFuturesProvider:
         cursor = int(start_time.timestamp() * 1000)
         end_ms = int(end_time.timestamp() * 1000)
         collected_rows: list[list[object]] = []
+        log_event(
+            _log,
+            logging.DEBUG,
+            "binance_public_market_data.rest_fetch_started",
+            symbol=symbol,
+            interval=interval,
+        )
         async with httpx.AsyncClient(
             base_url=self.rest_base_url,
             timeout=self.timeout_seconds,
@@ -247,6 +351,15 @@ class BinancePublicFuturesProvider:
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(collected_rows), encoding="utf-8")
+        log_event(
+            _log,
+            logging.DEBUG,
+            "binance_public_market_data.rest_cache_written",
+            symbol=symbol,
+            interval=interval,
+            cache_path=str(cache_path),
+            row_count=len(collected_rows),
+        )
         return self._parse_rest_rows(
             rows=collected_rows,
             symbol=symbol,

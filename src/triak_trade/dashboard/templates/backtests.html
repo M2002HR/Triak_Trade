@@ -23,6 +23,24 @@
 
 <script id="backtest-bootstrap" type="application/json">{{ bootstrap | tojson }}</script>
 
+<section class="overview-action-grid overview-action-grid-compact">
+  <article class="action-card action-card-plain">
+    <span class="eyebrow">Input</span>
+    <h2>Telegram History Replay</h2>
+    <p>Run guarded history fetches with saved channels, date windows, or a specific start message link.</p>
+  </article>
+  <article class="action-card action-card-plain">
+    <span class="eyebrow">Decision Engine</span>
+    <h2>AI-Ready Classification</h2>
+    <p>Expose readiness, fallback posture, per-message trace details, and signal lifecycle transitions.</p>
+  </article>
+  <article class="action-card action-card-plain">
+    <span class="eyebrow">Output</span>
+    <h2>Observable Final Report</h2>
+    <p>Inspect run feed, recent backtests, active versus inactive signals, and the resulting report path.</p>
+  </article>
+</section>
+
 <section class="grid-two backtest-layout" data-backtest-workbench="true">
   <div class="backtest-main-column">
     {% include "partials/backtest_form.html" %}

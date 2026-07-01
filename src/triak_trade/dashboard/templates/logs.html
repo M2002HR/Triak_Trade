@@ -1,11 +1,216 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Logs & Audit Events</h1>
-<section class="panel">
-  <h2>Telegram Log Channel</h2>
-  <p>Channel: {{ log_channel.log_channel_username }}</p>
-  <p>Enabled: {{ log_channel.enabled }}</p>
-  <p>Guard Enabled: {{ log_channel.guard_enabled }}</p>
+<section class="hero">
+  <div class="backtest-hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Observability</p>
+      <h1>Logs &amp; Audit</h1>
+      <p class="subtle">
+        Structured log viewer with level filtering, statistics, and auto-refresh.
+        Secrets are automatically redacted.
+      </p>
+    </div>
+    <div class="hero-stat-cluster">
+      <div class="hero-stat">
+        <span>Total Lines</span>
+        <strong>{{ log_stats.total }}</strong>
+      </div>
+      <div class="hero-stat">
+        <span>Errors</span>
+        <strong class="{% if log_stats.has_errors %}metric-neg{% endif %}">
+          {{ log_stats.by_level.ERROR + log_stats.by_level.CRITICAL }}
+        </strong>
+      </div>
+      <div class="hero-stat">
+        <span>Warnings</span>
+        <strong class="{% if log_stats.has_warnings %}pnl-flat{% endif %}">
+          {{ log_stats.by_level.WARNING }}
+        </strong>
+      </div>
+      <div class="hero-stat">
+        <span>Info</span>
+        <strong>{{ log_stats.by_level.INFO }}</strong>
+      </div>
+    </div>
+  </div>
 </section>
-{% include "partials/log_table.html" %}
+
+<section class="status-card-grid">
+  <article class="status-card">
+    <span class="status-card-label">Telegram Log Channel</span>
+    <strong>{{ log_channel.log_channel_username or "Not set" }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Forwarding Enabled</span>
+    <strong>{{ "Yes" if log_channel.enabled else "No" }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Send Guard</span>
+    <strong>{{ "Active" if log_channel.guard_enabled else "Inactive" }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Debug Lines</span>
+    <strong>{{ log_stats.by_level.DEBUG }}</strong>
+  </article>
+</section>
+
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Runtime Log</p>
+      <h2>Log Viewer</h2>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn-sm ghost-button" id="log-refresh-btn" type="button">↻ Refresh</button>
+      <label class="checkbox" style="font-size:0.85rem">
+        <input type="checkbox" id="log-auto-refresh" style="width:auto;accent-color:var(--accent)">
+        Auto-refresh (10s)
+      </label>
+    </div>
+  </div>
+
+  <div class="filter-pill-row" id="log-level-filters" style="margin-bottom:14px">
+    <a href="/logs?level=ALL" class="filter-pill {% if active_level == 'ALL' %}active{% endif %}">All ({{ log_stats.total }})</a>
+    <a href="/logs?level=ERROR" class="filter-pill log-pill-error {% if active_level == 'ERROR' %}active{% endif %}">Error ({{ log_stats.by_level.ERROR + log_stats.by_level.CRITICAL }})</a>
+    <a href="/logs?level=WARNING" class="filter-pill log-pill-warn {% if active_level == 'WARNING' %}active{% endif %}">Warning ({{ log_stats.by_level.WARNING }})</a>
+    <a href="/logs?level=INFO" class="filter-pill {% if active_level == 'INFO' %}active{% endif %}">Info ({{ log_stats.by_level.INFO }})</a>
+    <a href="/logs?level=DEBUG" class="filter-pill {% if active_level == 'DEBUG' %}active{% endif %}">Debug ({{ log_stats.by_level.DEBUG }})</a>
+  </div>
+
+  <div class="log-viewer-shell" id="log-viewer-shell">
+    {% include "partials/log_table.html" %}
+  </div>
+</section>
+
+<section class="grid-two">
+  <section class="panel">
+    <div class="section-head compact">
+      <div>
+        <p class="eyebrow">Level Breakdown</p>
+        <h2>Log Statistics</h2>
+      </div>
+    </div>
+    <div class="overview-detail-grid">
+      <div class="metric-card">
+        <span>DEBUG</span>
+        <strong class="pnl-flat">{{ log_stats.by_level.DEBUG }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>INFO</span>
+        <strong>{{ log_stats.by_level.INFO }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>WARNING</span>
+        <strong class="{% if log_stats.has_warnings %}warn{% endif %}">{{ log_stats.by_level.WARNING }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>ERROR</span>
+        <strong class="{% if log_stats.has_errors %}metric-neg{% endif %}">{{ log_stats.by_level.ERROR }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>CRITICAL</span>
+        <strong class="{% if log_stats.by_level.CRITICAL > 0 %}metric-neg{% endif %}">{{ log_stats.by_level.CRITICAL }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>Total</span>
+        <strong>{{ log_stats.total }}</strong>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head compact">
+      <div>
+        <p class="eyebrow">Telegram Log Channel</p>
+        <h2>Forwarding Status</h2>
+      </div>
+    </div>
+    <div class="stack-list">
+      <div class="stack-item">
+        <strong>Channel</strong>
+        <p class="subtle">{{ log_channel.log_channel_username or "Not configured" }}</p>
+      </div>
+      <div class="stack-item">
+        <strong>Audit Send</strong>
+        <p class="subtle">{{ "Enabled" if log_channel.audit_send_enabled else "Disabled" }}</p>
+      </div>
+      <div class="stack-item">
+        <strong>Bot Token</strong>
+        <p class="subtle">{{ "Present" if log_channel.bot_token_present else "Missing" }}</p>
+      </div>
+      <div class="stack-item">
+        <strong>Full Text Mode</strong>
+        <p class="subtle">{{ "On" if log_channel.send_full_text else "Off" }}</p>
+      </div>
+    </div>
+    <div style="margin-top:14px">
+      <a href="/settings?tab=telegram" class="button btn-sm ghost-button">Manage Notifications →</a>
+    </div>
+  </section>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(function() {
+  var refreshBtn = document.getElementById('log-refresh-btn');
+  var autoRefreshBox = document.getElementById('log-auto-refresh');
+  var shell = document.getElementById('log-viewer-shell');
+  var autoTimer = null;
+  var currentLevel = '{{ active_level }}';
+
+  function fetchLogs() {
+    var url = '/api/logs/tail?level=' + currentLevel + '&lines=200';
+    fetch(url, { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) { renderEntries(data.entries, data.stats); })
+      .catch(function() {});
+  }
+
+  function renderEntries(entries, stats) {
+    if (!entries || !entries.length) { return; }
+    var html = '<div class="log-structured-list" id="log-structured-list">';
+    entries.forEach(function(e) {
+      var lvlClass = 'log-level-' + e.level.toLowerCase();
+      var badgeClass = 'log-badge-' + e.level.toLowerCase();
+      html += '<div class="log-row ' + lvlClass + '" data-level="' + e.level + '">';
+      html += '<span class="log-lineno">' + e.lineno + '</span>';
+      html += '<span class="log-level-badge ' + badgeClass + '">' + e.level + '</span>';
+      if (e.ts) html += '<span class="log-ts">' + e.ts + '</span>';
+      if (e.module) html += '<span class="log-module">' + escHtml(e.module) + '</span>';
+      html += '<span class="log-msg">' + escHtml(e.message) + '</span>';
+      html += '</div>';
+    });
+    html += '</div>';
+    shell.innerHTML = html;
+    shell.scrollTop = shell.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', fetchLogs);
+  }
+
+  if (autoRefreshBox) {
+    autoRefreshBox.addEventListener('change', function() {
+      if (this.checked) {
+        autoTimer = setInterval(fetchLogs, 10000);
+      } else {
+        clearInterval(autoTimer);
+        autoTimer = null;
+      }
+    });
+  }
+
+  // Scroll to bottom on load
+  if (shell) { shell.scrollTop = shell.scrollHeight; }
+})();
+</script>
 {% endblock %}

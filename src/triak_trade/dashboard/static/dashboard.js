@@ -12,8 +12,12 @@ document.documentElement.dataset.dashboardReady = "true";
     bootstrap,
     savedChannels: Array.isArray(bootstrap.saved_channels) ? bootstrap.saved_channels : [],
     activeRunId: initialRecentRuns.length ? initialRecentRuns[0].run_id : null,
-    activeRun: initialRecentRuns.length ? initialRecentRuns[0] : null,
+    activeRun: null,
     recentRuns: initialRecentRuns,
+    recentRunsTotal: initialRecentRuns.length,
+    recentRunsHasMore: false,
+    recentRunsLoadingMore: false,
+    recentRunsPageSize: 8,
     selectedMessageId: null,
     selectedSignalId: null,
     modalOpen: false,
@@ -91,10 +95,9 @@ document.documentElement.dataset.dashboardReady = "true";
   renderSavedChannels();
   renderStrategies();
   renderRecentRuns(state.recentRuns);
-  if (state.activeRun) {
-    renderRun(state.activeRun);
-  } else {
-    renderEmptyRun();
+  renderEmptyRun();
+  if (state.activeRunId) {
+    fetchRun();
   }
   connectWebSocket();
   refreshRunsList();
@@ -233,6 +236,13 @@ document.documentElement.dataset.dashboardReady = "true";
         event.preventDefault();
         event.stopPropagation();
         openSignalModal(signalTarget.getAttribute("data-signal-id") || "");
+        return;
+      }
+      const loadMoreTarget = event.target instanceof Element ? event.target.closest("[data-load-more-runs]") : null;
+      if (loadMoreTarget) {
+        event.preventDefault();
+        event.stopPropagation();
+        loadMoreRuns();
         return;
       }
       const target = event.target instanceof Element ? event.target.closest("[data-run-id]") : null;
@@ -569,16 +579,84 @@ document.documentElement.dataset.dashboardReady = "true";
       window.clearTimeout(state.listTimer);
     }
     try {
-      const response = await fetch(withAuthPath("/api/backtests/runs?limit=8"));
+      const response = await fetch(
+        withAuthPath(`/api/backtests/runs?limit=${state.recentRunsPageSize}&offset=0`),
+      );
       if (response.ok) {
-      const data = await response.json();
-        state.recentRuns = data.runs || [];
-        renderRecentRuns(state.recentRuns);
+        const data = await response.json();
+        applyRunsResponse(data, { preserveLoadedTail: true });
+        if (!state.activeRunId && state.recentRuns.length) {
+          state.activeRunId = state.recentRuns[0].run_id;
+          fetchRun();
+        } else if (state.activeRunId && !state.activeRun) {
+          fetchRun();
+        }
       }
     } catch (_error) {
       // Keep silent on list refresh; main run polling is more important.
     }
     state.listTimer = window.setTimeout(refreshRunsList, 10000);
+  }
+
+  async function loadMoreRuns() {
+    if (state.recentRunsLoadingMore || !state.recentRunsHasMore) {
+      return;
+    }
+    state.recentRunsLoadingMore = true;
+    if (state.panelModalOpen && state.activePanelModal === "history") {
+      nodes.panelModalBody.innerHTML = buildRecentRunsMarkup(state.recentRuns, true);
+    }
+    try {
+      const response = await fetch(
+        withAuthPath(
+          `/api/backtests/runs?limit=${state.recentRunsPageSize}&offset=${state.recentRuns.length}`,
+        ),
+      );
+      if (!response.ok) {
+        return;
+      }
+      const data = await response.json();
+      applyRunsResponse(data, { append: true });
+    } finally {
+      state.recentRunsLoadingMore = false;
+      if (state.panelModalOpen && state.activePanelModal === "history") {
+        nodes.panelModalBody.innerHTML = buildRecentRunsMarkup(state.recentRuns, true);
+      }
+    }
+  }
+
+  function applyRunsResponse(payload, options = {}) {
+    const incoming = Array.isArray(payload.runs) ? payload.runs : [];
+    const totalRuns = Number(payload.total_runs || incoming.length || 0);
+    const hasMore = Boolean(payload.has_more);
+    state.recentRunsTotal = totalRuns;
+    state.recentRunsHasMore = hasMore;
+
+    if (options.append) {
+      const runs = Array.isArray(state.recentRuns) ? [...state.recentRuns] : [];
+      incoming.forEach((run) => {
+        const index = runs.findIndex((item) => item.run_id === run.run_id);
+        if (index >= 0) {
+          runs[index] = run;
+        } else {
+          runs.push(run);
+        }
+      });
+      state.recentRuns = sortRuns(runs);
+    } else if (options.preserveLoadedTail && state.recentRuns.length > incoming.length) {
+      const existingTail = state.recentRuns.filter(
+        (item) => !incoming.some((run) => run.run_id === item.run_id),
+      );
+      state.recentRuns = sortRuns([...incoming, ...existingTail]);
+    } else {
+      state.recentRuns = sortRuns(incoming);
+    }
+
+    renderRecentRuns(state.recentRuns);
+  }
+
+  function sortRuns(runs) {
+    return [...runs].sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
   }
 
   function renderReadiness(readiness) {
@@ -758,7 +836,7 @@ document.documentElement.dataset.dashboardReady = "true";
       <div class="preview-stack">
         <strong>${escapeHtml(latest.channel_input || latest.channel_resolved)}</strong>
         <span>${escapeHtml(latest.current_phase_label || latest.current_phase || latest.status)}</span>
-        <small>${runs.length} runs available</small>
+        <small>${state.recentRunsTotal || runs.length} runs available</small>
       </div>
     `;
     if (state.panelModalOpen && state.activePanelModal === "history") {
@@ -916,9 +994,12 @@ document.documentElement.dataset.dashboardReady = "true";
     state.selectedSignalId = signalId;
     nodes.panelModal.hidden = false;
     nodes.panelModalTitle.textContent = `${signal.symbol || "Signal"} Lifecycle`;
+    disposeChart("signal-lifecycle-chart");
     nodes.panelModalBody.innerHTML = buildSignalDetailMarkup(signal);
-    renderSignalLifecycleChart(signal);
-    window.requestAnimationFrame(() => resizeChart("signal-lifecycle-chart"));
+    window.requestAnimationFrame(() => {
+      renderSignalLifecycleChart(signal);
+      resizeChart("signal-lifecycle-chart");
+    });
     syncBodyModalState();
   }
 
@@ -1091,11 +1172,11 @@ document.documentElement.dataset.dashboardReady = "true";
     }
     const leverageLabel = formatSignalLeverage(signal);
     const markLines = [];
-    if (signal.entry_price) {
-      markLines.push(markLineItem("Entry", signal.entry_price, "#1f5f8b"));
+    if (signal.entry_price_raw || signal.entry_price) {
+      markLines.push(markLineItem("Entry", signal.entry_price_raw || signal.entry_price, "#1f5f8b"));
     }
-    if (signal.mark_price) {
-      markLines.push(markLineItem("Mark", signal.mark_price, "#0e7c66"));
+    if (signal.mark_price_raw || signal.mark_price) {
+      markLines.push(markLineItem("Mark", signal.mark_price_raw || signal.mark_price, "#0e7c66"));
     }
     const series = [
       {
@@ -1110,7 +1191,9 @@ document.documentElement.dataset.dashboardReady = "true";
         },
         markLine: markLines.length ? {
           symbol: ["none", "none"],
-          label: { formatter: "{b}: {c}" },
+          label: {
+            formatter: (params) => `${params.name}: ${formatDashboardNumber(params.value)}`,
+          },
           lineStyle: { width: 1.5, opacity: 0.9 },
           data: markLines,
         } : undefined,
@@ -1130,6 +1213,7 @@ document.documentElement.dataset.dashboardReady = "true";
           backgroundColor: "rgba(17, 31, 28, 0.94)",
           borderWidth: 0,
           textStyle: { color: "#f4fbf8" },
+          formatter: (params) => formatSignalChartTooltip(params),
         },
         title: {
           left: 12,
@@ -1148,7 +1232,10 @@ document.documentElement.dataset.dashboardReady = "true";
         },
         yAxis: {
           scale: true,
-          axisLabel: { color: "#39524b" },
+          axisLabel: {
+            color: "#39524b",
+            formatter: (value) => formatDashboardNumber(value),
+          },
           splitLine: { lineStyle: { color: "rgba(57, 82, 75, 0.10)" } },
         },
         dataZoom: [{ type: "inside" }, { type: "slider", height: 24, bottom: 12 }],
@@ -1162,7 +1249,7 @@ document.documentElement.dataset.dashboardReady = "true";
     return history.map((item) => {
       const points = buildLevelSpanPoints(item, candles);
       return {
-        name: `${item.label} ${item.value}`,
+        name: `${item.label} ${item.value_display || item.value}`,
         type: "line",
         symbol: "none",
         connectNulls: false,
@@ -1224,6 +1311,35 @@ document.documentElement.dataset.dashboardReady = "true";
     };
   }
 
+  function formatSignalChartTooltip(params) {
+    const items = Array.isArray(params) ? params : [params];
+    const first = items[0];
+    const axisValue = first && first.axisValue ? first.axisValue : null;
+    const sections = [];
+    if (axisValue) {
+      sections.push(`<strong>${escapeHtml(formatTehranDate(axisValue))}</strong>`);
+    }
+    const candle = items.find((item) => item && item.seriesType === "candlestick");
+    if (candle && Array.isArray(candle.data)) {
+      const [, open, close, low, high] = candle.data;
+      sections.push(
+        [
+          `Open ${formatDashboardNumber(open)}`,
+          `High ${formatDashboardNumber(high)}`,
+          `Low ${formatDashboardNumber(low)}`,
+          `Close ${formatDashboardNumber(close)}`,
+        ].join("<br>"),
+      );
+    }
+    items
+      .filter((item) => item && item.seriesType !== "candlestick")
+      .forEach((item) => {
+        const value = Array.isArray(item.data) ? item.data[1] : item.value;
+        sections.push(`${escapeHtml(item.seriesName || "Level")}: ${escapeHtml(formatDashboardNumber(value))}`);
+      });
+    return sections.join("<br><br>");
+  }
+
   function upsertRun(run) {
     const runs = Array.isArray(state.recentRuns) ? [...state.recentRuns] : [];
     const index = runs.findIndex((item) => item.run_id === run.run_id);
@@ -1232,9 +1348,9 @@ document.documentElement.dataset.dashboardReady = "true";
     } else {
       runs.unshift(run);
     }
-    state.recentRuns = runs
-      .sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
-      .slice(0, 8);
+    const maxLoadedRuns = Math.max(state.recentRuns.length, state.recentRunsPageSize);
+    state.recentRuns = sortRuns(runs).slice(0, maxLoadedRuns);
+    state.recentRunsTotal = Math.max(state.recentRunsTotal, state.recentRuns.length);
   }
 
   function renderRunActions(run) {
@@ -1373,12 +1489,16 @@ document.documentElement.dataset.dashboardReady = "true";
     }
     if (payload.type === "bootstrap") {
       renderReadiness(payload.readiness || {});
-      state.recentRuns = payload.runs || [];
-      renderRecentRuns(state.recentRuns);
+      applyRunsResponse({
+        runs: payload.runs || [],
+        total_runs: Array.isArray(payload.runs) ? payload.runs.length : 0,
+        has_more: false,
+      });
       if (!state.activeRunId && state.recentRuns.length) {
         state.activeRunId = state.recentRuns[0].run_id;
-        state.activeRun = state.recentRuns[0];
-        renderRun(state.activeRun);
+        fetchRun();
+      } else if (state.activeRunId && !state.activeRun) {
+        fetchRun();
       }
       renderFilterBar();
       return;
@@ -1488,6 +1608,32 @@ document.documentElement.dataset.dashboardReady = "true";
     return "n/a";
   }
 
+  function formatDashboardNumber(value) {
+    if (value === null || value === undefined || value === "") {
+      return "0";
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return String(value);
+    }
+    if (numeric === 0) {
+      return "0";
+    }
+    const absolute = Math.abs(numeric);
+    if (absolute >= 0.1) {
+      return stripTrailingZeros(numeric.toFixed(3));
+    }
+    const magnitude = Math.floor(Math.log10(absolute));
+    const decimalPlaces = Math.max(0, Math.abs(magnitude) + 3);
+    return numeric.toFixed(decimalPlaces);
+  }
+
+  function stripTrailingZeros(value) {
+    return value.includes(".")
+      ? value.replace(/\.?0+$/, "")
+      : value;
+  }
+
   function pnlClassName(value) {
     const numeric = Number(value || 0);
     if (numeric > 0) {
@@ -1581,6 +1727,20 @@ document.documentElement.dataset.dashboardReady = "true";
           `)
           .join("")}
       </div>
+      ${
+        expanded
+          ? `<div class="recent-runs-footer">
+              <small>${escapeHtml(String(state.recentRunsTotal || runs.length))} runs indexed</small>
+              ${
+                state.recentRunsHasMore
+                  ? `<button type="button" class="ghost-button compact-action" data-load-more-runs="true" ${state.recentRunsLoadingMore ? "disabled" : ""}>
+                      ${state.recentRunsLoadingMore ? "Loading..." : "Load Older Runs"}
+                    </button>`
+                  : `<small>All indexed runs are loaded.</small>`
+              }
+            </div>`
+          : ""
+      }
     `;
   }
 

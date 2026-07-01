@@ -18,6 +18,25 @@
 <script id="reports-bootstrap" type="application/json">{{ reports_bootstrap | tojson }}</script>
 
 {% if has_reports %}
+<section class="status-card-grid reports-top-strip">
+  <article class="status-card">
+    <span class="status-card-label">Reports</span>
+    <strong>{{ reports_bootstrap.summary.total_reports }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Successful</span>
+    <strong>{{ reports_bootstrap.summary.successful_reports }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Channels</span>
+    <strong>{{ reports_bootstrap.summary.channels }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Best Score</span>
+    <strong>{{ reports_bootstrap.summary.best_score }}</strong>
+  </article>
+</section>
+
 <section class="reports-shell" data-reports-explorer="true">
   <div class="reports-main-column">
     <section class="panel">

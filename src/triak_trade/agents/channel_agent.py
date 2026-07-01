@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -13,10 +14,13 @@ from triak_trade.agents.classifier import (
 from triak_trade.agents.clock import Clock, SystemClock
 from triak_trade.agents.context import ChannelContext
 from triak_trade.config.settings import Settings
+from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.domain.enums import ProposedActionType, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_action_id, make_signal_id
 from triak_trade.domain.models import ParsedSignal, ProposedAction, RawTelegramMessage, SignalState
 from triak_trade.parsing.validator import ParsedSignalValidator
+
+_log = logging.getLogger(__name__)
 
 
 class ChannelAgent:
@@ -42,9 +46,35 @@ class ChannelAgent:
 
     def ingest_message(self, raw_message: RawTelegramMessage) -> list[ProposedAction]:
         actions: list[ProposedAction] = []
+        log_event(
+            _log,
+            logging.DEBUG,
+            "channel_agent.ingest_message.started",
+            channel_id=raw_message.channel_id,
+            message_id=raw_message.message_id,
+            reply_to_msg_id=raw_message.reply_to_msg_id,
+            pending_signal_count=len(self.pending_deadlines),
+            preview=safe_preview(raw_message.text),
+        )
         self.context.add_recent_message(raw_message)
         classified = self.classifier.classify(raw_message, self.context)
         parsed = classified.parsed_signal
+        log_event(
+            _log,
+            logging.DEBUG,
+            "channel_agent.message_classified",
+            channel_id=raw_message.channel_id,
+            message_id=raw_message.message_id,
+            parser_version=parsed.parser_version,
+            action=parsed.action.value,
+            symbol=parsed.symbol,
+            side=parsed.side.value,
+            confidence=str(parsed.confidence),
+            is_potential_new_signal=classified.is_potential_new_signal,
+            is_related_to_existing_signal=classified.is_related_to_existing_signal,
+            related_signal_id=classified.related_signal_id,
+            relation_reason=classified.relation_reason,
+        )
 
         merge_candidate_id = self._resolve_related_signal_id(raw_message, classified, parsed)
 
@@ -66,6 +96,7 @@ class ChannelAgent:
             self.pending_deadlines[signal_id] = self.clock.now() + timedelta(
                 seconds=self.settings.SIGNAL_CONSOLIDATION_SECONDS
             )
+            deadline = self.pending_deadlines[signal_id]
             self.debug_events.append(
                 {
                     "channel_id": raw_message.channel_id,
@@ -76,6 +107,18 @@ class ChannelAgent:
                     "confidence": str(parsed.confidence),
                 }
             )
+            log_event(
+                _log,
+                logging.INFO,
+                "channel_agent.signal_pending_consolidation",
+                channel_id=raw_message.channel_id,
+                message_id=raw_message.message_id,
+                signal_id=signal_id,
+                symbol=parsed.symbol,
+                side=parsed.side.value,
+                confidence=str(parsed.confidence),
+                consolidation_deadline=deadline.isoformat(),
+            )
             return actions
 
         if (
@@ -85,6 +128,15 @@ class ChannelAgent:
             signal = self.context.get_signal(merge_candidate_id)
             assert signal is not None
             if not self.context.is_within_update_window(signal, self.clock.now()):
+                log_event(
+                    _log,
+                    logging.INFO,
+                    "channel_agent.related_message_ignored_outside_window",
+                    channel_id=raw_message.channel_id,
+                    message_id=raw_message.message_id,
+                    signal_id=merge_candidate_id,
+                    signal_status=signal.status.value,
+                )
                 return actions
             self.context.attach_message(merge_candidate_id, raw_message)
             self.context.merge_signal(merge_candidate_id, parsed, raw_message.date)
@@ -98,10 +150,38 @@ class ChannelAgent:
                     "confidence": str(parsed.confidence),
                 }
             )
+            merged_signal = self.context.get_signal(merge_candidate_id)
+            log_event(
+                _log,
+                logging.INFO,
+                "channel_agent.signal_merged",
+                channel_id=raw_message.channel_id,
+                message_id=raw_message.message_id,
+                signal_id=merge_candidate_id,
+                signal_status=signal.status.value,
+                merged_symbol=(
+                    merged_signal.current_signal.symbol
+                    if merged_signal is not None and merged_signal.current_signal is not None
+                    else None
+                ),
+                related_message_count=(
+                    len(merged_signal.related_message_ids) if merged_signal is not None else 0
+                ),
+                relation_reason=classified.relation_reason or "related",
+            )
             if signal.status is not SignalStatus.PENDING_CONSOLIDATION:
                 followup = self._build_followup_action(signal_id=merge_candidate_id, parsed=parsed)
                 if followup is not None:
                     actions.append(followup)
+                    log_event(
+                        _log,
+                        logging.INFO,
+                        "channel_agent.followup_action_emitted",
+                        channel_id=raw_message.channel_id,
+                        message_id=raw_message.message_id,
+                        signal_id=merge_candidate_id,
+                        action_type=followup.action_type.value,
+                    )
             return actions
 
         if classified.is_related_to_existing_signal:
@@ -114,7 +194,24 @@ class ChannelAgent:
                 risk_increasing=False,
             )
             actions.append(request)
+            log_event(
+                _log,
+                logging.INFO,
+                "channel_agent.ambiguous_related_message_ignored",
+                channel_id=raw_message.channel_id,
+                message_id=raw_message.message_id,
+                action=parsed.action.value,
+                symbol=parsed.symbol,
+            )
 
+        log_event(
+            _log,
+            logging.DEBUG,
+            "channel_agent.ingest_message.completed",
+            channel_id=raw_message.channel_id,
+            message_id=raw_message.message_id,
+            emitted_action_count=len(actions),
+        )
         return actions
 
     def _resolve_related_signal_id(
@@ -171,6 +268,14 @@ class ChannelAgent:
     def tick(self, now: datetime | None = None) -> list[ProposedAction]:
         current = now or self.clock.now()
         actions: list[ProposedAction] = []
+        log_event(
+            _log,
+            logging.DEBUG,
+            "channel_agent.tick.started",
+            channel_id=self.context.channel_id,
+            current_time=current.isoformat(),
+            pending_signal_count=len(self.pending_deadlines),
+        )
 
         for signal_id, deadline in list(self.pending_deadlines.items()):
             if current < deadline:
@@ -178,6 +283,13 @@ class ChannelAgent:
             signal = self.context.get_signal(signal_id)
             if signal is None or signal.current_signal is None:
                 self.pending_deadlines.pop(signal_id, None)
+                log_event(
+                    _log,
+                    logging.WARNING,
+                    "channel_agent.pending_signal_missing",
+                    channel_id=self.context.channel_id,
+                    signal_id=signal_id,
+                )
                 continue
 
             ok, errors = self.validator.validate_for_proposal(
@@ -199,6 +311,15 @@ class ChannelAgent:
                 )
                 signal.status = SignalStatus.ORDER_PLANNED
                 actions.append(action)
+                log_event(
+                    _log,
+                    logging.INFO,
+                    "channel_agent.consolidation_succeeded",
+                    channel_id=self.context.channel_id,
+                    signal_id=signal.signal_id,
+                    symbol=signal.current_signal.symbol,
+                    related_message_count=len(signal.related_message_ids),
+                )
             else:
                 action = self._make_action(
                     signal_id=signal.signal_id,
@@ -210,11 +331,28 @@ class ChannelAgent:
                 )
                 signal.status = SignalStatus.INVALID
                 actions.append(action)
+                log_event(
+                    _log,
+                    logging.INFO,
+                    "channel_agent.consolidation_failed",
+                    channel_id=self.context.channel_id,
+                    signal_id=signal.signal_id,
+                    symbol=signal.current_signal.symbol,
+                    validation_errors=errors,
+                )
 
             signal.updated_at = current
             self.context.add_signal(signal, pending=False)
             self.pending_deadlines.pop(signal_id, None)
 
+        log_event(
+            _log,
+            logging.DEBUG,
+            "channel_agent.tick.completed",
+            channel_id=self.context.channel_id,
+            emitted_action_count=len(actions),
+            remaining_pending_signal_count=len(self.pending_deadlines),
+        )
         return actions
 
     def get_context_snapshot(self) -> dict[str, object]:
@@ -278,7 +416,7 @@ class ChannelAgent:
     ) -> ProposedAction:
         base_signal_id = signal_id or "global"
         action_id = make_action_id(base_signal_id, action_type.value, len(self.debug_events) + 1)
-        return ProposedAction(
+        action = ProposedAction(
             action_id=action_id,
             action_type=action_type,
             signal_id=signal_id,
@@ -288,3 +426,16 @@ class ChannelAgent:
             payload=payload,
             created_at=self.clock.now(),
         )
+        log_event(
+            _log,
+            logging.INFO,
+            "channel_agent.proposed_action_created",
+            channel_id=self.context.channel_id,
+            action_id=action.action_id,
+            signal_id=signal_id,
+            action_type=action.action_type.value,
+            risk_increasing=risk_increasing,
+            confidence=str(confidence),
+            reason=reason,
+        )
+        return action

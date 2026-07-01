@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from decimal import Decimal
 
@@ -13,6 +14,7 @@ from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.gateway_client import AIGatewayError, AjilGatewayClient
 from triak_trade.ai.schemas import AIClassificationResult, AIMessageContext
 from triak_trade.config.settings import Settings
+from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal, RawTelegramMessage
 from triak_trade.parsing.normalizer import MessageNormalizer
@@ -24,6 +26,8 @@ _RAW_URL_RE = re.compile(r"https?://\S+")
 _MAX_RECENT_MESSAGES = 8
 _MAX_ACTIVE_SIGNALS = 8
 _MAX_CONTEXT_TEXT_CHARS = 700
+
+_log = logging.getLogger(__name__)
 
 
 class AIMessageClassifier(MessageClassifier):
@@ -69,11 +73,28 @@ class AIMessageClassifier(MessageClassifier):
         text = message.text or ""
         skip_keyword = self._matched_skip_keyword(text)
         if skip_keyword is not None:
+            log_event(
+                _log,
+                logging.INFO,
+                "ai_classifier.skipped_by_keyword",
+                channel_id=message.channel_id,
+                message_id=message.message_id,
+                matched_skip_keyword=skip_keyword,
+                preview=safe_preview(text),
+            )
             return self._safe_ignored(
                 message,
                 f"classification_skipped=skip_keyword:{skip_keyword}",
             )
         if not self._has_force_include_keyword(text):
+            log_event(
+                _log,
+                logging.INFO,
+                "ai_classifier.skipped_missing_include_keyword",
+                channel_id=message.channel_id,
+                message_id=message.message_id,
+                preview=safe_preview(text),
+            )
             return self._safe_ignored(
                 message,
                 "classification_skipped=missing_force_include_keyword",
@@ -82,6 +103,21 @@ class AIMessageClassifier(MessageClassifier):
         normalized = self.normalizer.normalize(message)
         ai_context = self._build_context(message, context)
         route = self.gateway_client.plan_for_context(ai_context)
+        log_event(
+            _log,
+            logging.INFO,
+            "ai_classifier.request_started",
+            channel_id=message.channel_id,
+            message_id=message.message_id,
+            route_provider=route.provider,
+            route_model=route.model,
+            route_multimodal=route.multimodal,
+            reply_chain_count=len(ai_context.reply_chain_messages),
+            following_message_count=len(ai_context.following_messages),
+            active_signal_count=len(ai_context.active_signals),
+            has_media=ai_context.message_has_media,
+            image_count=len(ai_context.message_images),
+        )
 
         try:
             # The gateway client already retries internally (AI_GATEWAY_RETRY_ATTEMPTS
@@ -89,15 +125,15 @@ class AIMessageClassifier(MessageClassifier):
             # single source of retries and never block the run with ad-hoc sleeps.
             result = self.gateway_client.classify_message(ai_context)
         except AIGatewayError as exc:
-            import logging
-
-            logger = logging.getLogger("triak_trade.ai.classifier")
             if self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK and self.regex_fallback is not None:
-                logger.warning(
-                    "AI classification failed for message %s after retries; "
-                    "using regex fallback: %s",
-                    message.message_id,
-                    exc,
+                log_event(
+                    _log,
+                    logging.WARNING,
+                    "ai_classifier.gateway_failed_using_regex_fallback",
+                    channel_id=message.channel_id,
+                    message_id=message.message_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
                 )
                 classified = self.regex_fallback.classify(message, context)
                 classified.debug_notes.append("classifier=regex")
@@ -108,11 +144,14 @@ class AIMessageClassifier(MessageClassifier):
             # regex-classify a qualifying message, and we must NOT crash the whole
             # run for one failure. Return a clearly-marked safe UNKNOWN so the message
             # is recorded as AI-attempted-but-failed and excluded from trading.
-            logger.error(
-                "AI classification failed for message %s after retries; "
-                "marking as ai_failed (no fallback configured): %s",
-                message.message_id,
-                exc,
+            log_event(
+                _log,
+                logging.ERROR,
+                "ai_classifier.gateway_failed_without_fallback",
+                channel_id=message.channel_id,
+                message_id=message.message_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
             )
             return self._safe_unknown(message, f"ai-error={exc.__class__.__name__}")
 
@@ -140,7 +179,7 @@ class AIMessageClassifier(MessageClassifier):
             "CLOSE",
         }
 
-        return ClassifiedMessage(
+        classified = ClassifiedMessage(
             raw_message=message,
             normalized_message=normalized,
             parsed_signal=parsed,
@@ -167,6 +206,21 @@ class AIMessageClassifier(MessageClassifier):
                 *[f"validation_error={e}" for e in errors],
             ],
         )
+        log_event(
+            _log,
+            logging.INFO,
+            "ai_classifier.completed",
+            channel_id=message.channel_id,
+            message_id=message.message_id,
+            classification=result.classification,
+            parsed_action=parsed.action.value,
+            symbol=parsed.symbol,
+            side=parsed.side.value,
+            confidence=str(result.confidence),
+            validation_ok=valid,
+            validation_error_count=len(errors),
+        )
+        return classified
 
     def _result_to_parsed_signal(
         self,
@@ -305,6 +359,14 @@ class AIMessageClassifier(MessageClassifier):
             notes.append(f"regex_supplement={field}")
 
         if parsed.symbol is None and regex_parsed.symbol is not None:
+            add_update("symbol", regex_parsed.symbol)
+        elif (
+            parsed.symbol is not None
+            and regex_parsed.symbol is not None
+            and parsed.symbol != regex_parsed.symbol
+            and len(regex_parsed.symbol) > len(parsed.symbol)
+            and regex_parsed.symbol.endswith(parsed.symbol)
+        ):
             add_update("symbol", regex_parsed.symbol)
         if parsed.side is TradeSide.UNKNOWN and regex_parsed.side is not TradeSide.UNKNOWN:
             add_update("side", regex_parsed.side)

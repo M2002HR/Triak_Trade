@@ -758,25 +758,28 @@ class BacktestSimulator:
         symbol: str,
     ) -> tuple[Decimal | None, datetime | None]:
         relevant_candles = [c for c in candles if same_market_symbol(c.symbol, symbol)]
-        next_candle = next((c for c in relevant_candles if c.open_time >= signal_time), None)
-        if next_candle is None:
-            return None, None
         if entry_type is EntryType.MARKET:
+            next_candle = next((c for c in relevant_candles if c.open_time >= signal_time), None)
+            if next_candle is None:
+                return None, None
             return next_candle.open, next_candle.open_time
         if entry_low is not None and entry_high is not None:
             midpoint = (entry_low + entry_high) / Decimal("2")
             for candle in relevant_candles:
-                if candle.open_time < signal_time:
+                if candle.close_time <= signal_time:
                     continue
                 if candle.low <= entry_high and candle.high >= entry_low:
                     return midpoint, candle.open_time
             return None, None
         if entry_low is not None:
             for candle in relevant_candles:
-                if candle.open_time < signal_time:
+                if candle.close_time <= signal_time:
                     continue
                 if candle.low <= entry_low <= candle.high:
                     return entry_low, candle.open_time
+            return None, None
+        next_candle = next((c for c in relevant_candles if c.open_time >= signal_time), None)
+        if next_candle is None:
             return None, None
         return next_candle.open, next_candle.open_time
 

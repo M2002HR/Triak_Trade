@@ -68,3 +68,32 @@ class AIKeywordFilterConfig(BaseModel):
 class BacktestLifecycleConfig(BaseModel):
     refresh_interval: str
     config_path: str
+
+
+class TelegramNotificationConfig(BaseModel):
+    """Controls which live-trading events are forwarded to the Telegram log channel.
+
+    Backtest events are intentionally excluded — they are too noisy for a chat channel.
+    """
+
+    enabled: bool = True
+    # ── Live signal events ─────────────────────────────────────────────────
+    send_signal_detected: bool = True
+    send_signal_invalid: bool = False
+    send_signal_ignored: bool = False
+    # ── Live trade events ──────────────────────────────────────────────────
+    send_trade_opened: bool = True
+    send_trade_closed: bool = True
+    send_trade_updated: bool = False
+    # ── Session lifecycle events ───────────────────────────────────────────
+    send_session_started: bool = True
+    send_session_stopped: bool = True
+    send_session_error: bool = True
+    # ── Summary / digest ──────────────────────────────────────────────────
+    send_session_summary: bool = True
+    send_daily_digest: bool = False
+    # ── Error alerts ──────────────────────────────────────────────────────
+    send_error_alerts: bool = True
+    # ── Metadata ──────────────────────────────────────────────────────────
+    updated_at: datetime = Field(default_factory=utc_now)
+    updated_by: str = "system"

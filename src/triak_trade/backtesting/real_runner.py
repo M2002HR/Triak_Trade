@@ -54,7 +54,7 @@ from triak_trade.backtesting.symbol_mapper import (
 )
 from triak_trade.backtesting.telegram_source import BacktestTelegramSource
 from triak_trade.config.settings import Settings
-from triak_trade.core.formatting import format_decimal
+from triak_trade.core.formatting import decimal_to_plain_string, format_decimal
 from triak_trade.core.time import TEHRAN_TZ
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_signal_id
@@ -692,13 +692,23 @@ class RealBacktestRunner:
                     counts=counts,
                     trace=message_trace,
                 )
+            # Mirror the per-symbol fetch-range cap from _market_data_range_for_trace
+            # so that the secondary fetch also stays within the budget.
+            secondary_end = to_date
+            max_per_symbol = self.settings.REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL
+            if max_per_symbol > 0:
+                capped = from_date + timedelta(
+                    seconds=max_per_symbol * interval_to_seconds(request.interval)
+                )
+                if capped < to_date:
+                    secondary_end = capped
             for candidate_symbol in candidate_symbols:
                 try:
                     fetched = await self.market_data_provider.get_klines(
                         candidate_symbol,
                         request.interval,
                         from_date,
-                        to_date,
+                        secondary_end,
                     )
                 except Exception as exc:
                     last_error_type = type(exc).__name__
@@ -2345,6 +2355,27 @@ class RealBacktestRunner:
             hours=max(24, self.settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS)
         )
         end = max(requested_end, minimum_end)
+        # Cap the fetch window to avoid pulling excessive candles for fine
+        # intervals over long date ranges (e.g. 1m over 6 months).  When the
+        # cap triggers, the window is anchored at `requested_start` (not the
+        # individual signal time) so that the per-symbol cache covers a
+        # consistent range regardless of which signal first triggered the
+        # fetch.  This prevents later signals for the same symbol from reusing
+        # an offset cache that does not cover their timestamp.
+        # The start_message_id anchor path is exempt: those runs always begin
+        # at the exact message time and the range is controlled by the caller.
+        max_per_symbol = self.settings.REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL
+        if (
+            max_per_symbol > 0
+            and request.start_message_id is None
+            and request.start_message_link is None
+        ):
+            interval_seconds = interval_to_seconds(request.interval)
+            cap_duration = timedelta(seconds=max_per_symbol * interval_seconds)
+            capped_end = requested_start + cap_duration
+            if capped_end < end:
+                start = requested_start
+                end = capped_end
         return start, end
 
     @staticmethod
@@ -2374,6 +2405,13 @@ class RealBacktestRunner:
             if simulation_end_time is None or candle.close_time <= simulation_end_time
         ]
         if not events or not available_candles or not signal_trace_map:
+            return self._empty_live_metrics(), []
+        # Skip the live preview simulation when the candle dataset is very large
+        # to avoid repeated O(signals x candles) in-memory spikes during
+        # classification. The final simulation after classification uses the full
+        # (capped) candle set, so the dashboard results are still correct.
+        live_candle_cap = self.settings.REAL_BACKTEST_MAX_CANDLES
+        if live_candle_cap > 0 and len(available_candles) > live_candle_cap:
             return self._empty_live_metrics(), []
 
         active_strategy = self._active_strategy()
@@ -2555,11 +2593,11 @@ class RealBacktestRunner:
             "live_closed_trades": str(snapshot.closed_trades),
             "live_wins": str(snapshot.wins),
             "live_losses": str(snapshot.losses),
-            "live_realized_pnl": str(snapshot.realized_pnl),
-            "live_unrealized_pnl": str(snapshot.unrealized_pnl),
-            "live_total_pnl": str(snapshot.total_pnl),
-            "live_realized_balance": str(snapshot.realized_balance),
-            "live_current_balance": str(snapshot.current_balance),
+            "live_realized_pnl": format_decimal(snapshot.realized_pnl) or "0",
+            "live_unrealized_pnl": format_decimal(snapshot.unrealized_pnl) or "0",
+            "live_total_pnl": format_decimal(snapshot.total_pnl) or "0",
+            "live_realized_balance": format_decimal(snapshot.realized_balance) or "0",
+            "live_current_balance": format_decimal(snapshot.current_balance) or "0",
         }
 
     @staticmethod
@@ -2598,8 +2636,18 @@ class RealBacktestRunner:
                     "entry_price": (
                         format_decimal(state.entry_price) if state.entry_price is not None else None
                     ),
+                    "entry_price_raw": (
+                        decimal_to_plain_string(state.entry_price)
+                        if state.entry_price is not None
+                        else None
+                    ),
                     "stop_loss": (
                         format_decimal(state.stop_loss)
+                        if state.stop_loss is not None
+                        else None
+                    ),
+                    "stop_loss_raw": (
+                        decimal_to_plain_string(state.stop_loss)
                         if state.stop_loss is not None
                         else None
                     ),
@@ -2607,10 +2655,14 @@ class RealBacktestRunner:
                     "take_profit_levels": [
                         format_decimal(item) or "0" for item in state.take_profits
                     ],
+                    "take_profit_levels_raw": [
+                        decimal_to_plain_string(item) or "0" for item in state.take_profits
+                    ],
                     "notional_value": format_decimal(state.notional_value),
                     "risk_amount": format_decimal(state.risk_amount),
                     "open_quantity": format_decimal(state.open_quantity),
                     "mark_price": format_decimal(state.mark_price),
+                    "mark_price_raw": decimal_to_plain_string(state.mark_price) or "0",
                     "realized_pnl": format_decimal(state.realized_pnl),
                     "unrealized_pnl": format_decimal(state.unrealized_pnl),
                     "total_pnl": format_decimal(state.realized_pnl + state.unrealized_pnl),
@@ -2724,15 +2776,19 @@ class RealBacktestRunner:
                     "close_timestamp_tehran": point.candle_close_time.astimezone(
                         TEHRAN_TZ
                     ).isoformat(),
-                    "open": format_decimal(point.open),
-                    "high": format_decimal(point.high),
-                    "low": format_decimal(point.low),
-                    "close": format_decimal(point.close),
-                    "mark_price": format_decimal(point.mark_price),
+                    "open": decimal_to_plain_string(point.open),
+                    "high": decimal_to_plain_string(point.high),
+                    "low": decimal_to_plain_string(point.low),
+                    "close": decimal_to_plain_string(point.close),
+                    "mark_price": decimal_to_plain_string(point.mark_price),
                     "stop_loss": (
-                        format_decimal(point.stop_loss) if point.stop_loss is not None else None
+                        decimal_to_plain_string(point.stop_loss)
+                        if point.stop_loss is not None
+                        else None
                     ),
-                    "take_profits": [format_decimal(item) or "0" for item in point.take_profits],
+                    "take_profits": [
+                        decimal_to_plain_string(item) or "0" for item in point.take_profits
+                    ],
                 }
             )
         return candles
@@ -2759,7 +2815,8 @@ class RealBacktestRunner:
                 {
                     "kind": item.kind,
                     "label": item.label,
-                    "value": format_decimal(item.value),
+                    "value": decimal_to_plain_string(item.value),
+                    "value_display": format_decimal(item.value),
                     "started_at": item.started_at.isoformat(),
                     "started_at_ms": str(int(item.started_at.timestamp() * 1000)),
                     "started_at_tehran": item.started_at.astimezone(TEHRAN_TZ).isoformat(),

@@ -17,6 +17,7 @@ from triak_trade.config.settings import Settings
 from triak_trade.dashboard.backtest_runtime import (
     DashboardBacktestCoordinator,
     DashboardBacktestRun,
+    DashboardBacktestRunSummary,
     DashboardBacktestStore,
     normalize_channel_reference,
     parse_telegram_message_link,
@@ -290,6 +291,112 @@ def test_dashboard_backtest_store_round_trip(tmp_path: Path) -> None:
     assert store.read(run.run_id) is not None
 
 
+def test_dashboard_backtest_store_writes_lightweight_summary_files(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    run = DashboardBacktestRun(
+        run_id="backtest_summary",
+        channel_input="@Tofan_Trade",
+        channel_resolved="https://t.me/Tofan_Trade",
+        from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        interval="1m",
+        max_messages=100,
+        use_ai=False,
+        send_log_channel=True,
+        log_per_message=True,
+        status="completed",
+        created_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        messages=[
+            RealBacktestMessageTrace(
+                message_id=77,
+                channel_id="https://t.me/Tofan_Trade",
+                message_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+                last_updated_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+                preview_text="BTCUSDT LONG",
+            )
+        ],
+        events=[
+            {
+                "at": datetime(2026, 6, 4, tzinfo=timezone.utc),
+                "phase": "report",
+                "status": "completed",
+                "summary": "Report written.",
+            }
+        ],
+        signals=[{"signal_id": "sig_77"}],
+    )
+    store.write(run)
+
+    summaries = store.list_run_summaries(limit=10)
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert isinstance(summary, DashboardBacktestRunSummary)
+    assert summary.run_id == run.run_id
+    assert "messages" not in summary.model_dump(mode="json")
+    assert "events" not in summary.model_dump(mode="json")
+    assert "signals" not in summary.model_dump(mode="json")
+
+
+def test_dashboard_backtest_store_recovers_summary_listing_from_full_run_files(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    run = DashboardBacktestRun(
+        run_id="backtest_summary_fallback",
+        channel_input="@Tofan_Trade",
+        channel_resolved="https://t.me/Tofan_Trade",
+        from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        interval="1m",
+        max_messages=100,
+        use_ai=False,
+        send_log_channel=True,
+        log_per_message=True,
+        status="completed",
+        created_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+    )
+    store.write(run)
+    summary_path = Path(settings.DASHBOARD_RUNTIME_DIR) / "backtests" / f"{run.run_id}.summary.json"
+    summary_path.unlink()
+
+    summaries = store.list_run_summaries(limit=10)
+
+    assert len(summaries) == 1
+    assert summaries[0].run_id == run.run_id
+    assert summary_path.exists()
+
+
+def test_dashboard_backtest_store_summary_listing_supports_offset(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    for idx in range(3):
+        store.write(
+            DashboardBacktestRun(
+                run_id=f"backtest_offset_{idx}",
+                channel_input="@Tofan_Trade",
+                channel_resolved="https://t.me/Tofan_Trade",
+                from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+                to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+                interval="1m",
+                max_messages=100,
+                use_ai=False,
+                send_log_channel=True,
+                log_per_message=True,
+                status="completed",
+                created_at=datetime(2026, 6, 4, idx, tzinfo=timezone.utc),
+            )
+        )
+
+    page = store.list_run_summaries(limit=1, offset=1)
+
+    assert len(page) == 1
+    assert page[0].run_id == "backtest_offset_1"
+    assert store.count_runs() == 3
+
+
 def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     coordinator = DashboardBacktestCoordinator(
@@ -336,6 +443,12 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     assert loaded.signals[0]["symbol"] == "BTCUSDT"
     assert loaded.signals[0]["status_group"] == "active"
     assert loaded.report_path == "runtime/reports/backtests/report.json"
+
+    log_path = Path(settings.DASHBOARD_LOG_FILE)
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "dashboard.backtest.started" in log_text
+    assert "dashboard.backtest.progress" in log_text
+    assert loaded.run_id in log_text
 
 
 def test_dashboard_backtest_coordinator_notifies_on_updates(tmp_path: Path) -> None:
@@ -455,13 +568,17 @@ def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_
                     "exit_time": None,
                     "exit_time_tehran": None,
                     "entry_price": "68010",
+                    "entry_price_raw": "68010.125",
                     "stop_loss": "67400",
+                    "stop_loss_raw": "67400.25",
                     "take_profits": ["69000", "70000"],
+                    "take_profit_levels_raw": ["69000.5", "70000.75"],
                     "declared_leverage": "10",
                     "effective_leverage": "10",
                     "leverage": "10",
                     "open_quantity": "1",
                     "mark_price": "68100",
+                    "mark_price_raw": "68100.5",
                     "realized_pnl": "0",
                     "unrealized_pnl": "2.5",
                     "total_pnl": "2.5",
@@ -490,7 +607,8 @@ def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_
                             {
                                 "kind": "stop_loss",
                                 "label": "SL",
-                                "value": "67400",
+                                "value": "67400.25",
+                                "value_display": "67400.25",
                                 "started_at": now.isoformat(),
                                 "started_at_tehran": "2026-06-04T03:30:00+03:30",
                                 "started_at_ms": "1780531200000",
@@ -524,7 +642,10 @@ def test_dashboard_backtest_coordinator_preserves_signals_on_run_events_without_
     assert loaded.signals[0]["signal_id"] == "sig_77"
     assert loaded.signals[0]["leverage"] == "10"
     assert loaded.signals[0]["declared_leverage"] == "10"
+    assert loaded.signals[0]["entry_price_raw"] == "68010.125"
+    assert loaded.signals[0]["mark_price_raw"] == "68100.5"
     assert loaded.signals[0]["chart"]["interval"] == "1m"
+    assert loaded.signals[0]["chart"]["stop_loss_history"][0]["value"] == "67400.25"
 
 
 def test_dashboard_backtest_coordinator_keeps_signal_history_and_aggregate_counts(

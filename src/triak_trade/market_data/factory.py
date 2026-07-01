@@ -2,18 +2,38 @@
 
 from __future__ import annotations
 
+import logging
+
 from triak_trade.config.settings import Settings
+from triak_trade.core.logging import log_event
 from triak_trade.market_data.binance_public import BinancePublicFuturesProvider
 from triak_trade.market_data.composite import CompositeMarketDataProvider
 from triak_trade.market_data.interfaces import MarketDataProvider
 from triak_trade.market_data.toobit import ToobitMarketDataProvider
 
+_log = logging.getLogger(__name__)
+
 
 def build_backtest_market_data_provider(settings: Settings) -> MarketDataProvider:
     primary = _build_primary_provider(settings)
     if not settings.BACKTEST_MARKET_DATA_USE_TOOBIT_FALLBACK:
+        log_event(
+            _log,
+            logging.INFO,
+            "market_data.backtest_provider_built",
+            primary_provider=primary.__class__.__name__,
+            fallback_enabled=False,
+        )
         return primary
     fallback = _build_toobit_provider(settings)
+    log_event(
+        _log,
+        logging.INFO,
+        "market_data.backtest_provider_built",
+        primary_provider=primary.__class__.__name__,
+        fallback_provider=fallback.__class__.__name__,
+        fallback_enabled=True,
+    )
     return CompositeMarketDataProvider([primary, fallback])
 
 

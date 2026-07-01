@@ -441,6 +441,29 @@ def test_simulator_snapshots_include_not_filled_signals() -> None:
     assert snapshots[0].signal_states["s1"].status == "not_filled"
 
 
+def test_simulator_fills_limit_signal_when_message_arrives_mid_candle() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, 30, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=[_candle(0, "101.5", "99.5", o="100", c="100.8")],
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert trades[0].status != "not_filled"
+    assert trades[0].entry_price == Decimal("100.5")
+
+
 def test_simulator_builds_virtual_interval_snapshots_and_price_history() -> None:
     open_event = BacktestEvent(
         timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),

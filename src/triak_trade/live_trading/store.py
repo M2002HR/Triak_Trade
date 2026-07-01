@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +13,7 @@ from urllib.parse import quote
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from triak_trade.core.logging import log_event
 from triak_trade.db.repositories import LiveTradingRepository
 from triak_trade.live_trading.models import (
     LiveMessageTrace,
@@ -21,6 +23,7 @@ from triak_trade.live_trading.models import (
 )
 
 T = TypeVar("T")
+_log = logging.getLogger(__name__)
 
 
 class LiveTradingStore:
@@ -65,10 +68,23 @@ class LiveTradingStore:
 
     def save_session(self, session: LiveSession) -> None:
         if self._session_factory is not None:
+            log_event(
+                _log,
+                logging.DEBUG,
+                "live_trading_store.save_session_db",
+                session_id=session.session_id,
+            )
             self._with_db(lambda repo: repo.save_session(session))
             return
         path = self._sessions_dir() / f"{session.session_id}.json"
         self._write(path, session.model_dump(mode="json"))
+        log_event(
+            _log,
+            logging.DEBUG,
+            "live_trading_store.save_session_file",
+            session_id=session.session_id,
+            path=str(path),
+        )
 
     def load_session(self, session_id: str) -> LiveSession | None:
         if self._session_factory is not None:
@@ -78,8 +94,25 @@ class LiveTradingStore:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return LiveSession.model_validate(data)
-        except Exception:
+            session = LiveSession.model_validate(data)
+            log_event(
+                _log,
+                logging.DEBUG,
+                "live_trading_store.load_session_file",
+                session_id=session_id,
+                path=str(path),
+            )
+            return session
+        except Exception as exc:
+            log_event(
+                _log,
+                logging.WARNING,
+                "live_trading_store.load_session_failed",
+                session_id=session_id,
+                path=str(path),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return None
 
     def list_sessions(self, limit: int = 20) -> list[LiveSession]:
@@ -113,10 +146,25 @@ class LiveTradingStore:
 
     def save_trade(self, trade: LiveTrade) -> None:
         if self._session_factory is not None:
+            log_event(
+                _log,
+                logging.DEBUG,
+                "live_trading_store.save_trade_db",
+                session_id=trade.session_id,
+                trade_id=trade.trade_id,
+            )
             self._with_db(lambda repo: repo.save_trade(trade))
             return
         path = self._trades_dir(trade.session_id) / f"{trade.trade_id}.json"
         self._write(path, trade.model_dump(mode="json"))
+        log_event(
+            _log,
+            logging.DEBUG,
+            "live_trading_store.save_trade_file",
+            session_id=trade.session_id,
+            trade_id=trade.trade_id,
+            path=str(path),
+        )
 
     def load_trade(self, session_id: str, trade_id: str) -> LiveTrade | None:
         if self._session_factory is not None:
@@ -169,6 +217,15 @@ class LiveTradingStore:
             channel_id=trace.channel_id,
         )
         self._write(path, trace.model_dump(mode="json"))
+        log_event(
+            _log,
+            logging.DEBUG,
+            "live_trading_store.save_message_trace_file",
+            session_id=session_id,
+            message_id=trace.message_id,
+            channel_id=trace.channel_id,
+            path=str(path),
+        )
 
     def list_message_traces(self, session_id: str, limit: int = 200) -> list[LiveMessageTrace]:
         if self._session_factory is not None:
@@ -220,6 +277,14 @@ class LiveTradingStore:
             return
         path = self._signals_dir(session_id) / f"{signal.signal_id}.json"
         self._write(path, signal.model_dump(mode="json"))
+        log_event(
+            _log,
+            logging.DEBUG,
+            "live_trading_store.save_signal_snapshot_file",
+            session_id=session_id,
+            signal_id=signal.signal_id,
+            path=str(path),
+        )
 
     def load_signal_snapshot(
         self,
@@ -273,6 +338,13 @@ class LiveTradingStore:
                 with self._lock:
                     rmtree(directory, ignore_errors=True)
                 removed = True
+        log_event(
+            _log,
+            logging.INFO,
+            "live_trading_store.delete_session",
+            session_id=session_id,
+            removed=removed,
+        )
         return removed
 
     # ── Atomic Write ──────────────────────────────────────────────────────
@@ -283,6 +355,12 @@ class LiveTradingStore:
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
             tmp.replace(path)
+        log_event(
+            _log,
+            logging.DEBUG,
+            "live_trading_store.file_written",
+            path=str(path),
+        )
 
     def _message_trace_path(self, *, session_id: str, message_id: int, channel_id: str) -> Path:
         encoded_channel = quote(channel_id, safe="")
@@ -302,7 +380,13 @@ class LiveTradingStore:
             if not path.exists():
                 return False
             path.unlink()
-            return True
+        log_event(
+            _log,
+            logging.DEBUG,
+            "live_trading_store.file_deleted",
+            path=str(path),
+        )
+        return True
 
     def _with_db(self, fn: Callable[[LiveTradingRepository], T]) -> T:
         assert self._session_factory is not None
@@ -311,9 +395,22 @@ class LiveTradingStore:
             repo = LiveTradingRepository(session)
             result = fn(repo)
             session.commit()
+            log_event(
+                _log,
+                logging.DEBUG,
+                "live_trading_store.db_transaction_committed",
+                repository=repo.__class__.__name__,
+            )
             return result
-        except Exception:
+        except Exception as exc:
             session.rollback()
+            log_event(
+                _log,
+                logging.ERROR,
+                "live_trading_store.db_transaction_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             raise
         finally:
             session.close()

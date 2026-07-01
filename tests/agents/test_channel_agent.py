@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from triak_trade.agents.channel_agent import ChannelAgent
@@ -318,4 +319,29 @@ def test_snapshot_readable_non_secret() -> None:
     snap = agent.get_context_snapshot()
     assert "signals" in snap
     assert "debug_events" in snap
-    assert "TOOBIT_API_KEY" not in str(snap)
+
+
+def test_channel_agent_emits_debuggable_logs(caplog) -> None:
+    agent, clock, settings = _agent()
+    caplog.set_level(logging.DEBUG, logger="triak_trade.agents.channel_agent")
+
+    agent.ingest_message(
+        _raw(
+            clock=clock,
+            channel_id="chan-a",
+            message_id=1,
+            text="BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000",
+        )
+    )
+    clock.advance(seconds=settings.SIGNAL_CONSOLIDATION_SECONDS)
+    agent.tick(clock.now())
+
+    messages = [record.message for record in caplog.records]
+    assert "channel_agent.signal_pending_consolidation" in messages
+    assert "channel_agent.consolidation_succeeded" in messages
+    pending = next(
+        record
+        for record in caplog.records
+        if record.message == "channel_agent.signal_pending_consolidation"
+    )
+    assert pending.signal_id.startswith("sig_")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -128,3 +129,32 @@ async def test_live_listener_only_hydrates_caption_media_messages() -> None:
     await svc.start(["chan-a"])
 
     assert client.ensure_calls == [10]
+
+
+@pytest.mark.asyncio
+async def test_live_listener_emits_action_logs(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="triak_trade.telegram.live_listener")
+    now = datetime.now(timezone.utc)
+    client = FakeTelegramClient(
+        live_messages=[
+            RawTelegramMessage(
+                channel_id="chan-a",
+                channel_username="a",
+                message_id=1,
+                text="hello",
+                date=now,
+                edited_at=None,
+                reply_to_msg_id=None,
+            )
+        ]
+    )
+    svc = TelegramLiveListenerService(
+        telegram_client=client,
+        agent_factory=lambda channel_id: FakeAgent(channel_id),
+    )
+
+    await svc.start(["chan-a"])
+
+    messages = [record.message for record in caplog.records]
+    assert "telegram_live_listener.agent_created" in messages
+    assert "telegram_live_listener.actions_generated" in messages

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -9,6 +10,7 @@ from typing import Any, cast
 from sqlalchemy import and_, desc, select
 from sqlalchemy.orm import Session
 
+from triak_trade.core.logging import log_event
 from triak_trade.db.models import (
     AuditLogORM,
     CandleORM,
@@ -33,6 +35,8 @@ from triak_trade.live_trading.models import (
     LiveSignalSnapshot,
     LiveTrade,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _model_to_json_payload(model: Any) -> dict[str, Any]:
@@ -90,10 +94,40 @@ class TelegramMessageRepository:
     def add_raw_message(self, raw: RawTelegramMessage) -> int:
         latest = self._latest_row(raw.channel_id, raw.message_id)
         if latest is None:
-            return self._insert(raw, version=1)
+            row_id = self._insert(raw, version=1)
+            log_event(
+                _log,
+                logging.INFO,
+                "telegram_message_repository.inserted",
+                channel_id=raw.channel_id,
+                message_id=raw.message_id,
+                version=1,
+                row_id=row_id,
+            )
+            return row_id
         if self._equal_content(latest, raw):
+            log_event(
+                _log,
+                logging.DEBUG,
+                "telegram_message_repository.deduped",
+                channel_id=raw.channel_id,
+                message_id=raw.message_id,
+                version=latest.version,
+                row_id=latest.id,
+            )
             return latest.id
-        return self._insert(raw, version=latest.version + 1)
+        new_version = latest.version + 1
+        row_id = self._insert(raw, version=new_version)
+        log_event(
+            _log,
+            logging.INFO,
+            "telegram_message_repository.version_inserted",
+            channel_id=raw.channel_id,
+            message_id=raw.message_id,
+            version=new_version,
+            row_id=row_id,
+        )
+        return row_id
 
     def add_message_version(self, raw: RawTelegramMessage) -> int:
         return self.add_raw_message(raw)
@@ -168,6 +202,15 @@ class SignalRepository:
             )
             self.session.add(row)
             self.session.flush()
+            log_event(
+                _log,
+                logging.INFO,
+                "signal_repository.inserted",
+                signal_id=state.signal_id,
+                channel_id=state.channel_id,
+                status=state.status.value,
+                version=state.version,
+            )
             return
 
         row.channel_id = state.channel_id
@@ -180,6 +223,15 @@ class SignalRepository:
         row.updated_at = state.updated_at
         row.expires_at = state.expires_at
         self.session.flush()
+        log_event(
+            _log,
+            logging.DEBUG,
+            "signal_repository.updated",
+            signal_id=state.signal_id,
+            channel_id=state.channel_id,
+            status=state.status.value,
+            version=state.version,
+        )
 
     def get_signal(self, signal_id: str) -> SignalState | None:
         row = self.session.execute(
@@ -260,6 +312,13 @@ class CandleRepository:
             )
             inserted += 1
         self.session.flush()
+        log_event(
+            _log,
+            logging.INFO,
+            "candle_repository.upserted",
+            received_count=len(candles),
+            inserted_count=inserted,
+        )
         return inserted
 
     def list_candles(

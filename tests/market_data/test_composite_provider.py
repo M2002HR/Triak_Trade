@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -67,3 +68,16 @@ async def test_composite_provider_falls_back_to_next_provider() -> None:
     assert len(candles) == 1
     assert working.calls == 1
     assert price == Decimal("123")
+
+
+@pytest.mark.asyncio
+async def test_composite_provider_emits_fallback_logs(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="triak_trade.market_data.composite")
+    provider = CompositeMarketDataProvider([_FailingProvider(), _WorkingProvider()])
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    await provider.get_klines("BTCUSDT", "1m", start, start + timedelta(minutes=1))
+
+    messages = [record.message for record in caplog.records]
+    assert "market_data.composite_provider_failed" in messages
+    assert "market_data.composite_provider_succeeded" in messages

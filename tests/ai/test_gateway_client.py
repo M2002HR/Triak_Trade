@@ -124,6 +124,38 @@ def test_gateway_client_routes_text_requests_to_groq_model(context: AIMessageCon
     assert "\"model\":\"openai/gpt-oss-120b\"" in payload
 
 
+def test_gateway_client_prefers_more_specific_symbol_raw_hint() -> None:
+    payload = _ok_payload()
+    payload["symbol"] = "SHIBUSDT"
+    payload["symbol_raw"] = "1000SHIB/USDT"
+    ai_context = AIMessageContext(
+        channel_id="c1",
+        channel_username="u1",
+        message_id=1,
+        message_text="1000SHIB/USDT LONG",
+        message_date="2026-01-01T00:00:00Z",
+        message_has_media=False,
+        message_is_caption=False,
+        message_images=[],
+        reply_chain_messages=[],
+        following_messages=[],
+        recent_messages=[],
+        active_signals=[],
+        parser_version="ai-v1",
+        notes=[],
+    )
+
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+
+    result = client.classify_message(ai_context)
+    assert result.symbol == "1000SHIBUSDT"
+    assert result.symbol_raw == "1000SHIB/USDT"
+
+
 def test_gateway_client_routes_caption_images_to_gemini_multimodal() -> None:
     observed: dict[str, object] = {}
     context = AIMessageContext(

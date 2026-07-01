@@ -143,9 +143,14 @@
       "No closed trades yet.",
       { allowDelete: true }
     );
+    renderSessionSummaryStrip(overview.recent_sessions || []);
+    renderMessageSummaryStrip(state.recentMessages);
+    renderOpenTradeSummaryStrip(state.openTrades);
+    renderClosedTradeSummaryStrip(state.closedTrades);
     setText("lt-positions-count", `${state.openTrades.length} open`);
     setText("lt-msg-count", `${state.recentMessages.length} messages`);
     setText("lt-session-count", `${(overview.recent_sessions || []).length} sessions`);
+    setText("lt-history-count", `${state.closedTrades.length} closed`);
   }
 
   function renderHero(overview) {
@@ -179,32 +184,67 @@
     });
   }
 
+  function renderSessionSummaryStrip(sessions) {
+    const running = sessions.filter((session) => session.status === "running").length;
+    const demo = sessions.filter((session) => session.trading_mode === "demo").length;
+    const live = sessions.filter((session) => session.trading_mode === "live").length;
+    const attention = sessions.filter((session) => (session.last_error || "").trim() || session.status === "error").length;
+    setText("lt-session-running-count", running);
+    setText("lt-session-demo-count", demo);
+    setText("lt-session-live-count", live);
+    setText("lt-session-attention-count", attention);
+  }
+
   function renderSessionCard(session) {
     const status = session.status || "unknown";
     const openCls = session.trading_mode === "live" ? "mode-live" : "mode-demo";
+    const statusTone = session.status === "running"
+      ? "session-state-running"
+      : session.status === "error"
+        ? "session-state-error"
+        : "session-state-idle";
     const channelLabel = session.channel_labels?.[0] || session.channels?.[0] || "—";
     const realizedClass = parseFloat(session.total_realized_pnl || 0) >= 0 ? "metric-pos" : "metric-neg";
+    const unrealizedClass = parseFloat(session.total_unrealized_pnl || 0) >= 0 ? "metric-pos" : "metric-neg";
     const canStop = status === "running" || status === "starting";
+    const attention = (session.last_error || "").trim();
+    const messages = session.total_messages_processed || 0;
+    const openPositions = session.open_positions_count || 0;
+    const identity = esc(session.label || "Session");
+    const startedAt = fmtDate(session.started_at);
     return `
-      <article class="session-card" data-session-open="${esc(session.session_id)}">
+      <article class="session-card session-card-rich ${statusTone}" data-session-open="${esc(session.session_id)}">
         <div class="session-card-head">
-          <div>
-            <h3>${esc(session.label || channelLabel)}</h3>
-            <p class="subtle">${esc(channelLabel)}</p>
+          <div class="session-card-title">
+            <h3>${identity}</h3>
+            <div class="session-card-subline">
+              <span class="session-card-handle">${esc(channelLabel)}</span>
+              <span class="session-card-id">ID ${esc(session.session_id.slice(-8))}</span>
+            </div>
           </div>
           <div class="session-card-badges">
             <span class="badge ${openCls}">${session.trading_mode === "live" ? "LIVE" : "DEMO"}</span>
             <span class="phase-pill ${phaseClass(status)}">${esc(statusLabel(status))}</span>
           </div>
         </div>
-        <div class="session-card-grid">
-          <div><span>Strategy</span><strong>${esc(session.strategy_key)}</strong></div>
-          <div><span>Risk</span><strong>${esc(session.risk_per_trade_pct)}%</strong></div>
-          <div><span>Open</span><strong>${session.open_positions_count || 0}</strong></div>
-          <div><span>Messages</span><strong>${session.total_messages_processed || 0}</strong></div>
-          <div><span>Realized PnL</span><strong class="${realizedClass}">${fmtUSDT(session.total_realized_pnl || 0)}</strong></div>
-          <div><span>Started</span><strong>${fmtDate(session.started_at)}</strong></div>
+        <div class="session-card-ribbon">
+          <span class="mini-badge">${esc(session.strategy_key)}</span>
+          <span class="mini-badge">Risk ${esc(session.risk_per_trade_pct)}%</span>
+          <span class="mini-badge">W/L ${session.wins || 0}/${session.losses || 0}</span>
         </div>
+        <div class="session-card-grid session-card-grid-compact">
+          <div class="session-metric-tile"><span>Open</span><strong>${openPositions}</strong></div>
+          <div class="session-metric-tile"><span>Messages</span><strong>${messages}</strong></div>
+          <div class="session-metric-tile"><span>Closed</span><strong>${session.closed_trades_count || 0}</strong></div>
+          <div class="session-metric-tile"><span>Signals</span><strong>${session.total_signals_opened || 0}</strong></div>
+          <div class="session-metric-tile pnl-tile"><span>Realized PnL</span><strong class="${realizedClass}">${fmtUSDT(session.total_realized_pnl || 0)}</strong></div>
+          <div class="session-metric-tile pnl-tile"><span>Unrealized PnL</span><strong class="${unrealizedClass}">${fmtUSDT(session.total_unrealized_pnl || 0)}</strong></div>
+        </div>
+        <div class="session-card-foot">
+          <span class="session-foot-item"><strong>Started</strong>${startedAt}</span>
+          <span class="session-foot-item"><strong>Mode</strong>${session.trading_mode === "live" ? "Live Execution" : "Demo Execution"}</span>
+        </div>
+        ${attention ? `<p class="session-card-alert">${esc(attention)}</p>` : ""}
         <div class="session-card-actions">
           <button type="button" class="btn btn-sm" data-session-open="${esc(session.session_id)}">View Details</button>
           ${canStop ? `<button type="button" class="btn btn-danger btn-sm" data-session-stop="${esc(session.session_id)}">Stop</button>` : ""}
@@ -345,8 +385,55 @@
     }
   }
 
+  function renderMessageSummaryStrip(messages) {
+    let opened = 0;
+    let updated = 0;
+    let closed = 0;
+    let ignored = 0;
+    messages.forEach((message) => {
+      const bucket = messageOutcomeGroup(message.final_status);
+      if (bucket === "opened") {
+        opened += 1;
+      } else if (bucket === "updated") {
+        updated += 1;
+      } else if (bucket === "closed") {
+        closed += 1;
+      } else {
+        ignored += 1;
+      }
+    });
+    setText("lt-msg-opened-count", opened);
+    setText("lt-msg-updated-count", updated);
+    setText("lt-msg-closed-count", closed);
+    setText("lt-msg-ignored-count", ignored);
+  }
+
+  function renderOpenTradeSummaryStrip(trades) {
+    let longCount = 0;
+    let shortCount = 0;
+    let syncedCount = 0;
+    let unsyncedCount = 0;
+    trades.forEach((trade) => {
+      if ((trade.side || "").toLowerCase() === "long") {
+        longCount += 1;
+      } else if ((trade.side || "").toLowerCase() === "short") {
+        shortCount += 1;
+      }
+      if (trade.exchange_position) {
+        syncedCount += 1;
+      } else {
+        unsyncedCount += 1;
+      }
+    });
+    setText("lt-pos-long-count", longCount);
+    setText("lt-pos-short-count", shortCount);
+    setText("lt-pos-synced-count", syncedCount);
+    setText("lt-pos-unsynced-count", unsyncedCount);
+  }
+
   function renderMessageCard(message, options = {}) {
     const statusClass = messageBadgeClass(message.final_status);
+    const outcomeGroup = messageOutcomeGroup(message.final_status);
     const side = message.side
       ? `<span class="badge ${message.side === "long" ? "side-long" : "side-short"}">${esc(message.side.toUpperCase())}</span>`
       : "";
@@ -366,21 +453,26 @@
       ? `<button type="button" class="btn btn-sm" data-delete-message="1" data-session-id="${esc(message.session_id)}" data-message-id="${esc(message.message_id)}" data-channel-id="${esc(message.channel_id)}">Delete</button>`
       : "";
     return `
-      <article class="msg-card">
+      <article class="msg-card msg-card-rich msg-card-${outcomeGroup}">
         <div class="msg-card-header">
-          <span class="badge ${statusClass}">${esc(message.final_status || "processing")}</span>
-          ${side}
-          ${symbol}
-          <span class="subtle">${esc(message.channel_label || message.channel_id || "—")}</span>
-          <span class="subtle msg-time">${fmtDate(message.message_date)}</span>
-          ${deleteButton}
+          <div class="msg-card-topic">
+            <span class="badge ${statusClass}">${esc(messageStatusLabel(message.final_status || "processing"))}</span>
+            ${side}
+            ${symbol}
+          </div>
+          <div class="msg-card-meta">
+            <span class="subtle">${esc(message.channel_label || message.channel_id || "—")}</span>
+            <span class="subtle msg-time">${fmtDate(message.message_date)}</span>
+            ${deleteButton}
+          </div>
         </div>
         <div class="msg-card-body">
-          ${message.preview_text ? `<span class="msg-preview">${esc(message.preview_text.slice(0, 160))}</span>` : ""}
-          ${message.effect_summary ? `<span class="subtle effect-summary">${esc(message.effect_summary)}</span>` : ""}
-          ${impactNotes}
-          ${correlation}
-          ${trade}
+          ${message.preview_text ? `<p class="msg-preview">${esc(message.preview_text.slice(0, 180))}</p>` : ""}
+          <div class="msg-card-insight-row">
+            ${message.effect_summary ? `<span class="effect-summary">${esc(message.effect_summary)}</span>` : '<span class="effect-summary">No effect summary recorded.</span>'}
+            ${trade}
+          </div>
+          ${(impactNotes || correlation) ? `<div class="msg-card-note-row">${impactNotes}${correlation}</div>` : ""}
         </div>
       </article>
     `;
@@ -413,6 +505,25 @@
     }
   }
 
+  function renderClosedTradeSummaryStrip(trades) {
+    let winners = 0;
+    let losers = 0;
+    let flat = 0;
+    trades.forEach((trade) => {
+      const pnl = parseFloat(trade.realized_pnl || 0);
+      if (pnl > 0) {
+        winners += 1;
+      } else if (pnl < 0) {
+        losers += 1;
+      } else {
+        flat += 1;
+      }
+    });
+    setText("lt-history-win-count", winners);
+    setText("lt-history-loss-count", losers);
+    setText("lt-history-flat-count", flat);
+  }
+
   function tradeCard(trade, isOpen, options = {}) {
     const pnl = parseFloat(isOpen ? trade.unrealized_pnl || 0 : trade.realized_pnl || 0);
     const pnlClass = pnl >= 0 ? "metric-pos" : "metric-neg";
@@ -420,31 +531,41 @@
     const channel = trade.channel_label || trade.channel_id || "—";
     const badge = isOpen
       ? '<span class="trade-status-badge open">OPEN</span>'
-      : `<span class="trade-status-badge closed">${esc(trade.close_reason || "closed")}</span>`;
+      : `<span class="trade-status-badge closed">${esc(closeReasonLabel(trade.close_reason || "closed"))}</span>`;
     const exchangePill = trade.exchange_position
       ? '<span class="badge badge-blue">API synced</span>'
-      : "";
+      : '<span class="badge badge-gray">Pending sync</span>';
     const deleteButton = options.allowDelete
       ? `<button type="button" class="btn btn-sm" data-delete-trade="1" data-session-id="${esc(trade.session_id)}" data-trade-id="${esc(trade.trade_id)}">Delete</button>`
       : "";
+    const statusTone = isOpen ? "trade-card-open" : pnl >= 0 ? "trade-card-win" : pnl < 0 ? "trade-card-loss" : "trade-card-flat";
     return `
-      <article class="trade-card msg-card" data-trade-id="${esc(trade.trade_id)}" data-session-id="${esc(trade.session_id)}">
+      <article class="trade-card msg-card trade-card-rich ${statusTone}" data-trade-id="${esc(trade.trade_id)}" data-session-id="${esc(trade.session_id)}">
         <div class="msg-card-header">
-          <span class="badge ${sideClass}">${esc((trade.side || "").toUpperCase())} ${esc(trade.symbol || "")}</span>
-          ${badge}
-          ${exchangePill}
-          <span class="subtle">${esc(channel)}</span>
-          ${deleteButton}
+          <div class="msg-card-topic">
+            <span class="badge ${sideClass}">${esc((trade.side || "").toUpperCase())} ${esc(trade.symbol || "")}</span>
+            ${badge}
+            ${exchangePill}
+          </div>
+          <div class="msg-card-meta">
+            <span class="subtle">${esc(channel)}</span>
+            <span class="subtle">${fmtDate(isOpen ? trade.opened_at : trade.closed_at || trade.updated_at || trade.opened_at)}</span>
+            ${deleteButton}
+          </div>
         </div>
         <div class="msg-card-body">
-          <span>Entry: ${fmtPrice(trade.entry_price)}</span>
-          <span>Lev: ${esc(trade.leverage || 1)}x</span>
+          <div class="trade-kpi-grid">
+            <span><strong>Entry</strong>${fmtPrice(trade.entry_price)}</span>
+            <span><strong>Leverage</strong>${esc(trade.leverage || 1)}x</span>
+            <span><strong>${isOpen ? "Qty" : "Closed Qty"}</strong>${esc(trade.quantity)}</span>
+            ${trade.stop_loss ? `<span><strong>SL</strong>${fmtPrice(trade.stop_loss)}</span>` : ""}
+            ${!isOpen && trade.exit_price ? `<span><strong>Exit</strong>${fmtPrice(trade.exit_price)}</span>` : ""}
+          </div>
           ${trade.exchange_symbol ? `<span class="subtle">API symbol: ${esc(trade.exchange_symbol)}</span>` : ""}
-          <span class="${pnlClass}">${isOpen ? "Unrealized" : "PnL"}: ${fmtUSDT(pnl)}</span>
-          ${trade.stop_loss ? `<span class="subtle">SL: ${fmtPrice(trade.stop_loss)}</span>` : ""}
+          <span class="trade-pnl-line ${pnlClass}">${isOpen ? "Unrealized" : "Realized PnL"}: ${fmtUSDT(pnl)}</span>
           ${trade.last_exchange_sync_error ? `<span class="error-note">Exchange error: ${esc(trade.last_exchange_sync_error)}</span>` : ""}
         </div>
-        <div class="msg-card-footer subtle">${esc(trade.session_id.slice(-8))} · ${fmtDate(trade.opened_at)}</div>
+        <div class="msg-card-footer subtle">${esc(trade.session_id.slice(-8))} · ${closeReasonSummary(trade, isOpen)}</div>
       </article>
     `;
   }
@@ -1096,6 +1217,62 @@
     return mapping[status] || "badge-gray";
   }
 
+  function messageOutcomeGroup(status) {
+    if (status === "opened_trade") {
+      return "opened";
+    }
+    if (["updated_trade", "updated_sl", "updated_tp", "updated_leverage", "signal_updated", "partial_close"].includes(status)) {
+      return "updated";
+    }
+    if (["closed_trade", "cancelled_trade"].includes(status)) {
+      return "closed";
+    }
+    return "ignored";
+  }
+
+  function messageStatusLabel(status) {
+    const mapping = {
+      ignored: "Ignored",
+      pending_consolidation: "Pending",
+      signal_updated: "Signal Updated",
+      opened_trade: "Opened Trade",
+      updated_trade: "Updated Trade",
+      closed_trade: "Closed Trade",
+      partial_close: "Partial Close",
+      updated_sl: "Stop Updated",
+      updated_tp: "Target Updated",
+      updated_leverage: "Leverage Updated",
+      cancelled_trade: "Cancelled",
+      invalid: "Invalid",
+      invalid_symbol: "Bad Symbol",
+      invalid_sizing: "Bad Sizing",
+      no_match: "No Match",
+      no_open_trade: "No Open Trade",
+      processing: "Processing",
+    };
+    return mapping[status] || (status || "Processing");
+  }
+
+  function closeReasonLabel(reason) {
+    const mapping = {
+      sl_hit: "Stop Hit",
+      tp_hit: "Target Hit",
+      manual_close: "Manual Close",
+      cancelled: "Cancelled",
+      closed: "Closed",
+    };
+    return mapping[reason] || String(reason || "closed").split("_").join(" ");
+  }
+
+  function closeReasonSummary(trade, isOpen) {
+    if (isOpen) {
+      return `opened ${fmtDate(trade.opened_at)}`;
+    }
+    const reason = closeReasonLabel(trade.close_reason || "closed");
+    const closedAt = fmtDate(trade.closed_at || trade.updated_at || trade.opened_at);
+    return `${reason} · ${closedAt}`;
+  }
+
   function statusLabel(status) {
     const mapping = {
       starting: "Starting",
@@ -1197,68 +1374,6 @@
     }
     return fetch(url, { ...options, headers });
   }
-
-  const style = document.createElement("style");
-  style.textContent = `
-    .side-long { color: #22c55e; }
-    .side-short { color: #ef4444; }
-    .mode-live { background:#ef444422; color:#ef4444; }
-    .mode-demo { background:#eab30822; color:#eab308; }
-    .metric-pos { color: #22c55e; }
-    .metric-neg { color: #ef4444; }
-    .badge-green { background:#22c55e22; color:#22c55e; }
-    .badge-red { background:#ef444422; color:#ef4444; }
-    .badge-yellow { background:#eab30822; color:#eab308; }
-    .badge-blue { background:#3b82f622; color:#3b82f6; }
-    .badge-gray { background:#94a3b822; color:#94a3b8; }
-    .badge-orange { background:#f9731622; color:#f97316; }
-    .badge-neutral { background:#1e293b; color:#94a3b8; }
-    .modal-metrics { display:flex; flex-wrap:wrap; gap:.6rem; }
-    .modal-metrics .metric { min-width:140px; }
-    .table-scroll { overflow-x:auto; margin-top:.8rem; }
-    .data-table { width:100%; border-collapse:collapse; font-size:.82rem; }
-    .data-table th, .data-table td { padding:.4rem .6rem; border-bottom:1px solid #1e293b; text-align:left; }
-    .data-table th { color:#94a3b8; font-weight:500; }
-    .mono { font-family:monospace; font-size:.8rem; }
-    .form-row-2 { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
-    .lt-action-row { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
-    .error-note { color:#ef4444; }
-    .msg-stream { max-height:420px; overflow-y:auto; display:flex; flex-direction:column; gap:.5rem; }
-    .modal-stream { max-height:260px; }
-    .msg-preview { display:block; font-size:.82rem; color:#cbd5e1; }
-    .effect-summary { display:block; font-size:.78rem; }
-    .msg-time { font-size:.72rem; }
-    .msg-card-footer { font-size:.75rem; margin-top:.2rem; }
-    .channel-tag-row { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.5rem; }
-    .channel-tag { background:#1e293b; border-radius:4px; padding:3px 8px; display:flex; align-items:center; gap:.3rem; font-size:.82rem; }
-    .tag-remove { background:none; border:none; color:#ef4444; cursor:pointer; padding:0; line-height:1; }
-    .channel-input-row { display:flex; gap:.5rem; }
-    .channel-input-row input { flex:1; }
-    .btn-link { background:none; border:none; color:#3b82f6; cursor:pointer; font-size:.82rem; padding:0; }
-    .saved-channel-list { background:#0f172a; border-radius:4px; padding:.6rem; margin-top:.5rem; }
-    .saved-ch-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:.5rem; align-items:center; padding:.2rem 0; }
-    .saved-ch-row span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .session-card-list { display:flex; flex-direction:column; gap:.75rem; }
-    .session-card { border:1px solid #1e293b; border-radius:8px; padding:.9rem; background:#0f172a; cursor:pointer; }
-    .session-card-head { display:flex; justify-content:space-between; gap:1rem; align-items:flex-start; margin-bottom:.75rem; }
-    .session-card-head h3 { margin:0 0 .2rem 0; font-size:1rem; }
-    .session-card-badges { display:flex; gap:.4rem; flex-wrap:wrap; align-items:center; }
-    .session-card-grid { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:.65rem; }
-    .session-card-grid span { display:block; font-size:.74rem; color:#94a3b8; }
-    .session-card-grid strong { display:block; margin-top:.12rem; font-size:.86rem; }
-    .session-card-actions { display:flex; gap:.5rem; margin-top:.85rem; }
-    .trade-status-badge { font-size:.72rem; padding:2px 6px; border-radius:3px; font-weight:600; }
-    .trade-status-badge.open { background:#22c55e22; color:#22c55e; }
-    .trade-status-badge.closed { background:#94a3b822; color:#94a3b8; }
-    .lt-session-detail-grid { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:1rem; margin-top:1rem; }
-    .lt-session-detail-grid h4 { margin:0 0 .6rem 0; }
-    .lt-modal-actions { display:flex; gap:.6rem; align-items:center; }
-    @media (max-width: 900px) {
-      .form-row-2, .session-card-grid, .lt-session-detail-grid { grid-template-columns:1fr; }
-      .session-card-head { flex-direction:column; }
-    }
-  `;
-  document.head.appendChild(style);
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);

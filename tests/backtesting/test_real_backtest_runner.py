@@ -196,6 +196,30 @@ def _home_candles(now: datetime) -> list[Candle]:
     return candles
 
 
+def _1000shib_candles(now: datetime) -> list[Candle]:
+    candles: list[Candle] = []
+    for index, open_price, high_price, low_price, close_price in (
+        (0, "0.005979", "0.006060", "0.005950", "0.006020"),
+        (1, "0.006020", "0.006140", "0.005990", "0.006110"),
+    ):
+        open_time = now + timedelta(minutes=index)
+        candles.append(
+            Candle(
+                symbol="1000SHIB-SWAP-USDT",
+                interval="1m",
+                open_time=open_time,
+                close_time=open_time + timedelta(minutes=1),
+                open=Decimal(open_price),
+                high=Decimal(high_price),
+                low=Decimal(low_price),
+                close=Decimal(close_price),
+                volume=Decimal("50"),
+                source=CandleSource.TOOBIT,
+            )
+        )
+    return candles
+
+
 def test_real_backtest_runner_blocks_when_disabled(tmp_path: Path) -> None:
     settings = _settings(tmp_path, REAL_BACKTEST_ENABLED=False)
     runner = RealBacktestRunner(
@@ -890,6 +914,46 @@ def test_real_backtest_runner_market_symbol_is_normalized_on_event(
     assert result.trades_filled == 1
 
 
+def test_real_backtest_runner_preserves_numeric_symbol_prefix_for_market_data_fetch(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, 30, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        (
+            "1000SHIB/USDT BUY Entry zone: 0.005979 SL: 0.005680 "
+            "TP1 0.006054 TP2 0.006128 TP3 0.006278 Leverage: 5x"
+        ),
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(
+        candles_by_symbol={"1000SHIB-SWAP-USDT": _1000shib_candles(now)}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        )
+    )
+
+    assert result.success is True
+    assert provider.requests[0] == "1000SHIB-SWAP-USDT"
+    assert "SHIB-SWAP-USDT" not in provider.requests
+
+
 def test_real_backtest_runner_close_all_message_closes_every_open_signal(
     tmp_path: Path,
 ) -> None:
@@ -1174,6 +1238,106 @@ def test_real_backtest_runner_keeps_closed_signal_levels_and_chart_metadata() ->
     assert latest["chart"]["candles"]
     assert "timestamp_ms" in latest["chart"]["candles"][0]
     assert "started_at_ms" in latest["chart"]["stop_loss_history"][0]
+
+
+def test_real_backtest_runner_preserves_precise_small_price_chart_data() -> None:
+    now = datetime(2026, 6, 6, tzinfo=timezone.utc)
+    state = SimulationSignalState(
+        signal_id="sig_small",
+        symbol="SAPIENUSDT",
+        side=TradeSide.LONG,
+        status="open",
+        original_quantity=Decimal("1000"),
+        open_quantity=Decimal("1000"),
+        entry_price=Decimal("0.0061234"),
+        stop_loss=Decimal("0.0059012"),
+        take_profits=[
+            Decimal("0.0061784"),
+            Decimal("0.0062454"),
+            Decimal("0.0063174"),
+        ],
+        notional_value=Decimal("6.1234"),
+        risk_amount=Decimal("0.2222"),
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0.0226"),
+        total_pnl_pct=Decimal("0.3691"),
+        mark_price=Decimal("0.0061459"),
+        entry_time=now,
+        exit_time=None,
+        exit_price=None,
+        targets_hit=0,
+        notes=[],
+        declared_leverage=Decimal("5"),
+        effective_leverage=Decimal("5"),
+        margin=Decimal("1.22468"),
+        balance_basis=Decimal("10"),
+        margin_pnl_pct=Decimal("1.8456"),
+        price_history=[
+            SignalPricePoint(
+                timestamp=now,
+                candle_open_time=now,
+                candle_close_time=now + timedelta(minutes=1),
+                open=Decimal("0.0061017"),
+                high=Decimal("0.0061888"),
+                low=Decimal("0.0060844"),
+                close=Decimal("0.0061459"),
+                stop_loss=Decimal("0.0059012"),
+                take_profits=[
+                    Decimal("0.0061784"),
+                    Decimal("0.0062454"),
+                    Decimal("0.0063174"),
+                ],
+                mark_price=Decimal("0.0061459"),
+                source_message_id=42,
+            )
+        ],
+        stop_loss_history=[
+            PriceLevelSpan(
+                kind="stop_loss",
+                label="SL",
+                value=Decimal("0.0059012"),
+                started_at=now,
+            )
+        ],
+        take_profit_history=[
+            PriceLevelSpan(
+                kind="take_profit",
+                label="TP1",
+                value=Decimal("0.0061784"),
+                started_at=now,
+            )
+        ],
+    )
+    snapshot = SimulationSnapshot(
+        timestamp=now + timedelta(minutes=1),
+        source_message_id=42,
+        open_positions=1,
+        closed_trades=0,
+        wins=0,
+        losses=0,
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0.0226"),
+        total_pnl=Decimal("0.0226"),
+        realized_balance=Decimal("100"),
+        current_balance=Decimal("100.0226"),
+        signal_states={"sig_small": state},
+        checkpoint_kind="message",
+    )
+
+    latest = RealBacktestRunner._live_signals_from_snapshot(snapshot)[0]
+
+    assert latest["entry_price"] == "0.006123"
+    assert latest["entry_price_raw"] == "0.0061234"
+    assert latest["stop_loss"] == "0.005901"
+    assert latest["stop_loss_raw"] == "0.0059012"
+    assert latest["take_profits"] == ["0.006178", "0.006245", "0.006317"]
+    assert latest["take_profit_levels_raw"] == ["0.0061784", "0.0062454", "0.0063174"]
+    assert latest["mark_price"] == "0.006146"
+    assert latest["mark_price_raw"] == "0.0061459"
+    assert latest["chart"]["candles"][0]["open"] == "0.0061017"
+    assert latest["chart"]["candles"][0]["high"] == "0.0061888"
+    assert latest["chart"]["stop_loss_history"][0]["value"] == "0.0059012"
+    assert latest["chart"]["stop_loss_history"][0]["value_display"] == "0.005901"
 
 
 def test_real_backtest_runner_skips_interval_progress_for_inactive_snapshots(

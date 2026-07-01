@@ -21,6 +21,7 @@ from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
 from triak_trade.dashboard.auth import session_secret_present, token_present
 from triak_trade.dashboard.local_client import LocalASGIClient
+from triak_trade.dashboard.log_sink import append_dashboard_log
 from triak_trade.dashboard.schemas import DashboardRuntimeStatus
 from triak_trade.verification.redaction import redact, redact_text
 
@@ -252,19 +253,7 @@ def write_dashboard_status(settings: Settings, status: DashboardRuntimeStatus) -
 
 def append_log(settings: Settings, event: str, payload: dict[str, Any]) -> None:
     ensure_runtime_dir(settings)
-    path = Path(settings.DASHBOARD_LOG_FILE)
-    line = json.dumps(
-        redact(
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "event": event,
-                "payload": payload,
-            }
-        ),
-        sort_keys=True,
-    )
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
+    append_dashboard_log(settings, event, payload)
 
 
 def read_pid(settings: Settings) -> int | None:

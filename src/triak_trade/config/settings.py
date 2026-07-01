@@ -227,6 +227,14 @@ class Settings(BaseSettings):
     REAL_BACKTEST_DEFAULT_INTERVAL: str = "1m"
     REAL_BACKTEST_MAX_MESSAGES: int = 1000
     REAL_BACKTEST_MAX_CANDLES: int = 100000
+    # Per-symbol candle budget for market-data prefetch during classification.
+    # When the date range would produce more candles than this limit, the fetch
+    # window is anchored at the backtest start date and truncated forward by
+    # this many candles.  90 000 at 1-minute interval ≈ 62.5 days, so a
+    # standard two-month (60-day) backtest is fully covered without truncation.
+    # Longer ranges (e.g. 6-month) are capped to the first 62.5 days.
+    # Set to 0 to disable (risks OOM for backtests longer than ~2 months).
+    REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL: int = 90000
     REAL_BACKTEST_ACTIVE_SIGNAL_HOURS: int = 0
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
     REAL_BACKTEST_USE_AI: bool = True
@@ -312,6 +320,10 @@ class Settings(BaseSettings):
     LIVE_TRADING_ACCOUNT_REFRESH_SECONDS: int = 60
     LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS: int = 12
     LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS: int = 3
+    LIVE_TRADING_PROTECTION_SYNC_RETRY_ATTEMPTS: int = 3
+    LIVE_TRADING_PROTECTION_SYNC_RETRY_DELAY_SECONDS: float = 1.0
+    LIVE_TRADING_EXCHANGE_POSITION_MISS_CONFIRMATIONS: int = 2
+    LIVE_TRADING_EXCHANGE_POSITION_MISS_GRACE_SECONDS: int = 15
     LIVE_TRADING_DEFAULT_CHANNELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     LIVE_TRADING_USE_AI: bool = True
     LIVE_TRADING_REQUIRE_AI_CLASSIFIER: bool = True

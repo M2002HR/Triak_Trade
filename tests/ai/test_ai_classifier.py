@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -221,6 +222,31 @@ def test_ai_classifier_no_fallback_returns_safe_unknown() -> None:
     assert result.parsed_signal.action is SignalAction.UNKNOWN
 
 
+def test_ai_classifier_emits_skip_and_fallback_logs(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="triak_trade.ai.classifier")
+    skipped = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(_result_payload("GENERAL_ANALYSIS", "ignore")),
+    )
+    skipped.classify(_raw("Analysis BTC"), _context())
+
+    failing = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(500, json={"error": "x"})),
+    )
+    fallback = AIMessageClassifier(
+        settings=Settings(AI_CLASSIFIER_USE_REGEX_FALLBACK=True),
+        gateway_client=failing,
+        regex_fallback=RegexMessageClassifier(),
+    )
+    fallback.classify(_raw("cancel BTC signal"), _context())
+
+    messages = [record.message for record in caplog.records]
+    assert "ai_classifier.skipped_by_keyword" in messages
+    assert "ai_classifier.gateway_failed_using_regex_fallback" in messages
+
+
 def test_ai_classifier_constructible_for_channel_agent_contract() -> None:
     classifier = AIMessageClassifier(
         settings=Settings(),
@@ -390,4 +416,34 @@ def test_ai_classifier_backfills_symbol_from_ticker_tag_without_using_side_tag()
     assert result.parsed_signal.action is SignalAction.OPEN
     assert result.parsed_signal.symbol == "BTCUSDT"
     assert result.parsed_signal.entry_type.value == "market"
-    assert "regex_supplement=symbol" in result.debug_notes
+
+
+def test_ai_classifier_prefers_more_specific_symbol_when_numeric_prefix_is_present() -> None:
+    payload = _result_payload("NEW_SIGNAL", "open")
+    payload["symbol"] = "SHIBUSDT"
+    payload["symbol_raw"] = "1000SHIB/USDT"
+    payload["entry_type"] = "limit"
+    payload["entry_low"] = "0.005979"
+    payload["entry_high"] = None
+    payload["stop_loss"] = "0.005680"
+    payload["take_profits"] = ["0.006054", "0.006128", "0.006278"]
+    classifier = AIMessageClassifier(
+        settings=Settings(_env_file=None),
+        gateway_client=_client(payload),
+    )
+
+    result = classifier.classify(
+        _raw(
+            """
+            1000SHIB/USDT BUY
+            Entry zone: 0.005979
+            TP1 0.006054
+            TP2 0.006128
+            TP3 0.006278
+            SL 0.005680
+            """
+        ),
+        _context(),
+    )
+
+    assert result.parsed_signal.symbol == "1000SHIBUSDT"

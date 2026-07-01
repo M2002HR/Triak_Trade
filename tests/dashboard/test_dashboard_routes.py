@@ -47,6 +47,8 @@ def test_dashboard_main_page_includes_status_cards(tmp_path: Path) -> None:
     assert "AI Gateway" in response.text
     assert "Kill Switch" in response.text
     assert "Auto Mode" in response.text
+    assert "Operational State" in response.text
+    assert "Control Surfaces" in response.text
 
 
 def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
@@ -74,6 +76,7 @@ def test_logs_page_renders_log_channel_status(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Telegram Log Channel" in response.text
     assert "@triak_logs" in response.text
+    assert "Log Viewer" in response.text
 
 
 def test_reports_page_handles_no_reports(tmp_path: Path) -> None:
@@ -124,16 +127,23 @@ def test_settings_page_renders_backtest_lifecycle_controls(tmp_path: Path) -> No
     assert "Signal Refresh Cadence" in response.text
     assert "Refresh Interval" in response.text
     assert "30m" in response.text
+    assert "Operational Safety Envelope" in response.text
+    assert "Operational Safety Envelope" in response.text
 
 
 def test_live_trading_page_is_english_only(tmp_path: Path) -> None:
     response = client(tmp_path).get("/live-trading", headers=headers())
     assert response.status_code == 200
     text = response.text
-    assert "Run multiple independent sessions in parallel" in text
+    assert (
+        "Monitor message flow, open risk, session health, and trade outcomes in one place"
+        in text
+    )
+    assert "Per-Channel Runtime" in text
     assert "Account Information" in text
     assert "Concurrent Trading Sessions" in text
-    assert "Incoming Messages" in text
+    assert "Message Stream" in text
+    assert "Recent Closed Trades" in text
     assert "اطلاعات" not in text
     assert "سشن" not in text
 

@@ -2,13 +2,12 @@
 {% block content %}
 <section class="hero backtest-hero">
   <div>
-    <p class="eyebrow">Demo Trading Workspace</p>
+    <p class="eyebrow">Live Operations Workbench</p>
     <h1>Toobit Multi-Session Trading Monitor</h1>
     <p class="subtle hero-copy">
-      Run multiple independent sessions in parallel. Each session tracks one Telegram channel with
-      its own mode, strategy, risk profile, messages, and trade lifecycle.
-      Demo sessions submit real API requests to Toobit using demo-market symbols. Live sessions
-      are available only when the root env live-execution flag is enabled.
+      Monitor message flow, open risk, session health, and trade outcomes in one place.
+      Each session stays isolated by channel, strategy, mode, and attribution trail so you can
+      review what happened without visual noise.
     </p>
   </div>
   <div class="hero-stat-cluster">
@@ -21,6 +20,24 @@
 
 <script id="live-bootstrap" type="application/json">{{ bootstrap | tojson }}</script>
 
+<section class="overview-action-grid overview-action-grid-compact">
+  <article class="action-card action-card-plain">
+    <span class="eyebrow">Session Isolation</span>
+    <h2>Per-Channel Runtime</h2>
+    <p>Each channel runs with its own risk profile, strategy, message feed, signal memory, and trade history.</p>
+  </article>
+  <article class="action-card action-card-plain">
+    <span class="eyebrow">Execution Guardrails</span>
+    <h2>Demo-First Control</h2>
+    <p>Live mode appears only when the root runtime flag allows it. Otherwise the workbench stays demo-safe.</p>
+  </article>
+  <article class="action-card action-card-plain">
+    <span class="eyebrow">Operational Visibility</span>
+    <h2>Message-to-Trade Correlation</h2>
+    <p>Review message intent, position state, and closed-trade outcome from the same surface without losing context.</p>
+  </article>
+</section>
+
 <div class="grid-two backtest-layout" data-live-workbench="true">
   <div class="backtest-main-column">
     <section class="panel" id="lt-config-panel">
@@ -30,6 +47,10 @@
           <h2>Start a Trading Session</h2>
         </div>
         <div id="lt-readiness-badge" class="badge-row"></div>
+      </div>
+      <div class="workspace-helper">
+        <strong>Session start checklist</strong>
+        <p class="subtle">Select a channel, confirm mode and strategy, then start a session. Account balance and PnL stay exchange-backed in both demo and live modes.</p>
       </div>
       <div id="lt-readiness-issues" class="issues-list" style="display:none"></div>
 
@@ -94,8 +115,15 @@
         <div>
           <p class="eyebrow">Sessions</p>
           <h2>Concurrent Trading Sessions</h2>
+          <p class="subtle panel-intro">Active session cards highlight mode, risk posture, message volume, and PnL at a glance.</p>
         </div>
         <span class="subtle" id="lt-session-count">0 sessions</span>
+      </div>
+      <div class="summary-row live-summary-row" id="lt-session-summary-row">
+        <span class="counter-pill">Running <strong id="lt-session-running-count">0</strong></span>
+        <span class="counter-pill">Demo <strong id="lt-session-demo-count">0</strong></span>
+        <span class="counter-pill">Live <strong id="lt-session-live-count">0</strong></span>
+        <span class="counter-pill">Attention <strong id="lt-session-attention-count">0</strong></span>
       </div>
       <div id="lt-sessions-list" class="session-card-list">
         <p class="empty-state">No sessions started yet.</p>
@@ -121,9 +149,16 @@
       <div class="section-head compact">
         <div>
           <p class="eyebrow">Aggregate Feed</p>
-          <h2>Incoming Messages</h2>
+          <h2>Message Stream</h2>
+          <p class="subtle panel-intro">Incoming messages are grouped by outcome so you can scan what opened, updated, closed, or got ignored.</p>
         </div>
         <span class="subtle" id="lt-msg-count">0 messages</span>
+      </div>
+      <div class="summary-row live-summary-row" id="lt-message-summary-row">
+        <span class="counter-pill">Opened <strong id="lt-msg-opened-count">0</strong></span>
+        <span class="counter-pill">Updated <strong id="lt-msg-updated-count">0</strong></span>
+        <span class="counter-pill">Closed <strong id="lt-msg-closed-count">0</strong></span>
+        <span class="counter-pill">Ignored <strong id="lt-msg-ignored-count">0</strong></span>
       </div>
       <div id="lt-messages-list" class="msg-stream">
         <p class="empty-state">Start a session to display messages here.</p>
@@ -135,8 +170,15 @@
         <div>
           <p class="eyebrow">Aggregate Positions</p>
           <h2>Open Positions</h2>
+          <p class="subtle panel-intro">Open positions emphasize side, leverage, exchange sync, and unrealized exposure before deeper drill-down.</p>
         </div>
         <span class="subtle" id="lt-positions-count">0 open</span>
+      </div>
+      <div class="summary-row live-summary-row" id="lt-positions-summary-row">
+        <span class="counter-pill">Long <strong id="lt-pos-long-count">0</strong></span>
+        <span class="counter-pill">Short <strong id="lt-pos-short-count">0</strong></span>
+        <span class="counter-pill">Synced <strong id="lt-pos-synced-count">0</strong></span>
+        <span class="counter-pill">Unsynced <strong id="lt-pos-unsynced-count">0</strong></span>
       </div>
       <div id="lt-positions-list" class="trade-list">
         <p class="empty-state">No open positions.</p>
@@ -148,7 +190,14 @@
         <div>
           <p class="eyebrow">Aggregate History</p>
           <h2>Recent Closed Trades</h2>
+          <p class="subtle panel-intro">Recent exits surface side, reason, sync state, and realized PnL without opening every trade.</p>
         </div>
+        <span class="subtle" id="lt-history-count">0 closed</span>
+      </div>
+      <div class="summary-row live-summary-row" id="lt-history-summary-row">
+        <span class="counter-pill">Winners <strong id="lt-history-win-count">0</strong></span>
+        <span class="counter-pill">Losers <strong id="lt-history-loss-count">0</strong></span>
+        <span class="counter-pill">Flat <strong id="lt-history-flat-count">0</strong></span>
       </div>
       <div id="lt-history-list" class="trade-list">
         <p class="empty-state">No closed trades yet.</p>

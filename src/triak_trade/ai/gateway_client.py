@@ -14,6 +14,8 @@ import httpx
 
 from triak_trade.ai.prompts import build_telegram_signal_prompt
 from triak_trade.ai.schemas import AIClassificationResult, AIMessageContext
+from triak_trade.core.logging import log_event
+from triak_trade.core.symbols import canonical_market_symbol
 
 logger = logging.getLogger("triak_trade.ai.gateway_client")
 _ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF]")
@@ -90,8 +92,24 @@ class AjilGatewayClient:
         last_error: Exception | None = None
         headers = self._build_headers()
         attempts = max(1, self.retry_attempts)
-        
+        route = self.plan_for_context(context)
+        log_event(
+            logger,
+            logging.INFO,
+            "ai_gateway.classification_started",
+            channel_id=context.channel_id,
+            message_id=context.message_id,
+            provider=route.provider,
+            model=route.model,
+            multimodal=route.multimodal,
+            retry_attempts=attempts,
+            has_media=context.message_has_media,
+            image_count=len(context.message_images),
+            text_chars=len(context.message_text or ""),
+        )
+
         for attempt in range(1, attempts + 1):
+            attempt_started = time.monotonic()
             payload = self._build_payload(context, attempt=attempt)
             try:
                 with httpx.Client(
@@ -103,18 +121,46 @@ class AjilGatewayClient:
                     response = client.post(self.classify_path, json=payload, headers=headers)
             except httpx.TimeoutException:
                 last_error = AIGatewayTimeoutError("AI gateway timeout")
-                logger.warning("AI Gateway timeout on attempt %s/%s", attempt, attempts)
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "ai_gateway.timeout",
+                    attempt=attempt,
+                    attempts=attempts,
+                    provider=route.provider,
+                    model=route.model,
+                    elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
+                )
             except httpx.HTTPError as exc:
                 last_error = AIGatewayHTTPError(
                     f"AI gateway connection error: {type(exc).__name__}"
                 )
-                logger.warning(
-                    "AI Gateway connection error on attempt %s/%s: %s", attempt, attempts, exc
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "ai_gateway.connection_error",
+                    attempt=attempt,
+                    attempts=attempts,
+                    provider=route.provider,
+                    model=route.model,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
                 )
             else:
                 if response.status_code == 429:
                     last_error = AIGatewayHTTPError("AI gateway rate limited (429)")
-                    logger.warning("AI Gateway rate limited on attempt %s/%s", attempt, attempts)
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "ai_gateway.rate_limited",
+                        attempt=attempt,
+                        attempts=attempts,
+                        provider=route.provider,
+                        model=route.model,
+                        status_code=response.status_code,
+                        elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
+                    )
                     # Wait longer for rate limits
                     time.sleep(min(30.0, (self.retry_backoff_seconds * 4) * (2 ** (attempt - 1))))
                     continue
@@ -122,11 +168,16 @@ class AjilGatewayClient:
                     last_error = AIGatewayHTTPError(
                         f"AI gateway server error ({response.status_code})"
                     )
-                    logger.warning(
-                        "AI Gateway server error %s on attempt %s/%s",
-                        response.status_code,
-                        attempt,
-                        attempts,
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "ai_gateway.server_error",
+                        attempt=attempt,
+                        attempts=attempts,
+                        provider=route.provider,
+                        model=route.model,
+                        status_code=response.status_code,
+                        elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
                     )
                 elif response.status_code >= 400:
                     last_error = AIGatewayHTTPError(
@@ -134,19 +185,29 @@ class AjilGatewayClient:
                     )
                     # Don't retry 401/403/404 as they are likely permanent
                     if response.status_code in {401, 403, 404}:
-                        logger.error(
-                            "AI Gateway permanent failure %s on attempt %s/%s: %s",
-                            response.status_code,
-                            attempt,
-                            attempts,
-                            response.text,
+                        log_event(
+                            logger,
+                            logging.ERROR,
+                            "ai_gateway.permanent_http_error",
+                            attempt=attempt,
+                            attempts=attempts,
+                            provider=route.provider,
+                            model=route.model,
+                            status_code=response.status_code,
+                            response_chars=len(response.text),
+                            elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
                         )
                         raise last_error
-                    logger.warning(
-                        "AI Gateway client error %s on attempt %s/%s",
-                        response.status_code,
-                        attempt,
-                        attempts,
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "ai_gateway.client_error",
+                        attempt=attempt,
+                        attempts=attempts,
+                        provider=route.provider,
+                        model=route.model,
+                        status_code=response.status_code,
+                        elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
                     )
                 else:
                     try:
@@ -155,27 +216,58 @@ class AjilGatewayClient:
                         last_error = AIGatewayResponseError(
                             "AI gateway returned malformed JSON"
                         )
-                        logger.warning(
-                            "AI Gateway returned malformed JSON on attempt %s/%s",
-                            attempt,
-                            attempts,
+                        log_event(
+                            logger,
+                            logging.WARNING,
+                            "ai_gateway.malformed_json",
+                            attempt=attempt,
+                            attempts=attempts,
+                            provider=route.provider,
+                            model=route.model,
+                            elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
                         )
                     else:
                         try:
                             result = self._parse_response_payload(data)
                             if attempt > 1:
-                                logger.info("AI Gateway succeeded on attempt %s", attempt)
+                                log_event(
+                                    logger,
+                                    logging.INFO,
+                                    "ai_gateway.retry_succeeded",
+                                    attempt=attempt,
+                                    provider=route.provider,
+                                    model=route.model,
+                                    elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
+                                )
+                            else:
+                                log_event(
+                                    logger,
+                                    logging.INFO,
+                                    "ai_gateway.classification_completed",
+                                    attempt=attempt,
+                                    provider=route.provider,
+                                    model=route.model,
+                                    classification=result.classification,
+                                    confidence=str(result.confidence),
+                                    elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
+                                )
                             return result
                         except Exception as exc:
                             last_error = AIGatewayResponseError(
                                 "AI gateway response schema validation failed: "
                                 f"{type(exc).__name__}"
                             )
-                            logger.warning(
-                                "AI Gateway schema validation failed on attempt %s/%s: %s",
-                                attempt,
-                                attempts,
-                                exc,
+                            log_event(
+                                logger,
+                                logging.WARNING,
+                                "ai_gateway.schema_validation_failed",
+                                attempt=attempt,
+                                attempts=attempts,
+                                provider=route.provider,
+                                model=route.model,
+                                error_type=type(exc).__name__,
+                                error=str(exc),
+                                elapsed_ms=int((time.monotonic() - attempt_started) * 1000),
                             )
 
             if attempt < attempts:
@@ -183,11 +275,20 @@ class AjilGatewayClient:
                 base_delay = max(0.1, self.retry_backoff_seconds)
                 delay = (base_delay * (2 ** (attempt - 1))) * (0.5 + random.random())
                 time.sleep(delay)
-        
+
         if last_error is None:
             raise AIGatewayResponseError("AI gateway classification failed without error detail")
-        
-        logger.error(f"AI Gateway exhausted all {attempts} attempts. Last error: {last_error}")
+
+        log_event(
+            logger,
+            logging.ERROR,
+            "ai_gateway.exhausted_retries",
+            attempts=attempts,
+            provider=route.provider,
+            model=route.model,
+            last_error_type=type(last_error).__name__,
+            last_error=str(last_error),
+        )
         raise last_error
 
     def _build_payload(self, context: AIMessageContext, *, attempt: int) -> dict[str, Any]:
@@ -442,8 +543,9 @@ class AjilGatewayClient:
             side=side,
             leverage=leverage,
         )
-        symbol = self._normalize_symbol(
-            payload.get("symbol") or extracted_fields.get("symbol")
+        symbol = self._normalize_symbol_candidates(
+            payload.get("symbol") or extracted_fields.get("symbol"),
+            payload.get("symbol_raw") or extracted_fields.get("symbol_raw"),
         )
         requires_admin_confirmation = bool(
             payload.get(
@@ -456,6 +558,7 @@ class AjilGatewayClient:
             "action": self._normalize_action(payload.get("action"), classification),
             "market": market,
             "symbol": symbol,
+            "symbol_raw": payload.get("symbol_raw") or extracted_fields.get("symbol_raw"),
             "side": side,
             "entry_type": self._normalize_entry_type(
                 payload.get("entry_type"),
@@ -547,6 +650,30 @@ class AjilGatewayClient:
     def _normalize_symbol(raw: Any) -> str | None:
         value = str(raw or "").strip().upper().replace("/", "").replace("-", "").replace(" ", "")
         return value or None
+
+    @classmethod
+    def _normalize_symbol_candidates(
+        cls,
+        raw_symbol: Any,
+        raw_symbol_hint: Any,
+    ) -> str | None:
+        primary = cls._normalize_symbol(raw_symbol)
+        hinted = cls._normalize_symbol(raw_symbol_hint)
+        if primary is None:
+            return hinted
+        if hinted is None or hinted == primary:
+            return primary
+
+        hinted_canonical = canonical_market_symbol(hinted)
+        primary_canonical = canonical_market_symbol(primary)
+        if hinted_canonical is None or primary_canonical is None:
+            return primary
+        if (
+            len(hinted_canonical) > len(primary_canonical)
+            and hinted_canonical.endswith(primary_canonical)
+        ):
+            return hinted_canonical
+        return primary_canonical
 
     @staticmethod
     def _normalize_side(raw: Any) -> str:

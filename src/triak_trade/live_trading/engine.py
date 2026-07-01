@@ -1597,7 +1597,7 @@ class LiveTradingEngine:
         except Exception:
             log.debug("Account refresh after open failed", exc_info=True)
         try:
-            await self._sync_trade_protection(trade)
+            await self._ensure_trade_protection_after_open(trade)
         except Exception as exc:
             trade.last_exchange_sync_error = str(exc)
             if self.settings.LIVE_TRADING_FAIL_CLOSED_ON_PROTECTION_SYNC_ERROR:
@@ -1624,6 +1624,71 @@ class LiveTradingEngine:
             confirmed_order.executed_qty,
             trade.entry_price,
         )
+
+    async def _ensure_trade_protection_after_open(self, trade: LiveTrade) -> None:
+        attempts = max(
+            1,
+            int(
+                getattr(
+                    self.settings,
+                    "LIVE_TRADING_PROTECTION_SYNC_RETRY_ATTEMPTS",
+                    1,
+                )
+            ),
+        )
+        delay_seconds = max(
+            0.0,
+            float(
+                getattr(
+                    self.settings,
+                    "LIVE_TRADING_PROTECTION_SYNC_RETRY_DELAY_SECONDS",
+                    0.0,
+                )
+            ),
+        )
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._sync_trade_protection(trade)
+            except Exception as exc:
+                last_exc = exc
+                trade.protection_sync_failures += 1
+                trade.last_protection_sync_error_at = _utc_now()
+                trade.last_exchange_sync_error = str(exc)
+                if await self._exchange_trade_has_minimum_protection(trade):
+                    if trade.message_history:
+                        trade.message_history[-1].notes.append(
+                            f"protection_sync_degraded={exc}"
+                        )
+                    return
+                if attempt >= attempts:
+                    break
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+            else:
+                trade.protection_sync_failures = 0
+                trade.last_protection_sync_error_at = None
+                trade.last_exchange_sync_error = None
+                return
+        assert last_exc is not None
+        raise last_exc
+
+    async def _exchange_trade_has_minimum_protection(self, trade: LiveTrade) -> bool:
+        if self._futures_client is None or not trade.is_open:
+            return False
+        try:
+            await self._refresh_trade_protection_ids(trade)
+        except Exception:
+            return False
+        if trade.stop_loss is not None and trade.sl_order_id is None:
+            return False
+        if (
+            trade.stop_loss is None
+            and trade.take_profits[trade.targets_hit :]
+            and not trade.tp_order_ids
+        ):
+            return False
+        return True
 
     def _apply_exchange_risk_limit_to_open_trade(self, trade: LiveTrade, spec: Any) -> None:
         max_allowed_leverage = spec.max_allowed_leverage(
@@ -2136,6 +2201,11 @@ class LiveTradingEngine:
             trade.last_exchange_sync_error = str(exc)
             return True
         if self._find_matching_exchange_position(trade=trade, positions=positions) is not None:
+            self._clear_exchange_position_miss_state(trade)
+            return True
+        if not self._should_confirm_exchange_position_missing(trade, reason=reason):
+            self.store.save_trade(trade)
+            self._emit_trade_update(trade)
             return True
         self._mark_trade_closed_on_exchange(
             context=context,
@@ -2143,6 +2213,52 @@ class LiveTradingEngine:
             reason=reason,
         )
         return False
+
+    def _clear_exchange_position_miss_state(self, trade: LiveTrade) -> None:
+        trade.exchange_position_missing_since = None
+        trade.exchange_position_missing_confirmations = 0
+
+    def _should_confirm_exchange_position_missing(
+        self,
+        trade: LiveTrade,
+        *,
+        reason: str,
+    ) -> bool:
+        now = _utc_now()
+        if trade.exchange_position_missing_since is None:
+            trade.exchange_position_missing_since = now
+            trade.exchange_position_missing_confirmations = 1
+        else:
+            trade.exchange_position_missing_confirmations += 1
+        required_confirmations = max(
+            1,
+            int(
+                getattr(
+                    self.settings,
+                    "LIVE_TRADING_EXCHANGE_POSITION_MISS_CONFIRMATIONS",
+                    1,
+                )
+            ),
+        )
+        grace_seconds = max(
+            0,
+            int(
+                getattr(
+                    self.settings,
+                    "LIVE_TRADING_EXCHANGE_POSITION_MISS_GRACE_SECONDS",
+                    0,
+                )
+            ),
+        )
+        elapsed_seconds = int((now - trade.exchange_position_missing_since).total_seconds())
+        trade.last_exchange_sync_error = (
+            f"{reason}: pending_confirmation "
+            f"{trade.exchange_position_missing_confirmations}/{required_confirmations} "
+            f"elapsed={elapsed_seconds}s"
+        )
+        if trade.exchange_position_missing_confirmations < required_confirmations:
+            return False
+        return elapsed_seconds >= grace_seconds
 
     def _mark_trade_closed_on_exchange(
         self,
@@ -2160,6 +2276,7 @@ class LiveTradingEngine:
         trade.exchange_position = None
         trade.sl_order_id = None
         trade.tp_order_ids = []
+        self._clear_exchange_position_miss_state(trade)
         trade.last_exchange_sync_error = reason
         trade.add_attribution(
             MessageAttribution(
@@ -2212,6 +2329,15 @@ class LiveTradingEngine:
             self._persist_trade_runtime_state(trade)
             return
         close_side = "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
+        if refresh_stop_loss and stop_loss is not None:
+            side = "LONG" if trade.side == "long" else "SHORT"
+            await self._futures_client.set_trading_stop(
+                symbol=trade.symbol,
+                side=side,
+                stop_loss=stop_loss,
+                sl_quantity=trade.remaining_quantity,
+                use_demo_symbol=self._use_demo_exchange_symbol(),
+            )
         if refresh_take_profits:
             trade.tp_order_ids = []
             for target_index, tp_price, tp_quantity in tp_orders:
@@ -2225,15 +2351,6 @@ class LiveTradingEngine:
                     use_demo_symbol=self._use_demo_exchange_symbol(),
                 )
                 trade.tp_order_ids.append(order.order_id)
-        if refresh_stop_loss and stop_loss is not None:
-            side = "LONG" if trade.side == "long" else "SHORT"
-            await self._futures_client.set_trading_stop(
-                symbol=trade.symbol,
-                side=side,
-                stop_loss=stop_loss,
-                sl_quantity=trade.remaining_quantity,
-                use_demo_symbol=self._use_demo_exchange_symbol(),
-            )
         await self._refresh_trade_protection_ids(trade)
         self._persist_trade_runtime_state(trade)
 
@@ -2789,12 +2906,19 @@ class LiveTradingEngine:
             )
             context = self._contexts.get(trade.channel_id)
             if trade.exchange_position is None:
-                self._mark_trade_closed_on_exchange(
-                    context=context,
-                    trade=trade,
+                if self._should_confirm_exchange_position_missing(
+                    trade,
                     reason="exchange_position_missing",
-                )
+                ):
+                    self._mark_trade_closed_on_exchange(
+                        context=context,
+                        trade=trade,
+                        reason="exchange_position_missing",
+                    )
+                else:
+                    self.store.save_trade(trade)
                 continue
+            self._clear_exchange_position_miss_state(trade)
             trade.exchange_order_history = list(by_symbol_orders.get(trade.symbol, []))
             trade.exchange_order_history.extend(
                 self._order_snapshot(item)

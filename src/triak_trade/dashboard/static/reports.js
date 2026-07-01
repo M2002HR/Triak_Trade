@@ -482,8 +482,29 @@
   }
 
   function formatNumber(value) {
-    const numeric = Number(value || 0);
-    return Number.isFinite(numeric) ? numeric.toFixed(2) : "0.00";
+    if (value === null || value === undefined || value === "") {
+      return "0";
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return String(value);
+    }
+    if (numeric === 0) {
+      return "0";
+    }
+    const absolute = Math.abs(numeric);
+    if (absolute >= 0.1) {
+      return stripTrailingZeros(numeric.toFixed(3));
+    }
+    const magnitude = Math.floor(Math.log10(absolute));
+    const decimalPlaces = Math.max(0, Math.abs(magnitude) + 3);
+    return numeric.toFixed(decimalPlaces);
+  }
+
+  function stripTrailingZeros(value) {
+    return value.includes(".")
+      ? value.replace(/\.?0+$/, "")
+      : value;
   }
 
   function escapeHtml(value) {

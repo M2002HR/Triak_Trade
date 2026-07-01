@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from tempfile import NamedTemporaryFile
 
@@ -67,3 +68,19 @@ async def test_history_sync_stores_messages_and_dedupes_and_versions() -> None:
     assert summary.inserted_or_seen_count == 4
     assert len(rows) == 3
     assert rows[-1].deleted is True
+
+
+@pytest.mark.asyncio
+async def test_history_sync_emits_summary_logs(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="triak_trade.telegram.history_sync")
+    session = _session()
+    client = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [_raw(1, "first")]}
+    )
+    svc = TelegramHistorySyncService(telegram_client=client, session=session)
+
+    await svc.sync_channel("https://t.me/Tofan_Trade")
+
+    messages = [record.message for record in caplog.records]
+    assert "telegram_history_sync.started" in messages
+    assert "telegram_history_sync.completed" in messages

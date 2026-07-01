@@ -7,7 +7,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from triak_trade.core.symbols import canonical_market_symbol
 
 
 class AIMessageContext(BaseModel):
@@ -82,6 +84,22 @@ class AIClassificationResult(BaseModel):
         if value <= Decimal("0") or value > Decimal("1"):
             raise ValueError("close_fraction must be between 0 and 1")
         return value
+
+    @model_validator(mode="after")
+    def prefer_more_specific_symbol_raw(self) -> AIClassificationResult:
+        primary = canonical_market_symbol(self.symbol)
+        hinted = canonical_market_symbol(self.symbol_raw)
+        if primary is None:
+            self.symbol = hinted
+            return self
+        if hinted is None:
+            self.symbol = primary
+            return self
+        if len(hinted) > len(primary) and hinted.endswith(primary):
+            self.symbol = hinted
+            return self
+        self.symbol = primary
+        return self
 
     @field_validator("entry_low", "entry_high", "stop_loss", mode="before")
     @classmethod

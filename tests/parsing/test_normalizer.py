@@ -32,6 +32,14 @@ def test_symbol_detection_variants() -> None:
     assert "ETH" in n.detected_symbols
 
 
+def test_symbol_detection_preserves_leveraged_token_numeric_prefixes() -> None:
+    normalized = MessageNormalizer().normalize(
+        _raw("#1000shib and 1000SHIB/USDT and 1000SHIBUSDT")
+    )
+    assert "1000SHIB" in normalized.detected_symbols
+    assert "1000SHIBUSDT" in normalized.detected_symbols
+
+
 def test_keyword_detection_english_and_persian() -> None:
     n = MessageNormalizer().normalize(_raw("LONG Entry SL TP Leverage لانگ ورود حد ضرر تارگت"))
     assert "long" in n.detected_keywords

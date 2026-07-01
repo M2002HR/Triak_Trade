@@ -5,7 +5,12 @@ import json
 import logging
 
 from triak_trade.config.settings import Settings
-from triak_trade.core.logging import configure_logging, get_logger
+from triak_trade.core.logging import (
+    configure_logging,
+    get_logger,
+    safe_preview,
+    sanitize_log_fields,
+)
 
 
 def test_logging_emits_structured_json() -> None:
@@ -41,3 +46,21 @@ def test_logging_redacts_secret_values() -> None:
     payload = json.loads(stream.getvalue().strip())
     assert payload["fake_secret"] == "***REDACTED***"
     assert payload["api_key"] == "***REDACTED***"
+
+
+def test_sanitize_log_fields_redacts_nested_sensitive_values() -> None:
+    payload = sanitize_log_fields(
+        auth={"token": "abc", "enabled": True},
+        api_secret="x",
+        nested=[{"password": "hidden"}],
+    )
+
+    assert payload["auth"]["token"] == "***REDACTED***"
+    assert payload["auth"]["enabled"] is True
+    assert payload["api_secret"] == "***REDACTED***"
+    assert payload["nested"][0]["password"] == "***REDACTED***"
+
+
+def test_safe_preview_collapses_whitespace_and_truncates() -> None:
+    preview = safe_preview("hello   world\nthis is a long line", max_chars=14)
+    assert preview == "hello world..."

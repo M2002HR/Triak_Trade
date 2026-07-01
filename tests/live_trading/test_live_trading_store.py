@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -278,3 +279,14 @@ class TestLiveTradingStore:
             assert store.load_trade("sess1", "t1") is not None
             assert store.load_signal_snapshot("sess1", "sig1") is not None
             assert store.list_message_traces("sess1")[0].channel_username == "c"
+
+    def test_store_emits_file_backend_logs(self, caplog) -> None:
+        caplog.set_level(logging.DEBUG, logger="triak_trade.live_trading.store")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LiveTradingStore(tmpdir)
+            store.save_session(_make_session())
+            store.load_session("sess1")
+
+        messages = [record.message for record in caplog.records]
+        assert "live_trading_store.save_session_file" in messages
+        assert "live_trading_store.load_session_file" in messages

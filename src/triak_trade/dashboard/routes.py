@@ -44,7 +44,14 @@ def build_router(
         return templates.TemplateResponse(
             request,
             "login.html",
-            context(request, {"next_path": next, "login_error": None}),
+            context(
+                request,
+                {
+                    "next_path": next,
+                    "login_error": None,
+                    "hide_shell": True,
+                },
+            ),
         )
 
     @router.post("/login")
@@ -61,6 +68,7 @@ def build_router(
                     {
                         "next_path": next_path,
                         "login_error": "Invalid admin token.",
+                        "hide_shell": True,
                     },
                 ),
                 status_code=401,
@@ -99,7 +107,6 @@ def build_router(
                 {
                     "result": None,
                     "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
-                    "readiness": service.real_backtest_readiness(),
                     "bootstrap": service.backtest_bootstrap(),
                 },
             ),
@@ -120,7 +127,6 @@ def build_router(
                 {
                     "result": result,
                     "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
-                    "readiness": service.real_backtest_readiness(),
                     "bootstrap": service.backtest_bootstrap(),
                 },
             ),
@@ -161,9 +167,25 @@ def build_router(
         return JSONResponse({"deleted": True, "channels": channels})
 
     @router.get("/api/backtests/runs")
-    async def list_backtest_runs(request: Request, limit: int = 20) -> JSONResponse:
+    async def list_backtest_runs(
+        request: Request,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> JSONResponse:
         auth.require_api(request)
-        return JSONResponse({"runs": service.list_backtest_runs(limit=limit)})
+        safe_limit = min(max(limit, 1), 100)
+        safe_offset = max(offset, 0)
+        runs = service.list_backtest_runs(limit=safe_limit, offset=safe_offset)
+        total_runs = service.count_backtest_runs()
+        return JSONResponse(
+            {
+                "runs": runs,
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "total_runs": total_runs,
+                "has_more": safe_offset + len(runs) < total_runs,
+            }
+        )
 
     @router.get("/api/backtests/runs/{run_id}")
     async def get_backtest_run(request: Request, run_id: str) -> JSONResponse:
@@ -214,7 +236,7 @@ def build_router(
                 {
                     "type": "bootstrap",
                     "readiness": service.real_backtest_readiness(),
-                    "runs": service.list_backtest_runs(limit=8),
+                    "runs": service.list_backtest_runs(limit=8, offset=0),
                 }
             )
             while True:
@@ -227,11 +249,23 @@ def build_router(
             await realtime_hub.disconnect(websocket)
 
     @router.get("/logs", response_class=HTMLResponse)
-    async def logs(request: Request) -> Response:
+    async def logs(request: Request, level: str = "ALL") -> Response:
         redirect = auth.redirect_if_needed(request)
         if redirect is not None:
             return redirect
-        return templates.TemplateResponse(request, "logs.html", context(request, service.logs()))
+        data = service.logs()
+        data["active_level"] = level.upper()
+        if level.upper() != "ALL":
+            data["parsed_log_entries"] = [
+                e for e in data["parsed_log_entries"] if e["level"] == level.upper()
+            ]
+        return templates.TemplateResponse(request, "logs.html", context(request, data))
+
+    @router.get("/api/logs/tail")
+    async def logs_tail(request: Request, level: str = "ALL", lines: int = 200) -> JSONResponse:
+        auth.require_api(request)
+        safe_lines = min(max(lines, 20), 500)
+        return JSONResponse(service.logs_tail_json(lines=safe_lines, level=level))
 
     @router.get("/reports", response_class=HTMLResponse)
     async def reports(request: Request) -> Response:
@@ -323,10 +357,38 @@ def build_router(
         )
         return RedirectResponse(url="/settings?tab=controls&saved=1", status_code=303)
 
+    @router.post("/settings/telegram-notifications")
+    async def update_telegram_notifications(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        form = {key: str(value) for key, value in (await request.form()).items()}
+        bool_fields = [
+            "enabled",
+            "send_signal_detected", "send_signal_invalid", "send_signal_ignored",
+            "send_trade_opened", "send_trade_closed", "send_trade_updated",
+            "send_session_started", "send_session_stopped", "send_session_error",
+            "send_session_summary", "send_daily_digest", "send_error_alerts",
+        ]
+        flags = {field: form.get(field) == "on" for field in bool_fields}
+        service.state.set_telegram_notification_config(updated_by="dashboard", **flags)
+        return RedirectResponse(url="/settings?tab=telegram&saved=1", status_code=303)
+
     @router.get("/status")
     async def status(request: Request) -> JSONResponse:
         auth.require_api(request)
         return JSONResponse(service.safe_settings() | {"overview": service.overview()["cards"]})
+
+    @router.get("/reports/live", response_class=HTMLResponse)
+    async def live_reports_page(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        return templates.TemplateResponse(
+            request,
+            "reports_live.html",
+            context(request, service.live_reports()),
+        )
 
     # ── Live Trading Routes ────────────────────────────────────────────────
 

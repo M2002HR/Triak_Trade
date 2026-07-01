@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
+import traceback
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -22,6 +24,9 @@ from triak_trade.backtesting.real_runner import (
 )
 from triak_trade.backtesting.strategies.registry import build_strategy_from_key
 from triak_trade.config.settings import Settings
+from triak_trade.dashboard.log_sink import append_dashboard_log
+
+_log = logging.getLogger(__name__)
 
 
 class DashboardBacktestEvent(BaseModel):
@@ -83,6 +88,62 @@ class DashboardBacktestRun(BaseModel):
     events: list[DashboardBacktestEvent] = Field(default_factory=list)
 
 
+class DashboardBacktestRunSummary(BaseModel):
+    run_id: str
+    channel_input: str
+    channel_resolved: str
+    start_message_link: str | None = None
+    start_message_id: int | None = None
+    from_date: datetime
+    to_date: datetime
+    interval: str
+    max_messages: int
+    initial_balance: Decimal = Decimal("100")
+    risk_per_trade_pct: Decimal = Decimal("3")
+    strategy_key: str = "default_risk_managed"
+    use_ai: bool
+    send_log_channel: bool
+    log_per_message: bool
+    status: str
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    current_phase: str = "queued"
+    current_phase_label: str = "Queued"
+    current_phase_summary: str = "Waiting to start."
+    current_message_id: int | None = None
+    total_messages: int = 0
+    classified_messages: int = 0
+    parsed_signals: int = 0
+    valid_signals: int = 0
+    invalid_signals: int = 0
+    ignored_messages: int = 0
+    ambiguous_messages: int = 0
+    trades_simulated: int = 0
+    trades_filled: int = 0
+    live_open_positions: int = 0
+    live_closed_trades: int = 0
+    live_wins: int = 0
+    live_losses: int = 0
+    live_realized_pnl: str = "0"
+    live_unrealized_pnl: str = "0"
+    live_total_pnl: str = "0"
+    live_realized_balance: str = "0"
+    live_current_balance: str = "0"
+    report_path: str | None = None
+    markdown_report_path: str | None = None
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_run(cls, run: DashboardBacktestRun) -> DashboardBacktestRunSummary:
+        payload = run.model_dump(
+            mode="python",
+            exclude={"messages", "events", "signals"},
+        )
+        return cls.model_validate(payload)
+
+
 class DashboardBacktestCancelledError(RuntimeError):
     """Raised inside the progress callback to stop a running backtest safely."""
 
@@ -99,14 +160,24 @@ class DashboardBacktestStore:
 
     def write(self, run: DashboardBacktestRun) -> None:
         path = self._path(run.run_id)
+        summary_path = self._summary_path(run.run_id)
         payload = run.model_dump(mode="json")
+        summary_payload = DashboardBacktestRunSummary.from_run(run).model_dump(mode="json")
         temporary = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.tmp")
+        summary_temporary = summary_path.with_name(
+            f"{summary_path.stem}.{uuid.uuid4().hex}.tmp"
+        )
         with self._lock:
             temporary.write_text(
                 json.dumps(payload, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
+            summary_temporary.write_text(
+                json.dumps(summary_payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
             temporary.replace(path)
+            summary_temporary.replace(summary_path)
 
     def read(self, run_id: str) -> DashboardBacktestRun | None:
         path = self._path(run_id)
@@ -117,7 +188,7 @@ class DashboardBacktestStore:
     def list_runs(self, limit: int = 20) -> list[DashboardBacktestRun]:
         runs: list[DashboardBacktestRun] = []
         paths = sorted(
-            self.root.glob("*.json"),
+            self._run_paths(),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
         )
@@ -131,8 +202,52 @@ class DashboardBacktestStore:
                 break
         return runs
 
+    def list_run_summaries(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[DashboardBacktestRunSummary]:
+        runs: list[DashboardBacktestRunSummary] = []
+        paths = sorted(
+            self._run_paths(),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for path in paths[offset:]:
+            run_id = path.stem
+            summary_path = self._summary_path(run_id)
+            if summary_path.exists():
+                runs.append(
+                    DashboardBacktestRunSummary.model_validate_json(
+                        summary_path.read_text(encoding="utf-8")
+                    )
+                )
+            else:
+                run = DashboardBacktestRun.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                summary = DashboardBacktestRunSummary.from_run(run)
+                runs.append(summary)
+                self.write(run)
+            if len(runs) >= limit:
+                break
+        return runs
+
+    def count_runs(self) -> int:
+        return len(self._run_paths())
+
+    def _run_paths(self) -> list[Path]:
+        return [
+            path
+            for path in self.root.glob("*.json")
+            if not path.name.endswith(".summary.json")
+        ]
+
     def _path(self, run_id: str) -> Path:
         return self.root / f"{run_id}.json"
+
+    def _summary_path(self, run_id: str) -> Path:
+        return self.root / f"{run_id}.summary.json"
 
 
 def normalize_channel_reference(channel_input: str) -> str:
@@ -210,6 +325,15 @@ class DashboardBacktestCoordinator:
             created_at=datetime.now(timezone.utc),
         )
         self.store.create(run)
+        self._append_run_log(
+            "dashboard.backtest.queued",
+            run,
+            level="INFO",
+            extra={
+                "channel_input": channel_input,
+                "strategy_key": strategy_key,
+            },
+        )
         thread = threading.Thread(
             target=self._execute_run,
             args=(run.run_id, request),
@@ -250,6 +374,11 @@ class DashboardBacktestCoordinator:
             )
         )
         self.store.write(run)
+        self._append_run_log(
+            "dashboard.backtest.cancellation_requested",
+            run,
+            level="WARNING",
+        )
         self._notify(run)
         return run, True, "stop_requested"
 
@@ -285,6 +414,16 @@ class DashboardBacktestCoordinator:
     def list_runs(self, limit: int = 20) -> list[DashboardBacktestRun]:
         return self.store.list_runs(limit=limit)
 
+    def list_run_summaries(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[DashboardBacktestRunSummary]:
+        return self.store.list_run_summaries(limit=limit, offset=offset)
+
+    def count_runs(self) -> int:
+        return self.store.count_runs()
+
     def _execute_run(self, run_id: str, request: RealBacktestRunRequest) -> None:
         run = self.store.read(run_id)
         if run is None:
@@ -300,6 +439,7 @@ class DashboardBacktestCoordinator:
         run.current_phase_label = _phase_label("starting")
         run.current_phase_summary = "Backtest worker started."
         self.store.write(run)
+        self._append_run_log("dashboard.backtest.started", run, level="INFO")
         try:
             result = runner.run_sync(
                 request,
@@ -309,6 +449,13 @@ class DashboardBacktestCoordinator:
             self._mark_cancelled(run_id)
             return
         except Exception as exc:
+            tb = traceback.format_exc()
+            _log.error(
+                "Backtest worker crashed for run %s: %s\n%s",
+                run_id,
+                exc,
+                tb,
+            )
             self._clear_cancel_request(run_id)
             failed = self.store.read(run_id)
             if failed is None:
@@ -317,8 +464,15 @@ class DashboardBacktestCoordinator:
             failed.finished_at = datetime.now(timezone.utc)
             failed.current_phase = "failed"
             failed.current_phase_label = _phase_label("failed")
+            exc_summary = f"{type(exc).__name__}: {exc}"
             failed.current_phase_summary = f"Backtest worker crashed: {type(exc).__name__}"
-            failed.errors.append(f"Background runner crashed: {type(exc).__name__}")
+            failed.errors.append(f"Background runner crashed: {exc_summary}")
+            # Store the full traceback so it is visible in the dashboard and
+            # in log output — without this only the exception type was retained
+            # which made diagnosing failures impossible.
+            for line in tb.splitlines():
+                if line.strip():
+                    failed.errors.append(line)
             failed.events.append(
                 DashboardBacktestEvent(
                     at=datetime.now(timezone.utc),
@@ -328,6 +482,16 @@ class DashboardBacktestCoordinator:
                 )
             )
             self.store.write(failed)
+            self._append_run_log(
+                "dashboard.backtest.worker_crashed",
+                failed,
+                level="ERROR",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback_tail": tb.splitlines()[-8:],
+                },
+            )
             self._notify(failed)
             return
 
@@ -366,6 +530,18 @@ class DashboardBacktestCoordinator:
             )
         )
         self.store.write(completed)
+        self._append_run_log(
+            "dashboard.backtest.completed" if result.success else "dashboard.backtest.failed",
+            completed,
+            level="INFO" if result.success else "ERROR",
+            extra={
+                "success": result.success,
+                "report_path": result.report_path,
+                "markdown_report_path": result.markdown_report_path,
+                "warnings": result.warnings[:5],
+                "errors": result.errors[:5],
+            },
+        )
         self._notify(completed)
 
     def _handle_progress(self, run_id: str, event: RealBacktestProgressEvent) -> None:
@@ -410,7 +586,10 @@ class DashboardBacktestCoordinator:
         if event.trace is not None:
             self._merge_trace(run, event.trace)
         self.store.write(run)
+        self._append_run_progress_log(run, event)
         self._notify(run)
+
+    _MAX_STORED_TRACES = 500
 
     def _merge_trace(self, run: DashboardBacktestRun, trace: RealBacktestMessageTrace) -> None:
         for index, existing in enumerate(run.messages):
@@ -420,6 +599,8 @@ class DashboardBacktestCoordinator:
         else:
             run.messages.append(trace)
         run.messages.sort(key=lambda item: item.message_date, reverse=True)
+        if len(run.messages) > self._MAX_STORED_TRACES:
+            run.messages = run.messages[: self._MAX_STORED_TRACES]
 
     @staticmethod
     def _merge_signal_history(
@@ -496,7 +677,12 @@ class DashboardBacktestCoordinator:
     def _notify(self, run: DashboardBacktestRun) -> None:
         if self.notifier is None:
             return
-        self.notifier({"type": "backtest_run", "run": run.model_dump(mode="json")})
+        # Exclude the per-message trace list from real-time WebSocket pushes.
+        # Clients that need trace detail can request it via the dedicated
+        # /api/backtests/<run_id>/messages endpoint. This prevents serializing
+        # and pushing hundreds of full-text trace objects on every progress tick.
+        payload = run.model_dump(mode="json", exclude={"messages"})
+        self.notifier({"type": "backtest_run", "run": payload})
 
     def _is_cancel_requested(self, run_id: str) -> bool:
         with self._lock:
@@ -527,12 +713,16 @@ class DashboardBacktestCoordinator:
             )
         )
         self.store.write(run)
+        self._append_run_log("dashboard.backtest.cancelled", run, level="WARNING")
         self._notify(run)
 
     def _recover_incomplete_runs(self) -> None:
         now = datetime.now(timezone.utc)
-        for run in self.store.list_runs(limit=200):
-            if run.status not in {"queued", "running"}:
+        for summary in self.store.list_run_summaries(limit=200):
+            if summary.status not in {"queued", "running"}:
+                continue
+            run = self.store.read(summary.run_id)
+            if run is None:
                 continue
             run.status = "failed"
             run.finished_at = now
@@ -552,6 +742,78 @@ class DashboardBacktestCoordinator:
                 )
             )
             self.store.write(run)
+            self._append_run_log(
+                "dashboard.backtest.recovered_incomplete_run",
+                run,
+                level="ERROR",
+            )
+
+    def _append_run_progress_log(
+        self,
+        run: DashboardBacktestRun,
+        event: RealBacktestProgressEvent,
+    ) -> None:
+        extra: dict[str, Any] = {
+            "event_type": event.event_type,
+            "event_status": event.status,
+            "counts": event.counts,
+        }
+        if event.trace is not None:
+            extra["trace"] = {
+                "message_id": event.trace.message_id,
+                "classification": event.trace.classification,
+                "parsed_action": event.trace.parsed_action,
+                "symbol": event.trace.symbol,
+                "final_status": event.trace.final_status,
+                "preview_text": event.trace.preview_text,
+            }
+        self._append_run_log(
+            "dashboard.backtest.progress",
+            run,
+            level="INFO",
+            extra=extra,
+            summary_override=event.summary,
+            phase_override=event.phase,
+            current_message_id=event.current_message_id,
+        )
+
+    def _append_run_log(
+        self,
+        event: str,
+        run: DashboardBacktestRun,
+        *,
+        level: str,
+        extra: dict[str, Any] | None = None,
+        summary_override: str | None = None,
+        phase_override: str | None = None,
+        current_message_id: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "run_id": run.run_id,
+            "channel": run.channel_resolved,
+            "status": run.status,
+            "phase": phase_override or run.current_phase,
+            "summary": summary_override or run.current_phase_summary,
+            "current_message_id": (
+                current_message_id
+                if current_message_id is not None
+                else run.current_message_id
+            ),
+            "total_messages": run.total_messages,
+            "classified_messages": run.classified_messages,
+            "valid_signals": run.valid_signals,
+            "trades_simulated": run.trades_simulated,
+            "trades_filled": run.trades_filled,
+        }
+        if extra:
+            payload.update(extra)
+        append_dashboard_log(
+            self.settings,
+            event,
+            payload,
+            level=level,
+            module="backtest",
+        )
 
 
 def _phase_label(phase: str) -> str:

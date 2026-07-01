@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
+from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.domain.models import NormalizedMessage, RawTelegramMessage
 
 _PERSIAN_DIGITS = str.maketrans(
@@ -18,12 +20,20 @@ _ARABIC_DIGITS = str.maketrans(
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _MARKDOWN_DECORATION_RE = re.compile(r"[*_`~]+")
-_TAG_SYMBOL_RE = re.compile(r"[#$]([A-Za-z]{2,12})")
+_TAG_SYMBOL_RE = re.compile(
+    r"[#$]((?=[A-Za-z0-9]{2,20}\b)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]+)"
+)
 _PAIR_SYMBOL_RE = re.compile(
-    r"\b([A-Za-z]{2,12})\s*[/\-\s]\s*(USDT|USD|USDC)\b",
+    r"\b((?=[A-Za-z0-9]{2,20}\b)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]+)"
+    r"\s*[/\-\s]\s*(USDT|USD|USDC)\b",
     re.IGNORECASE,
 )
-_COMPACT_SYMBOL_RE = re.compile(r"\b([A-Za-z]{3,16}(?:USDT|USD|USDC|BTC|ETH))\b", re.IGNORECASE)
+_COMPACT_SYMBOL_RE = re.compile(
+    r"\b((?=[A-Za-z0-9]{2,20}(?:USDT|USD|USDC|BTC|ETH)\b)"
+    r"(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]+?)"
+    r"(USDT|USD|USDC|BTC|ETH)\b",
+    re.IGNORECASE,
+)
 
 _KEYWORDS = {
     "long",
@@ -82,6 +92,8 @@ _NON_SYMBOL_TAGS = {
     "LEVERAGE",
 }
 
+_log = logging.getLogger(__name__)
+
 
 class MessageNormalizer:
     """Deterministic message normalizer."""
@@ -126,7 +138,7 @@ class MessageNormalizer:
                 symbols.append(symbol)
 
         for match in _COMPACT_SYMBOL_RE.finditer(normalized):
-            symbol = self._compact_symbol(match.group(1))
+            symbol = self._compact_symbol(match.group(1), match.group(2))
             if symbol and symbol not in seen:
                 seen.add(symbol)
                 symbols.append(symbol)
@@ -141,10 +153,23 @@ class MessageNormalizer:
                     seen_kw.add(kw)
                     keywords.append(kw)
 
-        return NormalizedMessage(
+        result = NormalizedMessage(
             raw=raw,
             normalized_text=normalized,
             detected_symbols=symbols,
             detected_keywords=keywords,
             language_hint=None,
         )
+        log_event(
+            _log,
+            logging.DEBUG,
+            "message_normalizer.normalized",
+            channel_id=raw.channel_id,
+            message_id=raw.message_id,
+            raw_text_chars=len(text),
+            normalized_text_chars=len(normalized),
+            detected_symbols=symbols,
+            detected_keyword_count=len(keywords),
+            preview=safe_preview(normalized),
+        )
+        return result

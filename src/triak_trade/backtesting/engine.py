@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -19,8 +20,11 @@ from triak_trade.backtesting.simulator import BacktestSimulator
 from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.backtesting.strategies.registry import load_strategy
 from triak_trade.backtesting.timeline import BacktestTimelineBuilder
+from triak_trade.core.logging import log_event
 from triak_trade.domain.enums import BacktestFillPolicy
 from triak_trade.domain.models import BacktestReport, Candle, RawTelegramMessage
+
+_log = logging.getLogger(__name__)
 
 
 class BacktestEngine:
@@ -36,6 +40,16 @@ class BacktestEngine:
         self.strategy = strategy or load_strategy()
 
     def run(self, request: BacktestRequest) -> BacktestReport:
+        log_event(
+            _log,
+            logging.INFO,
+            "backtest_engine.run.started",
+            channel=request.channel,
+            interval=request.interval,
+            fill_policy=request.fill_policy.value,
+            initial_balance=str(request.initial_balance),
+            risk_per_trade_pct=str(request.risk_per_trade_pct),
+        )
         messages = fixture_messages(request.channel)
         candles = fixture_candles(interval=request.interval)
         return self.run_from_messages(request=request, messages=messages, candles=candles)
@@ -47,7 +61,16 @@ class BacktestEngine:
         messages: list[RawTelegramMessage],
     ) -> list[BacktestEvent]:
         timeline = BacktestTimelineBuilder(classifier=self.classifier, channel_id=channel_id)
-        return timeline.build(messages)
+        events = timeline.build(messages)
+        log_event(
+            _log,
+            logging.INFO,
+            "backtest_engine.events_built",
+            channel=channel_id,
+            message_count=len(messages),
+            event_count=len(events),
+        )
+        return events
 
     def run_from_messages(
         self,
@@ -57,6 +80,15 @@ class BacktestEngine:
         candles: list[Candle],
     ) -> BacktestReport:
         events = self.build_events(channel_id=request.channel, messages=messages)
+        log_event(
+            _log,
+            logging.INFO,
+            "backtest_engine.run_from_messages",
+            channel=request.channel,
+            message_count=len(messages),
+            candle_count=len(candles),
+            event_count=len(events),
+        )
         return self.run_from_events(request=request, events=events, candles=candles)
 
     def run_from_events(
@@ -76,6 +108,16 @@ class BacktestEngine:
         default_signal_leverage: Decimal = Decimal("1"),
     ) -> BacktestReport:
         effective_strategy = strategy or self.strategy
+        log_event(
+            _log,
+            logging.INFO,
+            "backtest_engine.run_from_events.started",
+            channel=request.channel,
+            event_count=len(events),
+            candle_count=len(candles),
+            strategy=effective_strategy.__class__.__name__,
+            fill_policy=request.fill_policy.value,
+        )
         conservative_trades, conservative_final = self.simulator.simulate(
             events=events,
             candles=candles,
@@ -148,6 +190,16 @@ class BacktestEngine:
             warnings=warnings_list,
         )
         report.warnings.append(f"channel_score={score}")
+        log_event(
+            _log,
+            logging.INFO,
+            "backtest_engine.run_from_events.completed",
+            channel=request.channel,
+            trade_count=len(report.trades),
+            final_balance=str(report.final_balance),
+            total_pnl=str(total_pnl),
+            warning_count=len(report.warnings),
+        )
         return report
 
 

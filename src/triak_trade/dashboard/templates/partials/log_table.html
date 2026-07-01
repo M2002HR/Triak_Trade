@@ -1,9 +1,24 @@
-<div class="panel logbox">
-  {% if runtime_logs %}
-    {% for line in runtime_logs %}
-      <pre>{{ line }}</pre>
-    {% endfor %}
-  {% else %}
-    <p class="empty">No runtime logs found.</p>
-  {% endif %}
+{% if parsed_log_entries %}
+<div class="log-structured-list" id="log-structured-list">
+  {% for entry in parsed_log_entries %}
+  <div class="log-row log-level-{{ entry.level | lower }}" data-level="{{ entry.level }}">
+    <span class="log-lineno">{{ entry.lineno }}</span>
+    <span class="log-level-badge log-badge-{{ entry.level | lower }}">{{ entry.level }}</span>
+    {% if entry.ts %}<span class="log-ts">{{ entry.ts }}</span>{% endif %}
+    {% if entry.module %}<span class="log-module">{{ entry.module }}</span>{% endif %}
+    <span class="log-msg">{{ entry.message }}</span>
+  </div>
+  {% endfor %}
 </div>
+{% elif runtime_logs %}
+<div class="log-tail">
+  {% for line in runtime_logs %}
+  <div class="log-line">
+    <span class="log-line-no">{{ loop.index }}</span>
+    <pre>{{ line }}</pre>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state-box">No runtime logs found. Dashboard may not have written any log entries yet.</div>
+{% endif %}

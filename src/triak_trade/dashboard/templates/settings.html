@@ -4,9 +4,28 @@
   <p class="eyebrow">Settings</p>
   <h1>Safe Settings</h1>
   <p class="subtle">
-    Manage runtime-safe dashboard controls and the pre-AI keyword gates that decide which messages
-    should be skipped before any AI classification starts.
+    Manage runtime-safe controls, pre-AI keyword gates, and the configuration envelope exposed to
+    the dashboard without leaking secrets.
   </p>
+</section>
+
+<section class="status-card-grid">
+  <article class="status-card">
+    <span class="status-card-label">Execution Mode</span>
+    <strong>{{ settings_view.execution_mode }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Environment</span>
+    <strong>{{ settings_view.app_env }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Live Trading</span>
+    <strong>{{ "Blocked" if settings_view.live_trading_blocked else "Enabled" }}</strong>
+  </article>
+  <article class="status-card">
+    <span class="status-card-label">Dashboard Auth</span>
+    <strong>{{ "Enabled" if settings_view.dashboard_auth_enabled else "Disabled" }}</strong>
+  </article>
 </section>
 
 <section class="panel">
@@ -17,12 +36,160 @@
     </div>
   </div>
   <div class="filter-pill-row">
-    <a href="/settings?tab=controls" class="filter-pill {% if active_tab != 'ai-keywords' %}active{% endif %}">Runtime Controls</a>
+    <a href="/settings?tab=controls" class="filter-pill {% if active_tab == 'controls' %}active{% endif %}">Runtime Controls</a>
     <a href="/settings?tab=ai-keywords" class="filter-pill {% if active_tab == 'ai-keywords' %}active{% endif %}">AI Keyword Filters</a>
+    <a href="/settings?tab=telegram" class="filter-pill {% if active_tab == 'telegram' %}active{% endif %}">Telegram Notifications</a>
   </div>
 </section>
 
-{% if active_tab == "ai-keywords" %}
+{% if active_tab == "telegram" %}
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Telegram Notifications</p>
+      <h2>Live Event Forwarding</h2>
+      <p class="subtle">
+        Choose which live-trading events are forwarded to your Telegram log channel.
+        Backtest events are excluded by design — they produce too much noise.
+      </p>
+    </div>
+  </div>
+  {% if settings_saved %}
+  <div class="issue ok">Telegram notification settings saved.</div>
+  {% endif %}
+
+  <form method="post" action="/settings/telegram-notifications">
+    <div class="grid-two" style="margin-bottom:18px">
+      <div>
+        <p class="eyebrow">Channel Status</p>
+        <div class="metric-card" style="margin-bottom:10px">
+          <span>Log Channel Username</span>
+          <strong>{{ settings_view.get("telegram_log_channel", {}).get("log_channel_username") or "Not set" }}</strong>
+        </div>
+        <div class="metric-card">
+          <span>Send Guard</span>
+          <strong>{{ "Active" if settings_view.get("telegram_log_channel", {}).get("guard_enabled") else "Inactive" }}</strong>
+        </div>
+      </div>
+      <div>
+        <label class="toggle-card span-2" style="cursor:pointer">
+          <input type="checkbox" name="enabled" {% if settings_view.telegram_notifications.enabled %}checked{% endif %}>
+          <div>
+            <strong>Enable Telegram Forwarding</strong>
+            <p class="subtle" style="margin:4px 0 0">Master switch. Turning this off silences all event notifications regardless of individual settings below.</p>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <p class="eyebrow" style="margin-bottom:10px">Signal Events</p>
+    <div class="backtest-form-grid" style="margin-bottom:18px">
+      <label class="toggle-card">
+        <input type="checkbox" name="send_signal_detected" {% if settings_view.telegram_notifications.send_signal_detected %}checked{% endif %}>
+        <div>
+          <strong>Signal Detected</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when a valid trade signal is parsed from a message.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_signal_invalid" {% if settings_view.telegram_notifications.send_signal_invalid %}checked{% endif %}>
+        <div>
+          <strong>Invalid Signal</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when a message is classified but fails signal validation.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_signal_ignored" {% if settings_view.telegram_notifications.send_signal_ignored %}checked{% endif %}>
+        <div>
+          <strong>Signal Ignored</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when a message is intentionally skipped (keyword filter, etc.).</p>
+        </div>
+      </label>
+    </div>
+
+    <p class="eyebrow" style="margin-bottom:10px">Trade Events</p>
+    <div class="backtest-form-grid" style="margin-bottom:18px">
+      <label class="toggle-card">
+        <input type="checkbox" name="send_trade_opened" {% if settings_view.telegram_notifications.send_trade_opened %}checked{% endif %}>
+        <div>
+          <strong>Trade Opened</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when an order is placed and a position is opened.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_trade_closed" {% if settings_view.telegram_notifications.send_trade_closed %}checked{% endif %}>
+        <div>
+          <strong>Trade Closed</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when a position is closed — includes PnL and reason.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_trade_updated" {% if settings_view.telegram_notifications.send_trade_updated %}checked{% endif %}>
+        <div>
+          <strong>Trade Updated</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify on SL/TP adjustments, partial fills, or status changes.</p>
+        </div>
+      </label>
+    </div>
+
+    <p class="eyebrow" style="margin-bottom:10px">Session Events</p>
+    <div class="backtest-form-grid" style="margin-bottom:18px">
+      <label class="toggle-card">
+        <input type="checkbox" name="send_session_started" {% if settings_view.telegram_notifications.send_session_started %}checked{% endif %}>
+        <div>
+          <strong>Session Started</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when a new live session begins listening.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_session_stopped" {% if settings_view.telegram_notifications.send_session_stopped %}checked{% endif %}>
+        <div>
+          <strong>Session Stopped</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when a live session ends normally or is cancelled.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_session_error" {% if settings_view.telegram_notifications.send_session_error %}checked{% endif %}>
+        <div>
+          <strong>Session Error</strong>
+          <p class="subtle" style="margin:4px 0 0">Notify when a session hits a fatal error and halts.</p>
+        </div>
+      </label>
+    </div>
+
+    <p class="eyebrow" style="margin-bottom:10px">Summary & Alerts</p>
+    <div class="backtest-form-grid" style="margin-bottom:18px">
+      <label class="toggle-card">
+        <input type="checkbox" name="send_session_summary" {% if settings_view.telegram_notifications.send_session_summary %}checked{% endif %}>
+        <div>
+          <strong>Session Summary</strong>
+          <p class="subtle" style="margin:4px 0 0">Send a performance summary when each session closes: trades, PnL, win rate.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_daily_digest" {% if settings_view.telegram_notifications.send_daily_digest %}checked{% endif %}>
+        <div>
+          <strong>Daily Digest</strong>
+          <p class="subtle" style="margin:4px 0 0">Send an aggregated daily summary across all channels each day.</p>
+        </div>
+      </label>
+      <label class="toggle-card">
+        <input type="checkbox" name="send_error_alerts" {% if settings_view.telegram_notifications.send_error_alerts %}checked{% endif %}>
+        <div>
+          <strong>Error Alerts</strong>
+          <p class="subtle" style="margin:4px 0 0">Send critical error alerts immediately regardless of other settings.</p>
+        </div>
+      </label>
+    </div>
+
+    <div class="action-row">
+      <span class="subtle">Changes take effect for all subsequent events. Running sessions pick up the new config automatically.</span>
+      <button type="submit" class="btn-primary">Save Notification Settings</button>
+    </div>
+  </form>
+</section>
+
+{% elif active_tab == "ai-keywords" %}
 <section class="panel">
   <div class="section-head compact">
     <div>
@@ -82,7 +249,51 @@
 </section>
 {% else %}
 <section class="grid-two">
+  <article class="panel subtle-panel">
+    <p class="eyebrow">Runtime Summary</p>
+    <h2>Operational Safety Envelope</h2>
+    <div class="overview-detail-grid">
+      <div class="metric-card">
+        <span>AI Gateway</span>
+        <strong>{{ "Enabled" if settings_view.ai_gateway_enabled else "Disabled" }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>Admin Token</span>
+        <strong>{{ "Present" if settings_view.dashboard_token_present else "Missing" }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>Session Secret</span>
+        <strong>{{ "Present" if settings_view.dashboard_session_secret_present else "Missing" }}</strong>
+      </div>
+      <div class="metric-card">
+        <span>Toobit Base URL</span>
+        <strong>{{ settings_view.toobit_base_url }}</strong>
+      </div>
+    </div>
+  </article>
+  <article class="panel subtle-panel">
+    <p class="eyebrow">Policy</p>
+    <h2>What These Controls Do</h2>
+    <div class="stack-list">
+      <div class="stack-item">
+        <strong>Auto Mode</strong>
+        <p class="subtle">Stored runtime intent only. It does not bypass future execution safeguards.</p>
+      </div>
+      <div class="stack-item">
+        <strong>Kill Switch</strong>
+        <p class="subtle">Hard stop state for future execution modules and operator review flows.</p>
+      </div>
+      <div class="stack-item">
+        <strong>Backtest Lifecycle</strong>
+        <p class="subtle">Controls replay refresh cadence in virtual time, not real waiting time.</p>
+      </div>
+    </div>
+  </article>
+</section>
+
+<section class="grid-two">
   <form method="post" action="/settings/auto-mode" class="panel">
+    <p class="eyebrow">Runtime Control</p>
     <h2>Auto Mode</h2>
     <label class="checkbox"><input type="checkbox" name="enabled" {% if settings_view.auto_mode.enabled %}checked{% endif %}> Enabled</label>
     <input name="reason" placeholder="Reason" value="{{ settings_view.auto_mode.reason }}">
@@ -90,6 +301,7 @@
     <button>Update Auto Mode</button>
   </form>
   <form method="post" action="/settings/kill-switch" class="panel">
+    <p class="eyebrow">Runtime Control</p>
     <h2>Kill Switch</h2>
     <label class="checkbox"><input type="checkbox" name="enabled" {% if settings_view.kill_switch.enabled %}checked{% endif %}> Enabled</label>
     <input name="reason" placeholder="Reason" value="{{ settings_view.kill_switch.reason }}">
@@ -134,5 +346,4 @@
 </section>
 {% endif %}
 
-<section class="panel"><pre>{{ settings_view }}</pre></section>
 {% endblock %}

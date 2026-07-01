@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 import httpx
 
+from triak_trade.core.logging import log_event
 from triak_trade.core.symbols import (
     futures_contract_symbol_candidates,
     futures_index_symbol_candidates,
@@ -21,6 +23,8 @@ from triak_trade.market_data.errors import (
     MarketDataTimeoutError,
 )
 from triak_trade.market_data.intervals import interval_to_milliseconds, validate_interval
+
+_log = logging.getLogger(__name__)
 
 
 class ToobitMarketDataProvider:
@@ -56,6 +60,15 @@ class ToobitMarketDataProvider:
         start_ms = int(start_time.timestamp() * 1000)
         end_ms = int(end_time.timestamp() * 1000)
         if end_ms <= start_ms:
+            log_event(
+                _log,
+                logging.DEBUG,
+                "toobit_market_data.empty_window",
+                symbol=symbol,
+                interval=normalized_interval,
+                start_time=start_time.isoformat(),
+                end_time=end_time.isoformat(),
+            )
             return []
 
         contract_symbols = futures_contract_symbol_candidates(symbol)
@@ -78,6 +91,16 @@ class ToobitMarketDataProvider:
             ),
         ]
         last_error: Exception | None = None
+        log_event(
+            _log,
+            logging.INFO,
+            "toobit_market_data.get_klines.started",
+            symbol=symbol,
+            interval=normalized_interval,
+            start_time=start_time.isoformat(),
+            end_time=end_time.isoformat(),
+            attempt_modes=[attempt.mode for attempt in attempts],
+        )
 
         async with httpx.AsyncClient(
             base_url=self.base_url,
@@ -102,8 +125,29 @@ class ToobitMarketDataProvider:
                         MarketDataTimeoutError,
                     ) as exc:
                         last_error = exc
+                        log_event(
+                            _log,
+                            logging.WARNING,
+                            "toobit_market_data.attempt_failed",
+                            symbol=symbol,
+                            candidate_symbol=candidate_symbol,
+                            interval=normalized_interval,
+                            mode=attempt.mode,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
                         continue
                     if candles:
+                        log_event(
+                            _log,
+                            logging.INFO,
+                            "toobit_market_data.get_klines.completed",
+                            symbol=symbol,
+                            candidate_symbol=candidate_symbol,
+                            interval=normalized_interval,
+                            mode=attempt.mode,
+                            candle_count=len(candles),
+                        )
                         return candles
 
         if last_error is not None:
@@ -114,6 +158,13 @@ class ToobitMarketDataProvider:
         candidates = futures_contract_symbol_candidates(symbol)
         if not candidates:
             raise MarketDataParseError("No futures symbol candidate could be derived")
+        log_event(
+            _log,
+            logging.INFO,
+            "toobit_market_data.get_latest_price.started",
+            symbol=symbol,
+            candidate_symbols=candidates,
+        )
 
         async with httpx.AsyncClient(
             base_url=self.base_url,
@@ -136,6 +187,14 @@ class ToobitMarketDataProvider:
                     last_error = MarketDataHTTPError(
                         f"Toobit market data HTTP error: {response.status_code}"
                     )
+                    log_event(
+                        _log,
+                        logging.WARNING,
+                        "toobit_market_data.latest_price_http_error",
+                        symbol=symbol,
+                        candidate_symbol=candidate,
+                        status_code=response.status_code,
+                    )
                     continue
 
                 try:
@@ -146,7 +205,16 @@ class ToobitMarketDataProvider:
                 if isinstance(payload, list) and payload:
                     price = payload[0].get("p")
                     if price is not None:
-                        return Decimal(str(price))
+                        decimal_price = Decimal(str(price))
+                        log_event(
+                            _log,
+                            logging.INFO,
+                            "toobit_market_data.get_latest_price.completed",
+                            symbol=symbol,
+                            candidate_symbol=candidate,
+                            price=str(decimal_price),
+                        )
+                        return decimal_price
                 last_error = MarketDataParseError("Unsupported Toobit contract ticker payload")
 
         if last_error is not None:

@@ -1,19 +1,102 @@
 {% extends "base.html" %}
 {% block content %}
-<header class="hero">
-  <p class="eyebrow">Operations Control</p>
-  <h1>Triak Trade Management Dashboard</h1>
-  <p>Signal intelligence, audit visibility, backtesting, and safety controls.</p>
+<header class="hero overview-hero">
+  <div class="hero-copy">
+    <p class="eyebrow">Operations Control</p>
+    <h1>Triak Trade Management Dashboard</h1>
+    <p>
+      One workspace for runtime guardrails, live session orchestration, historical replay, report
+      comparison, and audit visibility.
+    </p>
+  </div>
+  <div class="hero-stat-cluster">
+    <div class="hero-stat">
+      <span>Log Channel</span>
+      <strong>{{ "Enabled" if overview.log_status.enabled else "Disabled" }}</strong>
+    </div>
+    <div class="hero-stat">
+      <span>Auto Mode</span>
+      <strong>{{ "Active" if overview.auto_mode.enabled else "Inactive" }}</strong>
+    </div>
+    <div class="hero-stat">
+      <span>Kill Switch</span>
+      <strong>{{ "Active" if overview.kill_switch.enabled else "Inactive" }}</strong>
+    </div>
+    <div class="hero-stat">
+      <span>Audit Feed</span>
+      <strong>{{ overview.log_status.log_channel_username }}</strong>
+    </div>
+  </div>
 </header>
+
 {% include "partials/status_cards.html" %}
-<section class="actions">
-  <a class="button" href="/reports">Run Safe Verification</a>
-  <a class="button" href="/backtests">Run Real Backtest</a>
-  <a class="button" href="/logs">View Logs</a>
-  <a class="button danger" href="/settings">Kill Switch</a>
+
+<section class="overview-action-grid">
+  <a class="action-card action-card-primary" href="/backtests">
+    <span class="eyebrow">Replay</span>
+    <h2>Run Live Telegram Backtests</h2>
+    <p>Inspect message-by-message classification, market-data checkpoints, and final score formation.</p>
+  </a>
+  <a class="action-card" href="/live-trading">
+    <span class="eyebrow">Execution</span>
+    <h2>Launch Trading Sessions</h2>
+    <p>Track isolated channel sessions, open positions, closed trades, and exchange snapshots.</p>
+  </a>
+  <a class="action-card" href="/reports">
+    <span class="eyebrow">Analysis</span>
+    <h2>Compare Backtest Reports</h2>
+    <p>Rank channels by score, PnL, win rate, profit factor, and detailed symbol contribution.</p>
+  </a>
 </section>
-<section class="grid-two">
-  <div class="panel"><h2>Recent Audit Events</h2><p class="empty">No DB-backed events wired yet.</p></div>
-  <div class="panel"><h2>Recent Proposed Actions</h2><p class="empty">No pending actions.</p></div>
+
+<section class="grid-two overview-grid">
+  <section class="panel">
+    <div class="section-head compact">
+      <div>
+        <p class="eyebrow">Runtime Guardrails</p>
+        <h2>Operational State</h2>
+      </div>
+    </div>
+    <div class="overview-detail-grid">
+      <article class="metric-card">
+        <span>Telegram Log Channel</span>
+        <strong>{{ overview.log_status.log_channel_username }}</strong>
+        <p class="subtle">Enabled: {{ overview.log_status.enabled }} | Guard: {{ overview.log_status.guard_enabled }}</p>
+      </article>
+      <article class="metric-card">
+        <span>Auto Mode</span>
+        <strong>{{ "Active" if overview.auto_mode.enabled else "Inactive" }}</strong>
+        <p class="subtle">{{ overview.auto_mode.reason or "No runtime reason recorded." }}</p>
+      </article>
+      <article class="metric-card">
+        <span>Kill Switch</span>
+        <strong>{{ "Active" if overview.kill_switch.enabled else "Inactive" }}</strong>
+        <p class="subtle">{{ overview.kill_switch.reason or "No runtime reason recorded." }}</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head compact">
+      <div>
+        <p class="eyebrow">Workspace Map</p>
+        <h2>Control Surfaces</h2>
+      </div>
+    </div>
+    <div class="stack-list">
+      <article class="stack-item">
+        <strong>Overview</strong>
+        <p class="subtle">Monitor high-level readiness and inspect the active runtime posture.</p>
+      </article>
+      <article class="stack-item">
+        <strong>Backtests + Reports</strong>
+        <p class="subtle">Validate strategy behavior on Telegram history, then compare outputs across channels.</p>
+      </article>
+      <article class="stack-item">
+        <strong>Live Trading + Settings</strong>
+        <p class="subtle">Run guarded sessions and control runtime flags without exposing secrets.</p>
+      </article>
+    </div>
+  </section>
 </section>
 {% endblock %}

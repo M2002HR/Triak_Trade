@@ -1,11 +1,31 @@
-<aside class="nav">
-  <div class="brand">Triak Trade</div>
-  <a href="/">Overview</a>
-  <a href="/backtests">Backtests</a>
-  <a href="/live-trading">Live Trading</a>
-  <a href="/logs">Logs</a>
-  <a href="/reports">Reports</a>
-  <a href="/settings">Settings</a>
-  <a href="/status">Status JSON</a>
-  <a href="/logout">Logout</a>
+{% set path = request.url.path %}
+<aside class="nav" id="sidebar-nav" aria-label="Sidebar navigation">
+  <div class="nav-panel">
+    <button class="nav-close-btn" id="nav-close-btn" aria-label="Close navigation" type="button">×</button>
+    <a href="/" class="brand-lockup">
+      <span class="brand-kicker">Triak Trade</span>
+      <strong class="brand-title">Operations Console</strong>
+      <span class="brand-copy">Signal intelligence, replay analysis, and trading guardrails.</span>
+    </a>
+
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/" class="nav-link {% if path == '/' %}active{% endif %}">Overview</a>
+      <a href="/backtests" class="nav-link {% if path == '/backtests' %}active{% endif %}">Backtests</a>
+      <a href="/live-trading" class="nav-link {% if path == '/live-trading' %}active{% endif %}">Live Trading</a>
+      <a href="/reports" class="nav-link {% if path == '/reports' %}active{% endif %}">Reports</a>
+      <a href="/reports/live" class="nav-link {% if path == '/reports/live' %}active{% endif %}">Live Reports</a>
+      <a href="/logs" class="nav-link {% if path == '/logs' %}active{% endif %}">Logs</a>
+      <a href="/settings" class="nav-link {% if path == '/settings' %}active{% endif %}">Settings</a>
+    </nav>
+
+    <div class="nav-footer">
+      <div class="nav-footer-card">
+        <span class="nav-footer-label">Access Model</span>
+        <strong>Root `.env.local` token only</strong>
+        <p class="note">Operational controls stay local and redact secrets in UI responses.</p>
+      </div>
+      <button id="theme-toggle-btn" class="theme-toggle" type="button">☀ Light Mode</button>
+      <a href="/logout" class="nav-link nav-link-logout">Logout</a>
+    </div>
+  </div>
 </aside>

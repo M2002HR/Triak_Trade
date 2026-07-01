@@ -1,7 +1,7 @@
-<section class="cards">
+<section class="status-card-grid">
   {% for card in overview.cards %}
-    <article class="card">
-      <span>{{ card.label }}</span>
+    <article class="status-card">
+      <span class="status-card-label">{{ card.label }}</span>
       <strong>{{ card.value }}</strong>
     </article>
   {% endfor %}

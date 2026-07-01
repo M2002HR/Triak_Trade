@@ -7,15 +7,111 @@
     <link rel="stylesheet" href="/static/dashboard.css">
     <script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js" defer></script>
     {% block extra_head %}{% endblock %}
+    <script>
+      (function() {
+        var t = localStorage.getItem('tt-theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+      })();
+    </script>
   </head>
-  <body>
+  <body class="{% if hide_shell %}auth-page{% else %}app-page{% endif %}">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    {% if hide_shell %}
+    <main id="main-content" class="auth-layout">
+    {% else %}
+    <div class="nav-overlay" id="nav-overlay" aria-hidden="true"></div>
+    <header class="mobile-topbar" id="mobile-topbar">
+      <button class="nav-toggle" id="nav-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar-nav">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="mobile-brand">
+        <span>Triak Trade</span>
+        <strong>Operations Console</strong>
+      </div>
+      <button class="theme-toggle theme-toggle-mobile" id="theme-toggle-btn-mobile" type="button" aria-label="Toggle theme">☀</button>
+    </header>
     <div class="shell">
       {% include "partials/nav.html" %}
-      <main class="content">
-        {% block content %}{% endblock %}
+      <main id="main-content" class="content">
+        <div class="content-inner">
+    {% endif %}
+    {% block content %}{% endblock %}
+    {% if hide_shell %}
+    </main>
+    {% else %}
+        </div>
       </main>
     </div>
+    {% endif %}
     <script src="/static/dashboard.js"></script>
+    <script>
+      (function() {
+        /* ── Theme toggle ── */
+        function applyTheme(t) {
+          document.documentElement.setAttribute('data-theme', t);
+          localStorage.setItem('tt-theme', t);
+          var label = t === 'dark' ? '☀ Light Mode' : '☾ Dark Mode';
+          var iconLabel = t === 'dark' ? '☀' : '☾';
+          var btn = document.getElementById('theme-toggle-btn');
+          var btnM = document.getElementById('theme-toggle-btn-mobile');
+          if (btn) btn.textContent = label;
+          if (btnM) btnM.textContent = iconLabel;
+        }
+        applyTheme(localStorage.getItem('tt-theme') || 'dark');
+        ['theme-toggle-btn', 'theme-toggle-btn-mobile'].forEach(function(id) {
+          var b = document.getElementById(id);
+          if (b) b.addEventListener('click', function() {
+            applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+          });
+        });
+
+        /* ── Hamburger nav ── */
+        var toggle  = document.getElementById('nav-toggle');
+        var overlay = document.getElementById('nav-overlay');
+        var nav     = document.getElementById('sidebar-nav');
+
+        function openNav() {
+          document.body.classList.add('nav-open');
+          if (toggle) toggle.setAttribute('aria-expanded', 'true');
+          document.addEventListener('keydown', escHandler);
+        }
+        function closeNav() {
+          document.body.classList.remove('nav-open');
+          if (toggle) toggle.setAttribute('aria-expanded', 'false');
+          document.removeEventListener('keydown', escHandler);
+        }
+        function escHandler(e) { if (e.key === 'Escape') closeNav(); }
+
+        if (toggle)  toggle.addEventListener('click', function() {
+          document.body.classList.contains('nav-open') ? closeNav() : openNav();
+        });
+        if (overlay) overlay.addEventListener('click', closeNav);
+
+        /* Close button inside nav panel */
+        var closeBtn = document.getElementById('nav-close-btn');
+        if (closeBtn) closeBtn.addEventListener('click', closeNav);
+
+        /* Close when a nav link is tapped on mobile */
+        document.querySelectorAll('.nav-link').forEach(function(link) {
+          link.addEventListener('click', function() {
+            if (window.innerWidth <= 768) closeNav();
+          });
+        });
+
+        /* Prevent body scroll when nav is open on mobile */
+        var _scrollY = 0;
+        var observer = new MutationObserver(function() {
+          if (document.body.classList.contains('nav-open')) {
+            _scrollY = window.scrollY;
+            document.body.style.overflow = 'hidden';
+          } else {
+            document.body.style.overflow = '';
+            window.scrollTo(0, _scrollY);
+          }
+        });
+        observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      })();
+    </script>
     {% block page_scripts %}{% endblock %}
   </body>
 </html>

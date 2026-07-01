@@ -104,6 +104,10 @@ class LiveTrade(BaseModel):
     exchange_order_history: list[LiveExchangeOrderSnapshot] = Field(default_factory=list)
     last_exchange_sync_at: datetime | None = None
     last_exchange_sync_error: str | None = None
+    exchange_position_missing_since: datetime | None = None
+    exchange_position_missing_confirmations: int = 0
+    protection_sync_failures: int = 0
+    last_protection_sync_error_at: datetime | None = None
 
     # Attribution - every message that affected this trade
     message_history: list[MessageAttribution] = Field(default_factory=list)

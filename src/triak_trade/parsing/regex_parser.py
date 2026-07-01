@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from decimal import Decimal
 
+from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal
 
@@ -35,6 +37,8 @@ _SECTION_BREAK_RE = re.compile(
     r"(?:\bsl\b|stop\s*loss|stoploss|\bstop\b|entry|entries|leverage|lev|cancel|close|\u062d\u062f\s*\u0636\u0631\u0631)",
     re.IGNORECASE,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class RegexSignalParser:
@@ -67,7 +71,7 @@ class RegexSignalParser:
         if action in {SignalAction.UNKNOWN, SignalAction.IGNORE}:
             invalid_reason = "non-proposable or ambiguous message"
 
-        return ParsedSignal(
+        result = ParsedSignal(
             action=action,
             market=market,
             symbol=symbol,
@@ -84,6 +88,23 @@ class RegexSignalParser:
             source_message_id=normalized.raw.message_id,
             parser_version="regex-v1",
         )
+        log_event(
+            _log,
+            logging.DEBUG,
+            "regex_parser.parsed",
+            channel_id=normalized.raw.channel_id,
+            message_id=normalized.raw.message_id,
+            action=result.action.value,
+            symbol=result.symbol,
+            side=result.side.value,
+            entry_type=result.entry_type.value,
+            take_profit_count=len(result.take_profits),
+            leverage=result.leverage,
+            confidence=str(result.confidence),
+            invalid_reason=result.invalid_reason,
+            preview=safe_preview(text),
+        )
+        return result
 
     @staticmethod
     def _classify_action(lower: str) -> SignalAction:

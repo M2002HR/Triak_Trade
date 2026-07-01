@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +41,10 @@ def _settings() -> SimpleNamespace:
         LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT=Decimal("5"),
         LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS=8,
         LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS=3,
+        LIVE_TRADING_PROTECTION_SYNC_RETRY_ATTEMPTS=3,
+        LIVE_TRADING_PROTECTION_SYNC_RETRY_DELAY_SECONDS=0,
+        LIVE_TRADING_EXCHANGE_POSITION_MISS_CONFIRMATIONS=2,
+        LIVE_TRADING_EXCHANGE_POSITION_MISS_GRACE_SECONDS=15,
         LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False,
         LIVE_TRADING_FAIL_CLOSED_ON_LEVERAGE_SYNC_ERROR=True,
         LIVE_TRADING_FAIL_CLOSED_ON_PROTECTION_SYNC_ERROR=True,
@@ -1355,6 +1359,8 @@ async def test_process_message_treats_stale_related_open_as_new_signal(
     engine._sync_signal_snapshot(context=context, state=state, trade=trade)
     engine._futures_client = AsyncMock()
     engine._futures_client.get_open_positions.return_value = []
+    trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=30)
+    trade.exchange_position_missing_confirmations = 1
     engine._classifier = SimpleNamespace(
         classify=lambda _message, _context: SimpleNamespace(
             parsed_signal=_open_signal(),
@@ -1449,6 +1455,8 @@ async def test_handle_followup_closes_stale_exchange_trade_before_updating(
     engine._sync_signal_snapshot(context=context, state=state, trade=trade)
     engine._futures_client = AsyncMock()
     engine._futures_client.get_open_positions.return_value = []
+    trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=30)
+    trade.exchange_position_missing_confirmations = 1
     trace = LiveMessageTrace(
         session_id=engine.session.session_id,
         message_id=5,
@@ -1488,6 +1496,8 @@ async def test_sync_exchange_state_marks_trade_closed_when_exchange_position_is_
     engine._futures_client.get_order_history.return_value = []
     engine._futures_client.get_open_orders.return_value = []
     engine._futures_client.get_user_trades.return_value = []
+    trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=30)
+    trade.exchange_position_missing_confirmations = 1
 
     await engine._sync_exchange_state()
 
@@ -1498,6 +1508,140 @@ async def test_sync_exchange_state_marks_trade_closed_when_exchange_position_is_
     assert trade_reloaded is not None
     assert trade_reloaded.status == "closed"
     assert engine._open_trades == {}
+
+
+@pytest.mark.asyncio
+async def test_sync_exchange_state_keeps_trade_open_on_first_missing_snapshot(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+    engine._sync_signal_snapshot(context=context, state=state, trade=trade)
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_order_history.return_value = []
+    engine._futures_client.get_open_orders.return_value = []
+    engine._futures_client.get_user_trades.return_value = []
+
+    await engine._sync_exchange_state()
+
+    trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
+    signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert trade_reloaded is not None
+    assert trade_reloaded.status == "open"
+    assert trade_reloaded.exchange_position_missing_confirmations == 1
+    assert "pending_confirmation" in (trade_reloaded.last_exchange_sync_error or "")
+    assert signal is not None
+    assert signal.status == "open"
+    assert "sig_test" in engine._open_trades
+
+
+@pytest.mark.asyncio
+async def test_ensure_trade_still_open_on_exchange_requires_confirmed_miss(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+    engine._sync_signal_snapshot(context=context, state=state, trade=trade)
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = []
+
+    first_seen = await engine._ensure_trade_still_open_on_exchange(
+        context=context,
+        trade=trade,
+        reason="followup_exchange_position_missing",
+    )
+
+    assert first_seen is True
+    assert trade.status == "open"
+    assert trade.exchange_position_missing_confirmations == 1
+
+    trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+    second_seen = await engine._ensure_trade_still_open_on_exchange(
+        context=context,
+        trade=trade,
+        reason="followup_exchange_position_missing",
+    )
+
+    signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert second_seen is False
+    assert trade.status == "closed"
+    assert signal is not None
+    assert signal.status == "closed"
+    assert "sig_test" not in engine._open_trades
+
+
+@pytest.mark.asyncio
+async def test_ensure_trade_protection_after_open_keeps_trade_open_when_stop_exists(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.stop_loss = Decimal("49000")
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="buy market",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    engine._futures_client = AsyncMock()
+    engine._sync_trade_protection = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ValueError("tp order rejected")
+    )
+
+    async def _refresh_ids(item: LiveTrade) -> None:
+        item.sl_order_id = "sl_live_1"
+        item.tp_order_ids = []
+
+    engine._refresh_trade_protection_ids = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_refresh_ids
+    )
+
+    await engine._ensure_trade_protection_after_open(trade)
+
+    assert trade.status == "open"
+    assert trade.sl_order_id == "sl_live_1"
+    assert trade.protection_sync_failures == 1
+    assert trade.last_exchange_sync_error == "tp order rejected"
+    assert any(
+        note == "protection_sync_degraded=tp order rejected"
+        for note in trade.message_history[-1].notes
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_trade_protection_after_open_raises_when_stop_never_exists(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.stop_loss = Decimal("49000")
+    engine._futures_client = AsyncMock()
+    engine._sync_trade_protection = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ValueError("stop rejected")
+    )
+    engine._refresh_trade_protection_ids = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="stop rejected"):
+        await engine._ensure_trade_protection_after_open(trade)
+
+    assert engine._sync_trade_protection.await_count == 3
+    assert trade.sl_order_id is None
+    assert trade.protection_sync_failures == 3
 
 
 def test_restore_runtime_state_rehydrates_contexts_and_open_trades(tmp_path: Path) -> None:
