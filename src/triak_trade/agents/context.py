@@ -143,7 +143,7 @@ class ChannelContext:
             return
         if message.message_id not in signal.related_message_ids:
             signal.related_message_ids.append(message.message_id)
-        signal.updated_at = message.date
+        signal.updated_at = self._monotonic_signal_timestamp(signal, message.date)
         self.signal_by_message_id[message.message_id] = signal_id
 
     def merge_signal(self, signal_id: str, parsed: ParsedSignal, updated_at: datetime) -> None:
@@ -183,8 +183,12 @@ class ChannelContext:
                 source_message_id=current.source_message_id,
                 parser_version=parsed.parser_version,
             )
-        signal.updated_at = updated_at
+        signal.updated_at = self._monotonic_signal_timestamp(signal, updated_at)
         signal.version += 1
+
+    @staticmethod
+    def _monotonic_signal_timestamp(signal: SignalState, candidate: datetime) -> datetime:
+        return max(signal.created_at, signal.updated_at, candidate)
 
     def snapshot(self) -> dict[str, object]:
         return {

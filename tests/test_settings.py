@@ -10,6 +10,7 @@ def test_settings_defaults_load() -> None:
     assert settings.APP_NAME == "Triak_Trade"
     assert settings.EXECUTION_MODE in {"demo", "paper"}
     assert settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE == 5
+    assert settings.LIVE_TRADING_TELEGRAM_POLL_SECONDS >= 1
 
 
 def test_live_execution_mode_is_allowed() -> None:

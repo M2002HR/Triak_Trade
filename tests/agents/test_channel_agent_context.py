@@ -122,3 +122,52 @@ def test_context_reply_chain_and_following_messages() -> None:
 
     following = ctx.get_following_messages(messages[0], limit=3)
     assert [item.message_id for item in following] == [2, 3, 4]
+
+
+def test_attach_message_does_not_move_signal_updated_at_backwards() -> None:
+    now = datetime.now(timezone.utc)
+    ctx = ChannelContext(channel_id="c1", max_message_limit=10, max_update_window_hours=48)
+    state = _signal("sig-1", "BTCUSDT", now)
+    ctx.add_signal(state, pending=True)
+
+    older_message = RawTelegramMessage(
+        channel_id="c1",
+        channel_username=None,
+        message_id=2,
+        text="forwarded update",
+        date=now - timedelta(minutes=30),
+        edited_at=None,
+        reply_to_msg_id=1,
+    )
+
+    ctx.attach_message("sig-1", older_message)
+
+    assert state.updated_at == now
+
+
+def test_merge_signal_does_not_move_signal_updated_at_backwards() -> None:
+    now = datetime.now(timezone.utc)
+    ctx = ChannelContext(channel_id="c1", max_message_limit=10, max_update_window_hours=48)
+    state = _signal("sig-1", "BTCUSDT", now)
+    ctx.add_signal(state, pending=True)
+    parsed = ParsedSignal(
+        action=SignalAction.UPDATE_TP,
+        market=MarketType.FUTURES,
+        symbol="BTCUSDT",
+        side=TradeSide.LONG,
+        entry_type=EntryType.UNKNOWN,
+        entry_low=None,
+        entry_high=None,
+        stop_loss=None,
+        take_profits=[Decimal("111")],
+        leverage=None,
+        confidence=Decimal("0.9"),
+        invalid_reason=None,
+        source_channel_id="c1",
+        source_message_id=2,
+        parser_version="v2",
+    )
+
+    ctx.merge_signal("sig-1", parsed, now - timedelta(minutes=15))
+
+    assert state.updated_at == now

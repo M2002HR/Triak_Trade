@@ -13,9 +13,11 @@ import pytest
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, SignalStatus, TradeSide
 from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
+from triak_trade.exchange.toobit.errors import ToobitAPIError
 from triak_trade.exchange.toobit.futures import FuturesContractSpec
 from triak_trade.live_trading.engine import LiveTradingEngine
 from triak_trade.live_trading.models import (
+    LiveAccountInfo,
     LiveMessageTrace,
     LiveSession,
     LiveSignalSnapshot,
@@ -24,6 +26,7 @@ from triak_trade.live_trading.models import (
 )
 from triak_trade.live_trading.position_manager import LivePositionManager
 from triak_trade.live_trading.store import LiveTradingStore
+from triak_trade.telegram.client import FakeTelegramClient
 
 
 def _settings() -> SimpleNamespace:
@@ -51,6 +54,7 @@ def _settings() -> SimpleNamespace:
         REAL_BACKTEST_FOLLOWUP_LAST_RESORT_ATTACH=True,
         LIVE_TRADING_PRICE_REFRESH_SECONDS=60,
         LIVE_TRADING_ACCOUNT_REFRESH_SECONDS=60,
+        LIVE_TRADING_TELEGRAM_POLL_SECONDS=1,
         SIGNAL_CONSOLIDATION_SECONDS=1,
         AI_GATEWAY_ENABLED=False,
         AI_CLASSIFIER_ENABLED=False,
@@ -157,6 +161,26 @@ def _engine(tmp_path: Path) -> LiveTradingEngine:
     return engine
 
 
+def _ignored_signal() -> ParsedSignal:
+    return ParsedSignal(
+        action=SignalAction.IGNORE,
+        market=MarketType.FUTURES,
+        symbol=None,
+        side=TradeSide.UNKNOWN,
+        entry_type=EntryType.UNKNOWN,
+        entry_low=None,
+        entry_high=None,
+        stop_loss=None,
+        take_profits=[],
+        leverage=None,
+        confidence=Decimal("0.10"),
+        invalid_reason=None,
+        source_channel_id="@testchan",
+        source_message_id=1,
+        parser_version="test",
+    )
+
+
 @pytest.mark.asyncio
 async def test_try_open_signal_rejects_invalid_exchange_symbol(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
@@ -176,6 +200,316 @@ async def test_try_open_signal_rejects_invalid_exchange_symbol(tmp_path: Path) -
         "BTCUSDT",
         use_demo_symbol=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_try_open_signal_opens_with_strategy_synthetic_protection_when_missing(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine.session.paper_balance = Decimal("1000")
+    context = engine._get_or_create_context("@testchan")
+    parsed = _open_signal().model_copy(update={"stop_loss": None, "take_profits": []})
+    state = _state(parsed, status=SignalStatus.PENDING_CONSOLIDATION)
+    context.add_signal(state, pending=True)
+    engine._get_mark_price = AsyncMock(return_value=Decimal("50000"))  # type: ignore[method-assign]
+    engine._strategy.get_synthetic_stop.return_value = Decimal("48765")
+    engine._strategy.get_synthetic_take_profits.return_value = [
+        Decimal("51000"),
+        Decimal("52000"),
+        Decimal("53000"),
+    ]
+
+    await engine._try_open_signal("sig_test", state, context)
+
+    trade = engine._open_trades["sig_test"]
+    snapshot = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert trade.stop_loss == Decimal("48765")
+    assert trade.take_profits == [Decimal("51000"), Decimal("52000"), Decimal("53000")]
+    assert any(
+        note.startswith("synthetic_stop_strategy=")
+        for note in trade.message_history[-1].notes
+    )
+    assert any(
+        note.startswith("synthetic_take_profits_strategy=")
+        for note in trade.message_history[-1].notes
+    )
+    assert snapshot is not None
+    assert snapshot.stop_loss == Decimal("48765")
+    assert snapshot.take_profits == [Decimal("51000"), Decimal("52000"), Decimal("53000")]
+
+
+@pytest.mark.asyncio
+async def test_poll_messages_once_replays_messages_from_session_start(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._running = True
+    engine._restore_runtime_state()
+    message = _message(101, "noise").model_copy(
+        update={"channel_id": "https://t.me/testchan", "channel_username": "testchan"}
+    )
+    engine._telegram_client = FakeTelegramClient(
+        history_by_channel={"https://t.me/testchan": [message]}
+    )
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_ignored_signal().model_copy(
+                update={"source_message_id": raw.message_id}
+            ),
+            classification="ignore",
+            related_signal_id=None,
+        )
+    )
+
+    await engine._poll_messages_once()
+
+    traces = engine.store.list_message_traces(engine.session.session_id, limit=10)
+    assert len(traces) == 1
+    assert traces[0].message_id == 101
+    assert engine.session.total_messages_processed == 1
+    assert engine._last_seen_message_ids["https://t.me/testchan"] == 101
+
+
+@pytest.mark.asyncio
+async def test_poll_messages_once_persists_heartbeat_without_new_messages(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._running = True
+    engine._restore_runtime_state()
+    engine._telegram_client = FakeTelegramClient(
+        history_by_channel={"https://t.me/testchan": []}
+    )
+    before = engine.session.last_update_at
+
+    await engine._poll_messages_once()
+
+    persisted = engine.store.load_session(engine.session.session_id)
+    assert persisted is not None
+    assert persisted.last_update_at >= before
+    assert engine.session.total_messages_processed == 0
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_channel_cursor_uses_latest_message_id_for_live_followup(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._running = True
+    engine._restore_runtime_state()
+    latest_existing = _message(14782, "existing latest").model_copy(
+        update={
+            "channel_id": "https://t.me/testchan",
+            "channel_username": "testchan",
+            "date": datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc),
+        }
+    )
+    forwarded_after_start = _message(14783, "forwarded after start").model_copy(
+        update={
+            "channel_id": "https://t.me/testchan",
+            "channel_username": "testchan",
+            "date": datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc),
+        }
+    )
+
+    class BootstrapTelegramClient(FakeTelegramClient):
+        async def fetch_history(
+            self,
+            channel: str,
+            *,
+            start: datetime | None = None,
+            end: datetime | None = None,
+            limit: int | None = None,
+            min_message_id: int | None = None,
+        ) -> list[RawTelegramMessage]:
+            if limit == 1 and min_message_id is None:
+                return [latest_existing]
+            if min_message_id == 14783:
+                return [forwarded_after_start]
+            return []
+
+    engine._telegram_client = BootstrapTelegramClient()
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_ignored_signal().model_copy(
+                update={"source_message_id": raw.message_id}
+            ),
+            classification="ignore",
+            related_signal_id=None,
+        )
+    )
+
+    await engine._bootstrap_channel_cursors()
+    await engine._poll_messages_once()
+
+    assert engine._last_seen_message_ids["https://t.me/testchan"] == 14783
+    traces = engine.store.list_message_traces(engine.session.session_id, limit=10)
+    assert len(traces) == 1
+    assert traces[0].message_id == 14783
+    assert engine.session.total_messages_processed == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_message_for_classification_downloads_caption_media(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trace = LiveMessageTrace(
+        session_id=engine.session.session_id,
+        message_id=200,
+        channel_id="https://t.me/testchan",
+        channel_label="@testchan",
+        message_date=datetime.now(timezone.utc),
+    )
+    message = _message(200, "caption text").model_copy(
+        update={
+            "channel_id": "https://t.me/testchan",
+            "channel_username": "testchan",
+            "raw_payload": {
+                "has_media": True,
+                "caption_present": True,
+                "image_data_urls": [],
+            },
+        }
+    )
+
+    class HydratingTelegramClient(FakeTelegramClient):
+        async def ensure_media_payload(
+            self,
+            message: RawTelegramMessage,
+            *,
+            allow_captionless: bool = False,
+        ) -> RawTelegramMessage:
+            return message.model_copy(
+                update={
+                    "raw_payload": {
+                        **message.raw_payload,
+                        "media_downloaded": True,
+                        "image_data_urls": [
+                            {"mime_type": "image/jpeg", "data_url": "data:image/jpeg;base64,abc"}
+                        ],
+                    }
+                }
+            )
+
+    engine._telegram_client = HydratingTelegramClient()
+
+    prepared = await engine._prepare_message_for_classification(
+        message=message,
+        context=engine._get_or_create_context("https://t.me/testchan"),
+        trace=trace,
+    )
+
+    assert len(prepared.raw_payload["image_data_urls"]) == 1
+    assert "caption_media_downloaded=1" in trace.debug_notes
+
+
+@pytest.mark.asyncio
+async def test_prepare_message_for_classification_attaches_recent_captionless_media_context(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("https://t.me/testchan")
+    prior_media = _message(201, "").model_copy(
+        update={
+            "channel_id": "https://t.me/testchan",
+            "channel_username": "testchan",
+            "raw_payload": {
+                "has_media": True,
+                "caption_present": False,
+                "image_data_urls": [],
+            },
+        }
+    )
+    context.add_recent_message(prior_media)
+    trace = LiveMessageTrace(
+        session_id=engine.session.session_id,
+        message_id=202,
+        channel_id="https://t.me/testchan",
+        channel_label="@testchan",
+        message_date=datetime.now(timezone.utc),
+    )
+    followup = _message(202, "tp 100 200").model_copy(
+        update={
+            "channel_id": "https://t.me/testchan",
+            "channel_username": "testchan",
+        }
+    )
+
+    class RetroTelegramClient(FakeTelegramClient):
+        async def ensure_media_payload(
+            self,
+            message: RawTelegramMessage,
+            *,
+            allow_captionless: bool = False,
+        ) -> RawTelegramMessage:
+            assert allow_captionless is True
+            return message.model_copy(
+                update={
+                    "raw_payload": {
+                        **message.raw_payload,
+                        "media_downloaded": True,
+                        "image_data_urls": [
+                            {"mime_type": "image/jpeg", "data_url": "data:image/jpeg;base64,retro"}
+                        ],
+                    }
+                }
+            )
+
+    engine._telegram_client = RetroTelegramClient()
+
+    prepared = await engine._prepare_message_for_classification(
+        message=followup,
+        context=context,
+        trace=trace,
+    )
+
+    assert prepared.raw_payload["context_image_message_ids"] == [201]
+    assert len(prepared.raw_payload["image_data_urls"]) == 1
+    assert "retro_media_context_from=201" in trace.debug_notes
+
+
+@pytest.mark.asyncio
+async def test_poll_messages_once_only_processes_messages_newer_than_last_seen(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._running = True
+    older = _message(101, "older")
+    older = older.model_copy(
+        update={"channel_id": "https://t.me/testchan", "channel_username": "testchan"}
+    )
+    newer = _message(102, "newer").model_copy(
+        update={"channel_id": "https://t.me/testchan", "channel_username": "testchan"}
+    )
+    engine.store.save_message_trace(
+        engine.session.session_id,
+        LiveMessageTrace(
+            session_id=engine.session.session_id,
+            message_id=101,
+            channel_id="https://t.me/testchan",
+            channel_label="@testchan",
+            message_date=older.date,
+            final_status="ignored",
+        ),
+    )
+    engine._restore_runtime_state()
+    engine._telegram_client = FakeTelegramClient(
+        history_by_channel={"https://t.me/testchan": [older, newer]}
+    )
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_ignored_signal().model_copy(
+                update={"source_message_id": raw.message_id}
+            ),
+            classification="ignore",
+            related_signal_id=None,
+        )
+    )
+
+    await engine._poll_messages_once()
+
+    traces = engine.store.list_message_traces(engine.session.session_id, limit=10)
+    assert [trace.message_id for trace in traces] == [102, 101]
+    assert engine.session.total_messages_processed == 1
+    assert engine._last_seen_message_ids["https://t.me/testchan"] == 102
 
 
 @pytest.mark.asyncio
@@ -290,9 +624,9 @@ async def test_real_open_position_uses_demo_exchange_symbol_for_demo_sessions(
             "filters": [
                 {
                     "filterType": "LOT_SIZE",
-                    "minQty": "1",
+                    "minQty": "0.0001",
                     "maxQty": "1000000",
-                    "stepSize": "1",
+                    "stepSize": "0.0001",
                 }
             ],
         }
@@ -307,18 +641,16 @@ async def test_real_open_position_uses_demo_exchange_symbol_for_demo_sessions(
         Decimal("49000"),
         [Decimal("51000"), Decimal("52000")],
     )
-    engine._strategy.get_target_hit_action.side_effect = [
-        SimpleNamespace(
-            close_fraction=Decimal("0.35"),
+    def _target_hit_action(**kwargs: object) -> SimpleNamespace:
+        remaining = int(kwargs["remaining_targets_including_this"])
+        close_fraction = Decimal("1") if remaining <= 1 else Decimal("0.35")
+        return SimpleNamespace(
+            close_fraction=close_fraction,
             move_sl_to_entry=False,
             new_stop_loss=None,
-        ),
-        SimpleNamespace(
-            close_fraction=Decimal("1"),
-            move_sl_to_entry=False,
-            new_stop_loss=None,
-        ),
-    ]
+        )
+
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action
     engine._futures_client.place_order.side_effect = [
         SimpleNamespace(order_id="tp_protect_1"),
         SimpleNamespace(order_id="tp_protect_2"),
@@ -396,6 +728,7 @@ async def test_real_open_position_clamps_leverage_and_quantity_to_exchange_risk_
     trade.remaining_quantity = Decimal("25000000")
     trade.leverage = 25
     trade.margin = Decimal("73000")
+    trade.take_profits = [Decimal("0.07")]
     trade.message_history = [
         MessageAttribution(
             message_id=1,
@@ -473,13 +806,11 @@ async def test_real_open_position_clamps_leverage_and_quantity_to_exchange_risk_
         ],
     ]
     engine._refresh_account = AsyncMock()  # type: ignore[method-assign]
-    engine._strategy.get_target_hit_action.side_effect = [
-        SimpleNamespace(
-            close_fraction=Decimal("1"),
-            move_sl_to_entry=False,
-            new_stop_loss=None,
-        ),
-    ]
+    engine._strategy.get_target_hit_action.side_effect = lambda **_: SimpleNamespace(
+        close_fraction=Decimal("1"),
+        move_sl_to_entry=False,
+        new_stop_loss=None,
+    )
 
     await engine._real_open_position(trade)
 
@@ -513,6 +844,7 @@ async def test_real_open_position_falls_back_when_exchange_rejects_target_levera
     trade.remaining_quantity = Decimal("1476566.21424335")
     trade.leverage = 50
     trade.margin = Decimal("2161.10231117")
+    trade.take_profits = [Decimal("0.07172")]
     trade.message_history = [
         MessageAttribution(
             message_id=1,
@@ -598,13 +930,11 @@ async def test_real_open_position_falls_back_when_exchange_rejects_target_levera
         ],
     ]
     engine._refresh_account = AsyncMock()  # type: ignore[method-assign]
-    engine._strategy.get_target_hit_action.side_effect = [
-        SimpleNamespace(
-            close_fraction=Decimal("1"),
-            move_sl_to_entry=False,
-            new_stop_loss=None,
-        ),
-    ]
+    engine._strategy.get_target_hit_action.side_effect = lambda **_: SimpleNamespace(
+        close_fraction=Decimal("1"),
+        move_sl_to_entry=False,
+        new_stop_loss=None,
+    )
 
     await engine._real_open_position(trade)
 
@@ -622,6 +952,192 @@ async def test_real_open_position_falls_back_when_exchange_rejects_target_levera
     )
     assert any(
         "exchange_leverage_fallback=50x->25x" in note
+        for note in trade.message_history[-1].notes
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_open_position_promotes_small_quantity_to_support_five_targets(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine.session.account_info = LiveAccountInfo(
+        wallet_balance=Decimal("100"),
+        available_balance=Decimal("100"),
+    )
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "BTCUSDT"
+    trade.side = "short"
+    trade.entry_price = Decimal("60118.3")
+    trade.quantity = Decimal("0.0001")
+    trade.remaining_quantity = Decimal("0.0001")
+    trade.leverage = 85
+    trade.margin = Decimal("0.07072741")
+    trade.stop_loss = Decimal("65106.8")
+    trade.take_profits = [
+        Decimal("58915.934"),
+        Decimal("57713.568"),
+        Decimal("56511.202"),
+        Decimal("55308.836"),
+        Decimal("54106.470"),
+    ]
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="btc short",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = FuturesContractSpec(
+        {
+            "symbol": "BTC-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.001",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.0001",
+                    "maxQty": "120",
+                    "stepSize": "0.0001",
+                }
+            ],
+        }
+    )
+    engine._futures_client.set_leverage.return_value = {"code": 200}
+    engine._futures_client.open_short.return_value = SimpleNamespace(
+        order_id="ord_btc_5tp",
+        exchange_symbol="TBV_BTC-SWAP-TBV_USDT",
+        avg_price=Decimal("60118.3"),
+        executed_qty=Decimal("10"),
+    )
+    engine._futures_client.wait_for_order_fill.return_value = (
+        SimpleNamespace(
+            order_id="ord_btc_5tp",
+            exchange_symbol="TBV_BTC-SWAP-TBV_USDT",
+            status="FILLED",
+            executed_qty=Decimal("10"),
+            avg_price=Decimal("60118.3"),
+        ),
+        [],
+    )
+    engine._futures_client.normalize_trade_protection.return_value = (
+        Decimal("65106.8"),
+        [
+            Decimal("58915.9"),
+            Decimal("57713.6"),
+            Decimal("56511.2"),
+            Decimal("55308.8"),
+            Decimal("54106.4"),
+        ],
+    )
+    def _target_hit_action(**kwargs: object) -> SimpleNamespace:
+        targets_hit = int(kwargs["targets_hit_so_far"])
+        remaining = int(kwargs["remaining_targets_including_this"])
+        fractions = [
+            Decimal("0.35"),
+            Decimal("0.40"),
+            Decimal("0.50"),
+            Decimal("0.50"),
+        ]
+        if remaining <= 1:
+            close_fraction = Decimal("1")
+        else:
+            close_fraction = fractions[min(targets_hit, len(fractions) - 1)]
+        return SimpleNamespace(
+            close_fraction=close_fraction,
+            move_sl_to_entry=False,
+            new_stop_loss=None,
+        )
+
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action
+    engine._futures_client.place_order.side_effect = [
+        SimpleNamespace(order_id="tp_btc_1"),
+        SimpleNamespace(order_id="tp_btc_2"),
+        SimpleNamespace(order_id="tp_btc_3"),
+        SimpleNamespace(order_id="tp_btc_4"),
+        SimpleNamespace(order_id="tp_btc_5"),
+    ]
+    engine._futures_client.set_trading_stop.return_value = {"ok": True}
+    engine._futures_client.get_open_orders.side_effect = [
+        [],
+        [],
+        [
+            SimpleNamespace(
+                order_id="tp_btc_1",
+                order_type="LIMIT",
+                side="BUY_CLOSE",
+                client_order_id="triak_tp_trade_test_1",
+                stop_price=Decimal("0"),
+            ),
+            SimpleNamespace(
+                order_id="tp_btc_2",
+                order_type="LIMIT",
+                side="BUY_CLOSE",
+                client_order_id="triak_tp_trade_test_2",
+                stop_price=Decimal("0"),
+            ),
+            SimpleNamespace(
+                order_id="tp_btc_3",
+                order_type="LIMIT",
+                side="BUY_CLOSE",
+                client_order_id="triak_tp_trade_test_3",
+                stop_price=Decimal("0"),
+            ),
+            SimpleNamespace(
+                order_id="tp_btc_4",
+                order_type="LIMIT",
+                side="BUY_CLOSE",
+                client_order_id="triak_tp_trade_test_4",
+                stop_price=Decimal("0"),
+            ),
+            SimpleNamespace(
+                order_id="tp_btc_5",
+                order_type="LIMIT",
+                side="BUY_CLOSE",
+                client_order_id="triak_tp_trade_test_5",
+                stop_price=Decimal("0"),
+            ),
+        ],
+        [
+            SimpleNamespace(
+                order_id="sl_btc_5tp",
+                order_type="STOP_SHORT_LOSS",
+                position_side="SHORT",
+                side="BUY_CLOSE",
+                stop_price=Decimal("65106.8"),
+            )
+        ],
+    ]
+    engine._refresh_account = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._real_open_position(trade)
+
+    engine._futures_client.open_short.assert_awaited_once_with(
+        symbol="BTCUSDT",
+        quantity=Decimal("0.01000000"),
+        leverage=85,
+        use_demo_symbol=True,
+    )
+    assert trade.quantity == Decimal("0.01000000")
+    assert trade.tp_order_ids == [
+        "tp_btc_1",
+        "tp_btc_2",
+        "tp_btc_3",
+        "tp_btc_4",
+        "tp_btc_5",
+    ]
+    assert any(
+        note == "exchange_entry_quantity_promoted=0.0001->0.00100000"
+        for note in trade.message_history[-1].notes
+    )
+    assert any(
+        note == "exchange_tp_ladder_quantity_promoted=0.00100000->0.01000000"
         for note in trade.message_history[-1].notes
     )
 
@@ -766,6 +1282,163 @@ async def test_sync_trade_protection_update_sl_only_preserves_existing_take_prof
 
 
 @pytest.mark.asyncio
+async def test_sync_trade_protection_retries_without_quantity_on_position_limit(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "DOGEUSDT"
+    trade.stop_loss = Decimal("0.07656")
+    trade.take_profits = []
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="doge long",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.normalize_trade_protection.return_value = (
+        Decimal("0.07656"),
+        [],
+    )
+    engine._futures_client.get_open_orders.side_effect = [
+        [],
+        [],
+        [
+            SimpleNamespace(
+                order_id="sl_live_new",
+                order_type="STOP_LONG_LOSS",
+                side="SELL_CLOSE",
+                stop_price=Decimal("0.07656"),
+            ),
+        ],
+    ]
+    engine._futures_client.set_trading_stop.side_effect = [
+        ToobitAPIError("Toobit API HTTP error: 400: stopProfitLoss order position limit"),
+        {"ok": True},
+    ]
+
+    await engine._sync_trade_protection(
+        trade,
+        refresh_take_profits=False,
+        refresh_stop_loss=True,
+    )
+
+    assert trade.sl_order_id == "sl_live_new"
+    assert trade.message_history
+    assert any(
+        note == "exchange_sl_size_fallback=omit_quantity_after_position_limit"
+        for note in trade.message_history[-1].notes
+    )
+    assert engine._futures_client.set_trading_stop.await_args_list[0].kwargs == {
+        "symbol": "DOGEUSDT",
+        "side": "LONG",
+        "stop_loss": Decimal("0.07656"),
+        "sl_quantity": trade.remaining_quantity,
+        "use_demo_symbol": True,
+    }
+    assert engine._futures_client.set_trading_stop.await_args_list[1].kwargs == {
+        "symbol": "DOGEUSDT",
+        "side": "LONG",
+        "stop_loss": Decimal("0.07656"),
+        "use_demo_symbol": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sync_trade_protection_compresses_tiny_tp_ladder_to_valid_exchange_order(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "BTCUSDT"
+    trade.remaining_quantity = Decimal("0.0001")
+    trade.stop_loss = Decimal("61665")
+    trade.take_profits = [
+        Decimal("58850"),
+        Decimal("58200"),
+        Decimal("56980"),
+        Decimal("54600"),
+    ]
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="btc short",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.normalize_trade_protection.return_value = (
+        Decimal("61665"),
+        [Decimal("58850"), Decimal("58200"), Decimal("56980"), Decimal("54600")],
+    )
+    engine._futures_client.get_contract_spec.return_value = FuturesContractSpec(
+        {
+            "symbol": "BTC-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.0001",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.0001",
+                    "maxQty": "1000000",
+                    "stepSize": "0.0001",
+                }
+            ],
+        }
+    )
+    engine._strategy.get_target_hit_action.side_effect = [
+        SimpleNamespace(close_fraction=Decimal("0.35"), move_sl_to_entry=False, new_stop_loss=None),
+        SimpleNamespace(close_fraction=Decimal("0.40"), move_sl_to_entry=False, new_stop_loss=None),
+        SimpleNamespace(close_fraction=Decimal("0.50"), move_sl_to_entry=False, new_stop_loss=None),
+        SimpleNamespace(close_fraction=Decimal("1"), move_sl_to_entry=False, new_stop_loss=None),
+    ]
+    engine._futures_client.set_trading_stop.return_value = {"ok": True}
+    engine._futures_client.place_order.return_value = SimpleNamespace(order_id="tp_btc_1")
+    engine._futures_client.get_open_orders.side_effect = [
+        [],
+        [],
+        [
+            SimpleNamespace(
+                order_id="tp_btc_1",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_1_existing",
+                stop_price=Decimal("0"),
+            ),
+        ],
+        [
+            SimpleNamespace(
+                order_id="sl_btc_1",
+                order_type="STOP_LONG_LOSS",
+                side="SELL_CLOSE",
+                stop_price=Decimal("61665"),
+            ),
+        ],
+    ]
+
+    await engine._sync_trade_protection(trade)
+
+    assert engine._futures_client.place_order.await_count == 1
+    assert engine._futures_client.place_order.await_args.kwargs["price"] == Decimal("58850")
+    assert engine._futures_client.place_order.await_args.kwargs["quantity"] == Decimal("0.00010000")
+    assert any(
+        note == "exchange_tp_ladder_compressed=4->1_due_to_contract_size"
+        for note in trade.message_history[-1].notes
+    )
+
+
+@pytest.mark.asyncio
 async def test_reconcile_exchange_trade_protection_applies_tp_fill_and_rearms_next_stop(
     tmp_path: Path,
 ) -> None:
@@ -888,6 +1561,180 @@ def test_exchange_take_profit_orders_builds_partial_ladder_from_strategy() -> No
         (2, Decimal("53000"), Decimal("0.19500000")),
         (3, Decimal("54000"), Decimal("0.19500000")),
     ]
+
+
+def test_exchange_take_profit_orders_compresses_small_contract_position_to_valid_orders() -> None:
+    engine = _engine(Path("/tmp"))
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "BTCUSDT"
+    trade.remaining_quantity = Decimal("0.0001")
+    trade.take_profits = [
+        Decimal("58850"),
+        Decimal("58200"),
+        Decimal("56980"),
+        Decimal("54600"),
+    ]
+    engine._strategy.get_target_hit_action.side_effect = [
+        SimpleNamespace(close_fraction=Decimal("0.35"), move_sl_to_entry=False, new_stop_loss=None),
+        SimpleNamespace(close_fraction=Decimal("0.40"), move_sl_to_entry=False, new_stop_loss=None),
+        SimpleNamespace(close_fraction=Decimal("0.50"), move_sl_to_entry=False, new_stop_loss=None),
+        SimpleNamespace(close_fraction=Decimal("1"), move_sl_to_entry=False, new_stop_loss=None),
+    ]
+    spec = FuturesContractSpec(
+        {
+            "symbol": "BTC-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.0001",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.0001",
+                    "maxQty": "1000000",
+                    "stepSize": "0.0001",
+                }
+            ],
+        }
+    )
+
+    orders = engine._exchange_take_profit_orders(trade, spec=spec)
+
+    assert orders == [
+        (0, Decimal("58850"), Decimal("0.00010000")),
+    ]
+
+
+def test_ensure_exchange_quantity_supports_take_profit_ladder_promotes_open_quantity() -> None:
+    engine = _engine(Path("/tmp"))
+    engine.session.account_info = LiveAccountInfo(
+        wallet_balance=Decimal("100"),
+        available_balance=Decimal("100"),
+    )
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "BTCUSDT"
+    trade.side = "short"
+    trade.entry_price = Decimal("60118.3")
+    trade.leverage = 85
+    trade.quantity = Decimal("0.0001")
+    trade.remaining_quantity = Decimal("0.0001")
+    trade.margin = Decimal("0.07072741")
+    trade.take_profits = [
+        Decimal("58915.934"),
+        Decimal("57713.568"),
+        Decimal("56511.202"),
+        Decimal("55308.836"),
+        Decimal("54106.470"),
+    ]
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="btc short",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    def _target_hit_action(**kwargs: object) -> SimpleNamespace:
+        targets_hit = int(kwargs["targets_hit_so_far"])
+        remaining = int(kwargs["remaining_targets_including_this"])
+        fractions = [
+            Decimal("0.35"),
+            Decimal("0.40"),
+            Decimal("0.50"),
+            Decimal("0.50"),
+        ]
+        if remaining <= 1:
+            close_fraction = Decimal("1")
+        else:
+            close_fraction = fractions[min(targets_hit, len(fractions) - 1)]
+        return SimpleNamespace(
+            close_fraction=close_fraction,
+            move_sl_to_entry=False,
+            new_stop_loss=None,
+        )
+
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action
+    spec = FuturesContractSpec(
+        {
+            "symbol": "BTC-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.001",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.0001",
+                    "maxQty": "120",
+                    "stepSize": "0.0001",
+                }
+            ],
+        }
+    )
+
+    engine._ensure_exchange_quantity_supports_take_profit_ladder(trade, spec)
+
+    assert trade.quantity == Decimal("0.01000000")
+    assert trade.remaining_quantity == Decimal("0.01000000")
+    assert trade.margin == Decimal("7.07274118")
+    assert any(
+        note == "exchange_tp_ladder_quantity_promoted=0.0001->0.01000000"
+        for note in trade.message_history[-1].notes
+    )
+
+
+def test_ensure_exchange_quantity_supports_market_entry_promotes_open_quantity() -> None:
+    engine = _engine(Path("/tmp"))
+    engine.session.account_info = LiveAccountInfo(
+        wallet_balance=Decimal("10"),
+        available_balance=Decimal("10"),
+    )
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "BTCUSDT"
+    trade.side = "short"
+    trade.entry_price = Decimal("60118.3")
+    trade.leverage = 85
+    trade.quantity = Decimal("0.0001")
+    trade.remaining_quantity = Decimal("0.0001")
+    trade.margin = Decimal("0.07072741")
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="btc short",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    spec = FuturesContractSpec(
+        {
+            "symbol": "BTC-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.001",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.0001",
+                    "maxQty": "120",
+                    "stepSize": "0.0001",
+                }
+            ],
+        }
+    )
+
+    engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
+
+    assert trade.quantity == Decimal("0.00100000")
+    assert trade.remaining_quantity == Decimal("0.00100000")
+    assert trade.margin == Decimal("0.70727412")
+    assert any(
+        note == "exchange_entry_quantity_promoted=0.0001->0.00100000"
+        for note in trade.message_history[-1].notes
+    )
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1867,120 @@ async def test_handle_followup_updates_leverage_and_signal_snapshot(tmp_path: Pa
     assert trace.final_status == "updated_leverage"
     assert signal is not None
     assert signal.leverage == 25
+
+
+@pytest.mark.asyncio
+async def test_handle_followup_updates_take_profits_and_signal_snapshot(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    trade.stop_loss = Decimal("48765")
+    trade.take_profits = [Decimal("51000"), Decimal("52000")]
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+    engine._sync_signal_snapshot(context=context, state=state, trade=trade)
+
+    parsed = _open_signal(action=SignalAction.UPDATE_TP).model_copy(
+        update={"take_profits": [Decimal("51100"), Decimal("52200"), Decimal("53300")]}
+    )
+    trace = LiveMessageTrace(
+        session_id=engine.session.session_id,
+        message_id=22,
+        channel_id="@testchan",
+        channel_label="@testchan",
+        message_date=datetime.now(timezone.utc),
+    )
+
+    await engine._handle_followup(
+        signal_id="sig_test",
+        parsed=parsed,
+        message=_message(22, "tp 51100 52200 53300"),
+        context=context,
+        trace=trace,
+    )
+
+    signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert trace.final_status == "updated_tp"
+    assert trade.take_profits == [Decimal("51100"), Decimal("52200"), Decimal("53300")]
+    assert signal is not None
+    assert signal.take_profits == [Decimal("51100"), Decimal("52200"), Decimal("53300")]
+
+
+@pytest.mark.asyncio
+async def test_handle_followup_update_tp_also_updates_stop_loss_when_present(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    trade.side = "short"
+    trade.entry_price = Decimal("60118.3")
+    trade.stop_loss = Decimal("65106.8")
+    trade.take_profits = [Decimal("59000")]
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+    engine._sync_signal_snapshot(context=context, state=state, trade=trade)
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = [
+        SimpleNamespace(
+            symbol_internal="BTCUSDT",
+            side="LONG",
+            position=Decimal("1"),
+        )
+    ]
+    engine._sync_trade_protection = AsyncMock()  # type: ignore[method-assign]
+    trace = LiveMessageTrace(
+        session_id=engine.session.session_id,
+        message_id=23,
+        channel_id="@testchan",
+        channel_label="@testchan",
+        message_date=datetime.now(timezone.utc),
+    )
+    parsed = _open_signal(action=SignalAction.UPDATE_TP).model_copy(
+        update={
+            "stop_loss": Decimal("61665"),
+            "side": TradeSide.SHORT,
+            "entry_low": Decimal("60118.3"),
+            "entry_high": Decimal("60118.3"),
+            "take_profits": [
+                Decimal("58850"),
+                Decimal("58200"),
+                Decimal("56980"),
+                Decimal("54600"),
+            ],
+        }
+    )
+
+    await engine._handle_followup(
+        signal_id="sig_test",
+        parsed=parsed,
+        message=_message(23, "targets updated stop 61665"),
+        context=context,
+        trace=trace,
+    )
+
+    signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert trace.final_status == "updated_tp"
+    assert trade.stop_loss == Decimal("61665")
+    assert trade.take_profits == [
+        Decimal("58850"),
+        Decimal("58200"),
+        Decimal("56980"),
+        Decimal("54600"),
+    ]
+    assert signal is not None
+    assert signal.stop_loss == Decimal("61665")
+    assert signal.take_profits == [
+        Decimal("58850"),
+        Decimal("58200"),
+        Decimal("56980"),
+        Decimal("54600"),
+    ]
+    engine._sync_trade_protection.assert_awaited_once_with(trade)
 
 
 @pytest.mark.asyncio
@@ -1692,3 +2653,45 @@ def test_restore_runtime_state_rehydrates_contexts_and_open_trades(tmp_path: Pat
     context = restored._get_or_create_context("@restore")
     assert context.get_signal("sig_test") is not None
     assert context.get_message(77) is not None
+
+
+def test_restore_runtime_state_normalizes_legacy_signal_snapshot_timestamps(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    session_id = engine.session.session_id
+    trade = _trade(session_id)
+    opened_at = datetime.now(timezone.utc)
+    updated_at = opened_at - timedelta(minutes=5)
+    trade.opened_at = opened_at
+    trade.updated_at = opened_at
+    trade.channel_id = "@restore"
+    trade.channel_input = "https://t.me/restore"
+    trade.channel_label = "@restore"
+    engine.store.save_trade(trade)
+    engine.store.save_signal_snapshot(
+        session_id,
+        LiveSignalSnapshot(
+            signal_id="sig_test",
+            channel_id="@restore",
+            channel_label="@restore",
+            created_from_message_id=77,
+            related_message_ids=[77],
+            status="open",
+            status_group="active",
+            symbol="BTCUSDT",
+            side="long",
+            trade_id=trade.trade_id,
+            opened_at=opened_at,
+            updated_at=updated_at,
+        ),
+    )
+
+    restored = _engine(tmp_path)
+    restored._restore_runtime_state()
+
+    context = restored._get_or_create_context("@restore")
+    signal = context.get_signal("sig_test")
+    assert signal is not None
+    assert signal.created_at == updated_at
+    assert signal.updated_at == updated_at
