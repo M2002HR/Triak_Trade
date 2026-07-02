@@ -187,19 +187,15 @@ class DashboardBacktestStore:
 
     def list_runs(self, limit: int = 20) -> list[DashboardBacktestRun]:
         runs: list[DashboardBacktestRun] = []
-        paths = sorted(
-            self._run_paths(),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
-        for path in paths:
+        for path in self._run_paths():
             runs.append(
                 DashboardBacktestRun.model_validate_json(
                     path.read_text(encoding="utf-8")
                 )
             )
-            if len(runs) >= limit:
-                break
+        runs.sort(key=lambda item: item.created_at, reverse=True)
+        if limit < len(runs):
+            return runs[:limit]
         return runs
 
     def list_run_summaries(
@@ -208,12 +204,7 @@ class DashboardBacktestStore:
         offset: int = 0,
     ) -> list[DashboardBacktestRunSummary]:
         runs: list[DashboardBacktestRunSummary] = []
-        paths = sorted(
-            self._run_paths(),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
-        for path in paths[offset:]:
+        for path in self._run_paths():
             run_id = path.stem
             summary_path = self._summary_path(run_id)
             if summary_path.exists():
@@ -229,9 +220,10 @@ class DashboardBacktestStore:
                 summary = DashboardBacktestRunSummary.from_run(run)
                 runs.append(summary)
                 self.write(run)
-            if len(runs) >= limit:
-                break
-        return runs
+        runs.sort(key=lambda item: item.created_at, reverse=True)
+        if offset >= len(runs):
+            return []
+        return runs[offset : offset + limit]
 
     def count_runs(self) -> int:
         return len(self._run_paths())
