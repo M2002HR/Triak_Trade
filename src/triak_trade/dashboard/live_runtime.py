@@ -40,6 +40,7 @@ from triak_trade.live_trading.models import (
     LiveTradingSnapshot,
 )
 from triak_trade.live_trading.store import LiveTradingStore
+from triak_trade.telegram.shared_client import SharedTelethonTelegramClient
 
 
 def _utc_now() -> datetime:
@@ -84,6 +85,7 @@ class DashboardLiveCoordinator:
         self.runtime_root = Path(settings.LIVE_TRADING_RUNTIME_DIR)
         self.state_dir = self.runtime_root / "state"
         self.saved_channels_file = self.state_dir / "saved_channels.json"
+        self.telegram_client = SharedTelethonTelegramClient(settings)
         self._lock = threading.Lock()
         self._engines: dict[str, LiveTradingEngine] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -208,6 +210,7 @@ class DashboardLiveCoordinator:
             settings=self.settings,
             store=self.store,
             notifier=self.notifier,
+            telegram_client=self.telegram_client,
         )
         self.store.save_session(session)
         worker = threading.Thread(
@@ -376,7 +379,39 @@ class DashboardLiveCoordinator:
         return messages[:limit]
 
     def delete_session_history(self, session_id: str) -> bool:
+        session = self.store.load_session(session_id)
+        if session is None:
+            return False
+        if session.status in {"running", "starting"}:
+            raise ValueError("session_must_be_stopped")
         return self.store.delete_session(session_id)
+
+    async def forward_test_message(
+        self,
+        *,
+        message_link: str,
+        destination_channel: str,
+    ) -> LiveMessageTrace:
+        raw = await self.telegram_client.forward_message_by_link(
+            message_link,
+            destination_channel,
+        )
+        channel_label = (
+            f"@{raw.channel_username}" if raw.channel_username else raw.channel_id
+        )
+        return LiveMessageTrace(
+            session_id="telegram_test_forward",
+            message_id=raw.message_id,
+            channel_id=raw.channel_id,
+            channel_username=raw.channel_username,
+            channel_label=channel_label,
+            reply_to_msg_id=raw.reply_to_msg_id,
+            message_date=raw.date,
+            received_at=_utc_now(),
+            preview_text=(raw.text or "")[:200],
+            full_text=raw.text,
+            final_status="forwarded_for_live_test",
+        )
 
     def delete_trade_record(self, session_id: str, trade_id: str) -> bool:
         deleted = self.store.delete_trade(session_id, trade_id)
@@ -542,6 +577,7 @@ class DashboardLiveCoordinator:
                 settings=self.settings,
                 store=self.store,
                 notifier=self.notifier,
+                telegram_client=self.telegram_client,
             )
             worker = threading.Thread(
                 target=self._run_engine,
@@ -582,6 +618,9 @@ class DashboardLiveCoordinator:
                 "session": session.model_dump(mode="json"),
             }
         )
+
+    async def aclose(self) -> None:
+        await self.telegram_client.aclose()
 
     @staticmethod
     def _secret_present(secret: Any) -> bool:

@@ -38,7 +38,10 @@ def create_dashboard_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         realtime_hub.bind_loop(asyncio.get_running_loop())
-        yield
+        try:
+            yield
+        finally:
+            await live_coordinator.aclose()
 
     app = FastAPI(title="Triak Trade Dashboard", lifespan=lifespan)
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))

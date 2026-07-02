@@ -15,7 +15,7 @@ from triak_trade.dashboard.auth import DashboardAuth
 from triak_trade.dashboard.live_runtime import DashboardLiveCoordinator
 from triak_trade.dashboard.realtime import DashboardRealtimeHub
 from triak_trade.dashboard.services import DashboardService
-from triak_trade.live_trading.models import LiveSessionConfig
+from triak_trade.live_trading.models import LiveSessionConfig, build_live_session_label
 
 
 def build_router(
@@ -453,7 +453,10 @@ def build_router(
                 ),
                 use_ai=bool(payload.get("use_ai", settings.LIVE_TRADING_USE_AI)),
                 interval=str(payload.get("interval") or "1m"),
-                label=str(payload.get("label") or "") or None,
+                label=(
+                    str(payload.get("label") or "").strip()
+                    or build_live_session_label(channels[0], trading_mode)
+                ),
             )
             session = live_coordinator.start_session(config)
         except ValueError as exc:
@@ -509,10 +512,40 @@ def build_router(
     @router.delete("/api/live/sessions/{session_id}")
     async def delete_live_session_history(request: Request, session_id: str) -> JSONResponse:
         auth.require_api(request)
-        deleted = live_coordinator.delete_session_history(session_id)
+        try:
+            deleted = live_coordinator.delete_session_history(session_id)
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
         if not deleted:
             return JSONResponse({"detail": "session_not_found"}, status_code=404)
         return JSONResponse({"deleted": True, "session_id": session_id})
+
+    @router.post("/api/live/telegram/forward-message")
+    async def forward_live_telegram_message(request: Request) -> JSONResponse:
+        auth.require_api(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "invalid_payload"}, status_code=400)
+        message_link = str(payload.get("message_link") or "").strip()
+        destination_channel = str(payload.get("destination_channel") or "").strip()
+        if not message_link or not destination_channel:
+            return JSONResponse(
+                {"detail": "message_link and destination_channel are required"},
+                status_code=400,
+            )
+        try:
+            trace = await live_coordinator.forward_test_message(
+                message_link=message_link,
+                destination_channel=destination_channel,
+            )
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        except Exception as exc:
+            return JSONResponse(
+                {"detail": f"telegram_forward_failed: {type(exc).__name__}: {exc}"},
+                status_code=502,
+            )
+        return JSONResponse({"forwarded": True, "message": trace.model_dump(mode="json")})
 
     @router.get("/api/live/snapshot")
     async def get_live_snapshot(request: Request, session_id: str | None = None) -> JSONResponse:

@@ -1336,6 +1336,119 @@ pre {
   color: var(--ink);
 }
 
+.live-session-toolbar,
+.live-session-filter-cluster,
+.live-session-filter-block,
+.live-session-results-row,
+.session-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.live-session-toolbar,
+.live-session-results-row,
+.session-group-head {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.live-session-toolbar {
+  margin-bottom: 12px;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.live-session-search,
+.live-session-sort,
+.live-session-filter-block {
+  display: grid;
+  gap: 6px;
+}
+
+.live-session-search {
+  flex: 1 1 280px;
+}
+
+.live-session-filter-cluster {
+  flex: 2 1 420px;
+  align-items: end;
+}
+
+.live-session-sort {
+  flex: 0 1 220px;
+}
+
+.live-session-search label,
+.live-session-sort label,
+.live-session-filter-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.live-session-search input,
+.live-session-sort select {
+  min-height: 40px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink-strong);
+  padding: 9px 12px;
+}
+
+.live-session-search input::placeholder {
+  color: var(--muted);
+}
+
+.live-session-results-row {
+  margin: 0 0 12px;
+}
+
+.session-card-list {
+  grid-template-columns: 1fr;
+}
+
+.session-group {
+  display: grid;
+  gap: 12px;
+}
+
+.session-group + .session-group {
+  margin-top: 8px;
+}
+
+.session-group-head {
+  padding: 4px 2px 0;
+}
+
+.session-group-title {
+  display: grid;
+  gap: 4px;
+}
+
+.session-group-title h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--ink-strong);
+}
+
+.session-group-title p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.session-group-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .session-card-grid span,
 .msg-preview,
 .effect-summary,
@@ -1388,6 +1501,12 @@ pre {
   margin: 4px 0 0;
   font-size: 0.85rem;
   color: var(--muted);
+}
+
+.session-card-summaryline {
+  margin: 6px 0 0;
+  font-size: 0.82rem;
+  color: var(--muted-light);
 }
 
 .session-card-subline {
@@ -2533,6 +2652,10 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .session-group-grid {
+    grid-template-columns: 1fr;
+  }
+
   .status-card-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -2766,7 +2889,8 @@ pre {
   .live-progress-shell,
   .lt-session-detail-grid,
   .backtest-metrics,
-  .lt-action-row {
+  .lt-action-row,
+  .session-group-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2800,7 +2924,10 @@ pre {
   .message-card-meta,
   .event-line,
   .summary-row,
-  .stage-node-head {
+  .stage-node-head,
+  .live-session-toolbar,
+  .live-session-results-row,
+  .session-group-head {
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
@@ -2931,6 +3058,10 @@ pre {
   /* ── Sessions ── */
   .session-card-list {
     max-height: unset;
+  }
+
+  .live-session-filter-cluster {
+    align-items: stretch;
   }
 
   /* ── Preset cluster ── */
@@ -3133,6 +3264,11 @@ pre {
 
   .session-card-grid-compact {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .live-session-search input,
+  .live-session-sort select {
+    min-height: 42px;
   }
 
   /* ── Preset cluster wraps ── */

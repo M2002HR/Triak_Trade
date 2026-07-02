@@ -115,7 +115,7 @@
         <div>
           <p class="eyebrow">Sessions</p>
           <h2>Concurrent Trading Sessions</h2>
-          <p class="subtle panel-intro">Active session cards highlight mode, risk posture, message volume, and PnL at a glance.</p>
+          <p class="subtle panel-intro">Active session cards highlight mode, risk posture, message volume, and PnL at a glance. Times are shown in Asia/Tehran, and only stopped sessions can be deleted from dashboard history.</p>
         </div>
         <span class="subtle" id="lt-session-count">0 sessions</span>
       </div>
@@ -124,6 +124,50 @@
         <span class="counter-pill">Demo <strong id="lt-session-demo-count">0</strong></span>
         <span class="counter-pill">Live <strong id="lt-session-live-count">0</strong></span>
         <span class="counter-pill">Attention <strong id="lt-session-attention-count">0</strong></span>
+      </div>
+      <div class="live-session-toolbar" aria-label="Session filters and sorting">
+        <div class="live-session-search">
+          <label for="lt-session-search">Search Sessions</label>
+          <input
+            id="lt-session-search"
+            type="search"
+            placeholder="Label, channel, strategy, or session ID"
+            autocomplete="off"
+          >
+        </div>
+        <div class="live-session-filter-cluster">
+          <div class="live-session-filter-block">
+            <span class="live-session-filter-label">Mode</span>
+            <div class="filter-pill-row" id="lt-session-mode-filters">
+              <button type="button" class="filter-pill active" data-session-mode-filter="all">All</button>
+              <button type="button" class="filter-pill" data-session-mode-filter="demo">Demo</button>
+              <button type="button" class="filter-pill" data-session-mode-filter="live">Live</button>
+            </div>
+          </div>
+          <div class="live-session-filter-block">
+            <span class="live-session-filter-label">State</span>
+            <div class="filter-pill-row" id="lt-session-state-filters">
+              <button type="button" class="filter-pill active" data-session-state-filter="all">All</button>
+              <button type="button" class="filter-pill" data-session-state-filter="attention">Attention</button>
+              <button type="button" class="filter-pill" data-session-state-filter="running">Running</button>
+              <button type="button" class="filter-pill" data-session-state-filter="archived">Stopped</button>
+            </div>
+          </div>
+        </div>
+        <div class="live-session-sort">
+          <label for="lt-session-sort">Sort</label>
+          <select id="lt-session-sort">
+            <option value="attention">Attention First</option>
+            <option value="newest">Newest First</option>
+            <option value="name">Session Name (A-Z)</option>
+            <option value="pnl">Highest Realized PnL</option>
+            <option value="messages">Most Messages</option>
+          </select>
+        </div>
+      </div>
+      <div class="live-session-results-row">
+        <span class="subtle" id="lt-session-results-label">Showing 0 of 0 sessions</span>
+        <button type="button" class="btn-link" id="lt-session-clear-filters" style="display:none">Clear filters</button>
       </div>
       <div id="lt-sessions-list" class="session-card-list">
         <p class="empty-state">No sessions started yet.</p>
@@ -217,7 +261,7 @@
       <div class="lt-modal-actions">
         <span id="lt-session-modal-status" class="phase-pill phase-queued">Idle</span>
         <button type="button" class="btn btn-danger btn-sm" id="lt-session-modal-stop-btn">Stop Session</button>
-        <button type="button" class="btn btn-sm" id="lt-session-modal-delete-btn">Delete History</button>
+        <button type="button" class="btn btn-sm" id="lt-session-modal-delete-btn">Delete Stopped History</button>
       </div>
     </div>
     <div id="lt-session-modal-summary" class="metrics backtest-metrics"></div>

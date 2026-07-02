@@ -209,6 +209,42 @@ class TestDashboardLiveCoordinatorState:
             assert session.session_id == "ls_live_enabled"
             fake_thread.start.assert_called_once()
 
+    def test_start_session_passes_shared_telegram_client_to_engine_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings(live_enabled=True)
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+            fake_session = LiveSession(
+                session_id="ls_shared_client",
+                channels=["https://t.me/live"],
+                channel_labels=["@live"],
+                trading_mode="demo",
+                initial_balance=Decimal("0"),
+                risk_per_trade_pct=Decimal("120"),
+                strategy_key="tp_trailing_risk_managed",
+                use_ai=False,
+                interval="1m",
+            )
+            fake_engine = MagicMock()
+            fake_thread = MagicMock()
+            with (
+                patch(
+                    "triak_trade.dashboard.live_runtime.build_engine_from_config",
+                    return_value=(fake_session, fake_engine),
+                ) as build_engine,
+                patch(
+                    "triak_trade.dashboard.live_runtime.threading.Thread",
+                    return_value=fake_thread,
+                ),
+            ):
+                coord.start_session(
+                    LiveSessionConfig(
+                        channels=["https://t.me/live"],
+                        trading_mode="demo",
+                    )
+                )
+            assert build_engine.call_args.kwargs["telegram_client"] is coord.telegram_client
+
     def test_overview_aggregates_multiple_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()

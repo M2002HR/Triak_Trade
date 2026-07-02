@@ -12,6 +12,7 @@ from triak_trade.live_trading.models import (
     LiveTrade,
     LiveTradingSnapshot,
     MessageAttribution,
+    build_live_session_label,
 )
 
 
@@ -180,6 +181,21 @@ class TestLiveSessionConfig:
             assert "exactly one channel" in str(exc)
         else:
             raise AssertionError("expected validation error for multiple channels")
+
+    def test_normalizes_blank_label_to_none(self) -> None:
+        config = LiveSessionConfig(channels=["https://t.me/ch"], label="   ")
+        assert config.label is None
+
+
+class TestBuildLiveSessionLabel:
+    def test_builds_label_from_public_link(self) -> None:
+        assert (
+            build_live_session_label("https://t.me/Tofan_Trade", "live")
+            == "tofan_trade#live"
+        )
+
+    def test_builds_label_from_handle(self) -> None:
+        assert build_live_session_label("@Ghahr", "demo") == "ghahr#demo"
 
 
 class TestLiveAccountInfo:

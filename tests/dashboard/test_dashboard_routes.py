@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -142,10 +143,27 @@ def test_live_trading_page_is_english_only(tmp_path: Path) -> None:
     assert "Per-Channel Runtime" in text
     assert "Account Information" in text
     assert "Concurrent Trading Sessions" in text
+    assert "Search Sessions" in text
+    assert "Attention First" in text
+    assert "Needs Attention" not in text
     assert "Message Stream" in text
     assert "Recent Closed Trades" in text
     assert "اطلاعات" not in text
     assert "سشن" not in text
+
+
+def test_live_trading_page_renders_session_filters_and_sorting_controls(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/live-trading", headers=headers())
+    assert response.status_code == 200
+    text = response.text
+    assert 'id="lt-session-search"' in text
+    assert 'data-session-mode-filter="demo"' in text
+    assert 'data-session-state-filter="attention"' in text
+    assert 'id="lt-session-sort"' in text
+    assert "Session Name (A-Z)" in text
+    assert "Highest Realized PnL" in text
+    assert "Asia/Tehran" in text
+    assert "Delete Stopped History" in text
 
 
 def test_live_trading_page_disables_live_option_without_flag(tmp_path: Path) -> None:
@@ -173,6 +191,7 @@ def test_live_session_start_uses_submitted_balance_in_demo_mode(
     def fake_start_session(config):
         assert config.trading_mode == "demo"
         assert config.initial_balance == Decimal("0")
+        assert config.label == "chan#demo"
         return LiveSession(
             session_id="ls_test",
             channels=config.channels,
@@ -183,6 +202,7 @@ def test_live_session_start_uses_submitted_balance_in_demo_mode(
             strategy_key=config.strategy_key,
             use_ai=config.use_ai,
             interval=config.interval,
+            label=config.label,
         )
 
     monkeypatch.setattr(live_coordinator, "start_session", fake_start_session)
@@ -201,6 +221,7 @@ def test_live_session_start_uses_submitted_balance_in_demo_mode(
     )
     assert response.status_code == 202
     assert response.json()["session"]["initial_balance"] == "0"
+    assert response.json()["session"]["label"] == "chan#demo"
 
 
 def test_live_session_start_rejects_live_mode(tmp_path: Path) -> None:
@@ -234,6 +255,7 @@ def test_live_session_start_accepts_live_mode_when_flag_enabled(
         assert config.trading_mode == "live"
         assert config.initial_balance == Decimal("0")
         assert config.use_ai is True
+        assert config.label == "chan#live"
         return LiveSession(
             session_id="ls_live",
             channels=config.channels,
@@ -244,6 +266,7 @@ def test_live_session_start_accepts_live_mode_when_flag_enabled(
             strategy_key=config.strategy_key,
             use_ai=config.use_ai,
             interval=config.interval,
+            label=config.label,
         )
 
     monkeypatch.setattr(live_coordinator, "start_session", fake_start_session)
@@ -261,6 +284,7 @@ def test_live_session_start_accepts_live_mode_when_flag_enabled(
     )
     assert response.status_code == 202
     assert response.json()["session"]["trading_mode"] == "live"
+    assert response.json()["session"]["label"] == "chan#live"
 
 
 def test_live_session_start_rejects_multiple_channels(tmp_path: Path) -> None:
@@ -364,6 +388,62 @@ def test_live_session_history_delete_endpoint(tmp_path: Path, monkeypatch) -> No
     response = client_obj.delete("/api/live/sessions/ls_x", headers=headers())
     assert response.status_code == 200
     assert response.json()["deleted"] is True
+
+
+def test_live_session_history_delete_endpoint_rejects_running_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+
+    def _raise(session_id: str) -> bool:
+        raise ValueError("session_must_be_stopped")
+
+    monkeypatch.setattr(live_coordinator, "delete_session_history", _raise)
+
+    response = client_obj.delete("/api/live/sessions/ls_running", headers=headers())
+    assert response.status_code == 409
+    assert response.json()["detail"] == "session_must_be_stopped"
+
+
+def test_live_telegram_forward_message_endpoint(tmp_path: Path, monkeypatch) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+
+    async def _forward_test_message(
+        *,
+        message_link: str,
+        destination_channel: str,
+    ) -> LiveMessageTrace:
+        assert message_link == "https://t.me/kiwibot_log/14779"
+        assert destination_channel == "@kiwibot_log"
+        return LiveMessageTrace(
+            session_id="telegram_test_forward",
+            message_id=14780,
+            channel_id="@kiwibot_log",
+            channel_label="@kiwibot_log",
+            preview_text="forwarded",
+            full_text="forwarded",
+            message_date=datetime.now(timezone.utc),
+            final_status="forwarded_for_live_test",
+        )
+
+    monkeypatch.setattr(live_coordinator, "forward_test_message", _forward_test_message)
+
+    response = client_obj.post(
+        "/api/live/telegram/forward-message",
+        headers=headers(),
+        json={
+            "message_link": "https://t.me/kiwibot_log/14779",
+            "destination_channel": "@kiwibot_log",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["forwarded"] is True
+    assert payload["message"]["message_id"] == 14780
 
 
 def test_live_trade_record_delete_endpoint(tmp_path: Path, monkeypatch) -> None:

@@ -13,6 +13,28 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def build_live_session_label(channel_reference: str, trading_mode: str) -> str:
+    """Build a stable default label from channel handle + session mode."""
+
+    normalized_channel = str(channel_reference or "").strip()
+    if normalized_channel.startswith(("https://t.me/", "http://t.me/")):
+        normalized_channel = normalized_channel.split("t.me/", 1)[-1]
+    normalized_channel = normalized_channel.split("?", 1)[0].split("#", 1)[0].strip("/")
+    if "/" in normalized_channel:
+        normalized_channel = normalized_channel.rsplit("/", 1)[-1]
+    if normalized_channel.startswith("@"):
+        normalized_channel = normalized_channel[1:]
+    slug = "".join(
+        char
+        for char in normalized_channel.lower().replace(" ", "_")
+        if char.isalnum() or char in {"_", "-"}
+    )
+    mode = str(trading_mode or "demo").strip().lower() or "demo"
+    if mode not in {"demo", "live"}:
+        mode = "demo"
+    return f"{slug or 'session'}#{mode}"
+
+
 class MessageAttribution(BaseModel):
     """Tracks which Telegram message caused a change to a position."""
 
@@ -185,6 +207,7 @@ class LiveSessionConfig(BaseModel):
         if len(self.channels) != 1:
             raise ValueError("each live session must contain exactly one channel")
         self.trading_mode = mode
+        self.label = (self.label or "").strip() or None
         # Live and demo sessions both derive sizing from the connected exchange account.
         self.initial_balance = Decimal("0")
         return self

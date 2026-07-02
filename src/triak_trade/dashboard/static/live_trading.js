@@ -15,6 +15,12 @@
     selectedChannel: "",
     savedChannels: [],
     accountInfo: null,
+    sessionFilters: {
+      search: "",
+      mode: "all",
+      state: "all",
+      sort: "attention",
+    },
     reconnectDelay: 2000,
     pingInterval: null,
     refreshTimer: null,
@@ -31,6 +37,7 @@
     applyDefaults();
     setupForm();
     setupSavedChannels();
+    setupSessionControls();
     setupModals();
     connectWS();
     fetchOverview();
@@ -167,21 +174,289 @@
       return;
     }
     if (!sessions.length) {
+      updateSessionResults(0, 0);
       el.innerHTML = '<p class="empty-state">No sessions started yet.</p>';
       return;
     }
-    el.innerHTML = sessions.map(renderSessionCard).join("");
-    el.querySelectorAll("[data-session-open]").forEach((button) => {
+    const rendered = buildSessionRenderState(sessions);
+    updateSessionResults(rendered.filteredCount, rendered.totalCount);
+    if (!rendered.filteredCount) {
+      el.innerHTML = '<p class="empty-state">No sessions match the current filters.</p>';
+      bindSessionActions(el);
+      return;
+    }
+    el.innerHTML = rendered.groups.map(renderSessionGroup).join("");
+    bindSessionActions(el);
+  }
+
+  function bindSessionActions(target) {
+    target.querySelectorAll("[data-session-open]").forEach((button) => {
       button.addEventListener("click", () => {
         openSessionModal(button.dataset.sessionOpen);
       });
     });
-    el.querySelectorAll("[data-session-stop]").forEach((button) => {
+    target.querySelectorAll("[data-session-stop]").forEach((button) => {
       button.addEventListener("click", async (event) => {
         event.stopPropagation();
         await stopSession(button.dataset.sessionStop);
       });
     });
+    target.querySelectorAll("[data-session-delete]").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await deleteSessionHistory(button.dataset.sessionDelete);
+      });
+    });
+  }
+
+  function buildSessionRenderState(sessions) {
+    const totalCount = sessions.length;
+    const filtered = applySessionFilters(sessions);
+    const groups = [
+      buildSessionGroup("attention", "Needs Attention", "Sessions with errors or operator follow-up required.", filtered),
+      buildSessionGroup("running", "Running", "Healthy sessions that are actively processing or shutting down cleanly.", filtered),
+      buildSessionGroup("archived", "Stopped / Archived", "Completed, stopped, or idle sessions kept for review.", filtered),
+    ].filter((group) => group.items.length > 0);
+    return {
+      totalCount,
+      filteredCount: filtered.length,
+      groups,
+    };
+  }
+
+  function buildSessionGroup(key, title, description, sessions) {
+    return {
+      key,
+      title,
+      description,
+      items: sessions.filter((session) => sessionBucket(session) === key),
+    };
+  }
+
+  function renderSessionGroup(group) {
+    return `
+      <section class="session-group" data-session-group="${esc(group.key)}">
+        <div class="session-group-head">
+          <div class="session-group-title">
+            <h3>${esc(group.title)}</h3>
+            <p>${esc(group.description)}</p>
+          </div>
+          <span class="counter-pill">${group.items.length} session${group.items.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="session-group-grid">
+          ${group.items.map(renderSessionCard).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  function applySessionFilters(sessions) {
+    const filters = state.sessionFilters;
+    const needle = normalizeText(filters.search);
+    const filtered = sessions.filter((session) => {
+      if (filters.mode !== "all" && (session.trading_mode || "demo") !== filters.mode) {
+        return false;
+      }
+      if (filters.state !== "all" && sessionBucket(session) !== filters.state) {
+        return false;
+      }
+      if (!needle) {
+        return true;
+      }
+      return sessionSearchBlob(session).includes(needle);
+    });
+    return filtered.sort(compareSessions(filters.sort));
+  }
+
+  function compareSessions(sortKey) {
+    if (sortKey === "name") {
+      return (left, right) => {
+        const diff = sessionDisplayName(left).localeCompare(sessionDisplayName(right), "en", {
+          sensitivity: "base",
+        });
+        return diff || compareByNewest(left, right);
+      };
+    }
+    if (sortKey === "messages") {
+      return (left, right) => {
+        const diff = (right.total_messages_processed || 0) - (left.total_messages_processed || 0);
+        return diff || compareByNewest(left, right);
+      };
+    }
+    if (sortKey === "pnl") {
+      return (left, right) => {
+        const diff = parseFloat(right.total_realized_pnl || 0) - parseFloat(left.total_realized_pnl || 0);
+        return diff || compareByNewest(left, right);
+      };
+    }
+    if (sortKey === "newest") {
+      return compareByNewest;
+    }
+    return (left, right) => {
+      const bucketDiff = sessionBucketRank(left) - sessionBucketRank(right);
+      if (bucketDiff !== 0) {
+        return bucketDiff;
+      }
+      const statusDiff = sessionStatusRank(left) - sessionStatusRank(right);
+      if (statusDiff !== 0) {
+        return statusDiff;
+      }
+      return compareByNewest(left, right);
+    };
+  }
+
+  function compareByNewest(left, right) {
+    const rightTime = sessionTimestamp(right);
+    const leftTime = sessionTimestamp(left);
+    if (rightTime !== leftTime) {
+      return rightTime - leftTime;
+    }
+    return String(right.session_id || "").localeCompare(String(left.session_id || ""));
+  }
+
+  function sessionTimestamp(session) {
+    return parseTimestamp(session.last_update_at || session.started_at || session.stopped_at);
+  }
+
+  function parseTimestamp(value) {
+    if (!value) {
+      return 0;
+    }
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
+  function sessionBucket(session) {
+    if (sessionNeedsAttention(session)) {
+      return "attention";
+    }
+    if (["starting", "running", "stopping"].includes(session.status || "")) {
+      return "running";
+    }
+    return "archived";
+  }
+
+  function sessionNeedsAttention(session) {
+    return Boolean(((session.last_error || "").trim()) || (session.status || "") === "error");
+  }
+
+  function sessionBucketRank(session) {
+    const order = { attention: 0, running: 1, archived: 2 };
+    return order[sessionBucket(session)] ?? 3;
+  }
+
+  function sessionStatusRank(session) {
+    const order = { error: 0, running: 1, starting: 2, stopping: 3, stopped: 4 };
+    return order[session.status || ""] ?? 5;
+  }
+
+  function sessionDisplayName(session) {
+    return String(
+      session.label ||
+      session.channel_labels?.[0] ||
+      session.channels?.[0] ||
+      session.session_id ||
+      "session"
+    ).trim();
+  }
+
+  function sessionSearchBlob(session) {
+    return normalizeText(
+      [
+        session.label,
+        session.session_id,
+        session.strategy_key,
+        session.trading_mode,
+        session.status,
+        session.last_error,
+        ...(session.channel_labels || []),
+        ...(session.channels || []),
+      ].join(" ")
+    );
+  }
+
+  function normalizeText(value) {
+    return String(value || "").toLowerCase().trim();
+  }
+
+  function updateSessionResults(filteredCount, totalCount) {
+    setText("lt-session-results-label", `Showing ${filteredCount} of ${totalCount} sessions`);
+    const clearBtn = document.getElementById("lt-session-clear-filters");
+    if (!clearBtn) {
+      return;
+    }
+    clearBtn.style.display = hasActiveSessionFilters() ? "" : "none";
+  }
+
+  function hasActiveSessionFilters() {
+    const filters = state.sessionFilters;
+    return Boolean(
+      normalizeText(filters.search) ||
+      filters.mode !== "all" ||
+      filters.state !== "all" ||
+      filters.sort !== "attention"
+    );
+  }
+
+  function setupSessionControls() {
+    const search = document.getElementById("lt-session-search");
+    const sort = document.getElementById("lt-session-sort");
+    search?.addEventListener("input", () => {
+      state.sessionFilters.search = search.value || "";
+      rerenderSessionsFromState();
+    });
+    sort?.addEventListener("change", () => {
+      state.sessionFilters.sort = sort.value || "attention";
+      rerenderSessionsFromState();
+    });
+    document.querySelectorAll("[data-session-mode-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.sessionFilters.mode = button.dataset.sessionModeFilter || "all";
+        syncSessionFilterButtons();
+        rerenderSessionsFromState();
+      });
+    });
+    document.querySelectorAll("[data-session-state-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.sessionFilters.state = button.dataset.sessionStateFilter || "all";
+        syncSessionFilterButtons();
+        rerenderSessionsFromState();
+      });
+    });
+    document.getElementById("lt-session-clear-filters")?.addEventListener("click", () => {
+      state.sessionFilters = {
+        search: "",
+        mode: "all",
+        state: "all",
+        sort: "attention",
+      };
+      if (search) {
+        search.value = "";
+      }
+      if (sort) {
+        sort.value = "attention";
+      }
+      syncSessionFilterButtons();
+      rerenderSessionsFromState();
+    });
+    syncSessionFilterButtons();
+  }
+
+  function syncSessionFilterButtons() {
+    document.querySelectorAll("[data-session-mode-filter]").forEach((button) => {
+      const active = (button.dataset.sessionModeFilter || "all") === state.sessionFilters.mode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    document.querySelectorAll("[data-session-state-filter]").forEach((button) => {
+      const active = (button.dataset.sessionStateFilter || "all") === state.sessionFilters.state;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  function rerenderSessionsFromState() {
+    renderSessions(state.overview?.recent_sessions || []);
   }
 
   function renderSessionSummaryStrip(sessions) {
@@ -207,20 +482,31 @@
     const realizedClass = parseFloat(session.total_realized_pnl || 0) >= 0 ? "metric-pos" : "metric-neg";
     const unrealizedClass = parseFloat(session.total_unrealized_pnl || 0) >= 0 ? "metric-pos" : "metric-neg";
     const canStop = status === "running" || status === "starting";
+    const canDelete = !canStop;
     const attention = (session.last_error || "").trim();
     const messages = session.total_messages_processed || 0;
     const openPositions = session.open_positions_count || 0;
-    const identity = esc(session.label || "Session");
+    const channelLabelEscaped = esc(channelLabel);
+    const identity = esc(session.label || channelLabel || "Session");
     const startedAt = fmtDate(session.started_at);
+    const updatedAt = fmtDate(session.last_update_at || session.started_at);
+    const summaryLine = attention
+      ? "Requires operator review before trusting this session."
+      : status === "running"
+        ? "Actively receiving messages and managing positions."
+        : status === "starting"
+          ? "Bootstrapping connectors and runtime state."
+          : "Kept for audit, drill-down, and history review.";
     return `
       <article class="session-card session-card-rich ${statusTone}" data-session-open="${esc(session.session_id)}">
         <div class="session-card-head">
           <div class="session-card-title">
             <h3>${identity}</h3>
             <div class="session-card-subline">
-              <span class="session-card-handle">${esc(channelLabel)}</span>
+              <span class="session-card-handle">${channelLabelEscaped}</span>
               <span class="session-card-id">ID ${esc(session.session_id.slice(-8))}</span>
             </div>
+            <p class="session-card-summaryline">${esc(summaryLine)}</p>
           </div>
           <div class="session-card-badges">
             <span class="badge ${openCls}">${session.trading_mode === "live" ? "LIVE" : "DEMO"}</span>
@@ -242,12 +528,13 @@
         </div>
         <div class="session-card-foot">
           <span class="session-foot-item"><strong>Started</strong>${startedAt}</span>
-          <span class="session-foot-item"><strong>Mode</strong>${session.trading_mode === "live" ? "Live Execution" : "Demo Execution"}</span>
+          <span class="session-foot-item"><strong>Last Activity</strong>${updatedAt}</span>
         </div>
         ${attention ? `<p class="session-card-alert">${esc(attention)}</p>` : ""}
         <div class="session-card-actions">
           <button type="button" class="btn btn-sm" data-session-open="${esc(session.session_id)}">View Details</button>
           ${canStop ? `<button type="button" class="btn btn-danger btn-sm" data-session-stop="${esc(session.session_id)}">Stop</button>` : ""}
+          ${canDelete ? `<button type="button" class="btn btn-sm" data-session-delete="${esc(session.session_id)}">Delete History</button>` : ""}
         </div>
       </article>
     `;
@@ -302,6 +589,7 @@
     }
     const deleteBtn = document.getElementById("lt-session-modal-delete-btn");
     if (deleteBtn) {
+      deleteBtn.style.display = session.status === "running" || session.status === "starting" ? "none" : "";
       deleteBtn.onclick = () => deleteSessionHistory(session.session_id);
     }
     renderSessionSummary(detail);
@@ -742,7 +1030,11 @@
       event.preventDefault();
       await startSession();
     });
-    document.getElementById("lt-mode")?.addEventListener("change", syncBalanceControls);
+    document.getElementById("lt-mode")?.addEventListener("change", () => {
+      syncBalanceControls();
+      syncDefaultSessionLabel();
+    });
+    document.getElementById("lt-label")?.addEventListener("input", syncSessionLabelMode);
     document.getElementById("lt-refresh-account-btn")?.addEventListener("click", fetchAccount);
     document.getElementById("lt-channel-save-btn")?.addEventListener("click", async () => {
       const value = document.getElementById("lt-channel-input")?.value?.trim() || "";
@@ -752,6 +1044,7 @@
       }
       state.selectedChannel = value;
       renderSelectedChannel();
+      syncDefaultSessionLabel();
       await saveChannel(value);
     });
   }
@@ -776,6 +1069,7 @@
     updateReadinessBadge(state.bootstrap.readiness);
     renderSelectedChannel();
     syncBalanceControls();
+    syncDefaultSessionLabel({ force: true });
   }
 
   function syncModeOptions() {
@@ -840,7 +1134,7 @@
         showError(result.detail || "Failed to start session.");
         return;
       }
-      document.getElementById("lt-label").value = "";
+      syncDefaultSessionLabel({ force: true });
       await fetchOverview();
       if (result.session?.session_id) {
         await fetchSessionDetail(result.session.session_id, { silent: true });
@@ -878,7 +1172,7 @@
   }
 
   async function deleteSessionHistory(sessionId) {
-    if (!sessionId || !confirm("Delete this session and its stored history from the dashboard?")) {
+    if (!sessionId || !confirm("Delete this stopped session and its stored history from the dashboard?")) {
       return;
     }
     try {
@@ -887,7 +1181,7 @@
       });
       const result = await response.json();
       if (!response.ok || !result.deleted) {
-        showError(result.detail || "Failed to delete session history.");
+        showError(result.detail || "Failed to delete stopped session history.");
         return;
       }
       closeSessionModal();
@@ -991,6 +1285,7 @@
     document.getElementById("lt-selected-channel-remove")?.addEventListener("click", () => {
       state.selectedChannel = "";
       renderSelectedChannel();
+      syncDefaultSessionLabel({ force: true });
     });
   }
 
@@ -1016,6 +1311,7 @@
       button.addEventListener("click", () => {
         state.selectedChannel = button.dataset.savedChannel || "";
         renderSelectedChannel();
+        syncDefaultSessionLabel();
       });
     });
     target.querySelectorAll("[data-remove-channel]").forEach((button) => {
@@ -1350,6 +1646,54 @@
     if (el) {
       el.value = value;
     }
+  }
+
+  function syncDefaultSessionLabel(options = {}) {
+    const input = document.getElementById("lt-label");
+    if (!input) {
+      return;
+    }
+    const generated = buildDefaultSessionLabel(state.selectedChannel, document.getElementById("lt-mode")?.value || "demo");
+    const current = (input.value || "").trim();
+    const autoGenerated = input.dataset.autoGenerated === "true";
+    if (options.force || !current || autoGenerated) {
+      input.value = generated;
+      input.dataset.autoGenerated = generated ? "true" : "false";
+      return;
+    }
+    input.dataset.autoGenerated = current === generated ? "true" : "false";
+  }
+
+  function syncSessionLabelMode() {
+    const input = document.getElementById("lt-label");
+    if (!input) {
+      return;
+    }
+    const generated = buildDefaultSessionLabel(state.selectedChannel, document.getElementById("lt-mode")?.value || "demo");
+    input.dataset.autoGenerated = (input.value || "").trim() === generated ? "true" : "false";
+  }
+
+  function buildDefaultSessionLabel(channelReference, tradingMode) {
+    const channelSlug = extractChannelSlug(channelReference);
+    const mode = String(tradingMode || "demo").trim().toLowerCase() || "demo";
+    return `${channelSlug || "session"}#${mode === "live" ? "live" : "demo"}`;
+  }
+
+  function extractChannelSlug(channelReference) {
+    let normalized = String(channelReference || "").trim();
+    if (!normalized) {
+      return "session";
+    }
+    normalized = normalized.replace(/^https?:\/\/t\.me\//i, "");
+    normalized = normalized.split("?", 1)[0].split("#", 1)[0].replace(/^\/+|\/+$/g, "");
+    if (normalized.includes("/")) {
+      normalized = normalized.split("/").pop() || normalized;
+    }
+    if (normalized.startsWith("@")) {
+      normalized = normalized.slice(1);
+    }
+    normalized = normalized.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_-]/g, "");
+    return normalized || "session";
   }
 
   function setText(id, value) {
