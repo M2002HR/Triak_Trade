@@ -1,7 +1,29 @@
 # Triak_Trade
 
-Triak_Trade is a modular Telegram signal intelligence, backtesting, demo-trading, and monitoring system foundation.
-AI classification is designed to run through Ajil Unified AI Gateway; deterministic regex parsing remains fallback/safety.
+Triak_Trade is a modular Telegram signal intelligence platform focused on safe parsing, AI-assisted classification, backtesting, demo/live session monitoring, and operator visibility.
+
+The project follows a few hard rules:
+- Runtime configuration comes only from the root `.env.local`.
+- Financial values use `Decimal`, never `float`.
+- External services stay behind interfaces/adapters.
+- Real integrations are always guard-gated.
+- Backtesting is simulation-only and never places real trades.
+
+## What Is In The Repo
+
+- `src/triak_trade/agents`: channel state, consolidation, and message-driven actions.
+- `src/triak_trade/ai`: Ajil Unified AI Gateway client, runtime helpers, prompts, and AI classifier.
+- `src/triak_trade/backtesting`: fixture backtests, real Telegram backtest pipeline, simulator, scoring, and report storage.
+- `src/triak_trade/dashboard`: local FastAPI/Jinja dashboard for backtests, reports, settings, and live/demo session monitoring.
+- `src/triak_trade/exchange/toobit`: public market data access plus signed/demo-safe trading adapters.
+- `src/triak_trade/live_trading`: session state and execution orchestration for demo/live workflows.
+- `src/triak_trade/market_data`: Binance public, Toobit public, composite provider, and candle cache service.
+- `src/triak_trade/observability`: processing audit, redaction, event bus, and Telegram log-channel reporting.
+- `src/triak_trade/parsing`: normalizer, regex parser, and validator.
+- `src/triak_trade/telegram`: Telethon-backed client interfaces, history sync, and live listener building blocks.
+- `src/triak_trade/verification`: safe and guarded real verification checks with redacted reports.
+- `docs/`: English architecture and operations notes for the current codebase.
+- `external/Ajil_Unified_AI_Gateway`: git submodule for the AI gateway dependency.
 
 ## Install
 
@@ -11,149 +33,180 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-## Environment
+## Configuration
 
 ```bash
 cp .env.example .env.local
 ```
 
-`/.env.local` in project root is the single runtime config source. Do not create `.env` inside `external/Ajil_Unified_AI_Gateway`.
-If your network needs a proxy, set root env keys such as `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `UAG_PROXY_ENABLED`, and `UAG_PROXY_URL`.
+Important rules:
+- Keep runtime secrets only in the root `.env.local`.
+- Do not create a separate `.env` inside `external/Ajil_Unified_AI_Gateway`.
+- Do not commit `.sessions/` or `*.session*`.
 
-## Start Full Stack
+Useful defaults:
+- The local dashboard binds to `http://127.0.0.1:8088`.
+- The local Ajil gateway binds to `http://127.0.0.1:8090`.
+- Real backtesting is disabled until its guards are explicitly enabled.
+- Live trading sessions are blocked until `LIVE_TRADING_LIVE_MODE_ENABLED=true`.
+
+## Start The Local Stack
 
 ```bash
 docker compose up --build
 ```
 
-Or use the helper:
+If Docker previously left stale project resources behind, use:
 
 ```bash
 ./scripts/stack_up.sh
 ```
 
-If Docker was interrupted previously and `docker compose up --build` reports a
-stale network/endpoint error such as `network ... does not exist`, prefer the
-helper above. It safely runs `docker compose down --remove-orphans` for this
-project before recreating the stack, and forces plain BuildKit progress so the
-longer Python package install step does not look frozen.
+That helper:
+- Ensures `.env -> .env.local` exists for local compose substitution.
+- Runs `docker compose down --remove-orphans` for this project.
+- Restarts the stack with plain BuildKit progress.
 
-This single command starts:
+The compose stack starts:
 - MySQL
 - Redis
-- Ajil AI gateway on `http://127.0.0.1:8090`
-- Dashboard on `http://127.0.0.1:8088`
+- Ajil Unified AI Gateway
+- Triak dashboard
 
-The compose stack reads runtime secrets only from root `.env.local`.
-Local `docker compose` env substitution is wired through a gitignored `.env -> .env.local` symlink.
-Do not create `.env` inside `external/Ajil_Unified_AI_Gateway`.
+## CLI Surface
 
-## Commands
+Core:
 
 ```bash
 triak-trade version
 triak-trade health
 triak-trade config-check
+triak-trade db-check
 triak-trade parse-message "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000"
 triak-trade agent-dry-run
+```
+
+AI gateway:
+
+```bash
+triak-trade ai-classify-dry-run "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000"
 triak-trade ai-gateway-check
 triak-trade ai-gateway-start
 triak-trade ai-gateway-status
-triak-trade ai-classify-dry-run "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000"
+triak-trade ai-gateway-stop
+triak-trade ai-gateway-restart
+triak-trade ai-gateway-logs
+```
+
+Telegram and market data:
+
+```bash
 triak-trade telegram-check
 triak-trade telegram-history-dry-run https://t.me/Tofan_Trade --limit 5
 triak-trade telegram-tofan-dry-run --limit 5
 triak-trade market-data-dry-run BTCUSDT --interval 1m --minutes 5
 triak-trade toobit-klines-dry-run BTCUSDT --interval 1m --minutes 5
-triak-trade admin-bot-smoke-test
-triak-trade run-admin-bot --once
-triak-trade admin-bot-status
-triak-trade admin-bot-logs --lines 50
-triak-trade log-channel-check
-triak-trade log-channel-format-dry-run
-triak-trade process-message-audit-dry-run
-triak-trade dashboard-check
-triak-trade dashboard-smoke-test
+triak-trade binance-public-klines-dry-run BTCUSDT --interval 1m --minutes 5
+triak-trade toobit-check
+triak-trade toobit-public-check
+triak-trade toobit-signed-check
+triak-trade toobit-order-test --symbol BTCUSDT --side BUY --type LIMIT --quantity 0.001 --price 10000
+```
+
+Backtesting:
+
+```bash
+triak-trade backtest-fixture
+triak-trade backtest-dry-run --channel https://t.me/Tofan_Trade --from 2026-06-01 --to 2026-06-02 --interval 1m
 triak-trade real-backtest-check
 triak-trade real-backtest-run --channel https://t.me/Tofan_Trade --hours 24 --interval 1m
 triak-trade real-backtest-tofan --hours 24
 triak-trade backtest-show-latest
-pytest
-ruff check .
-mypy src
 ```
+
+Observability and dashboard:
+
+```bash
+triak-trade log-channel-check
+triak-trade log-channel-format-dry-run
+triak-trade log-channel-send-test --real
+triak-trade process-message-audit-dry-run
+triak-trade dashboard-check
+triak-trade run-dashboard
+triak-trade dashboard-start
+triak-trade dashboard-status
+triak-trade dashboard-stop
+triak-trade dashboard-restart
+triak-trade dashboard-logs --lines 100
+triak-trade dashboard-smoke-test
+triak-trade dashboard-token-hint
+```
+
+Verification:
+
+```bash
+triak-trade verify-system
+triak-trade verify-system --mode safe --write-report
+triak-trade verify-real
+triak-trade show-last-report
+```
+
+## Real-Integration Guards
+
+These checks are intentionally strict:
+
+- AI gateway integration: `RUN_AI_GATEWAY_INTEGRATION_TESTS=1`
+- Telegram integration: `RUN_TELEGRAM_INTEGRATION_TESTS=1`
+- Binance public historical market data: `RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS=1`
+- Toobit public market data: `RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1`
+- Toobit signed checks: `RUN_TOOBIT_SIGNED_INTEGRATION_TESTS=1`
+- Spot order test: `RUN_TOOBIT_ORDERTEST_INTEGRATION_TESTS=1`
+- Real backtest pipeline: `REAL_BACKTEST_ENABLED=true` plus the required real-integration guards above
+- Telegram log-channel sending: `TELEGRAM_LOG_CHANNEL_ENABLED=true`, `PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true`, and `RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1`
+- Verification real smoke checks: `RUN_SYSTEM_REAL_SMOKE_TESTS=1`
+- Live session unlock: `LIVE_TRADING_LIVE_MODE_ENABLED=true`
+
+## Backtesting Notes
+
+- The fixture path uses deterministic in-memory messages and candles.
+- The real pipeline is driven by `RealBacktestRunner`.
+- Real backtests read Telegram history, classify messages, fetch public market data, simulate trades, and write JSON/Markdown reports to `runtime/reports/backtests`.
+- The simulator supports conservative and optimistic fill policy comparisons.
+- Fees are modeled via `BACKTEST_FEE_RATE_PCT`.
+- Strategy loading comes from `config/strategies.yaml` with safe fallback defaults.
+
+Known behavior worth keeping in mind:
+- `real-backtest-check` currently creates the report/cache directories as a side effect.
+- Real backtest readiness currently requires multiple integration-style guard flags, not just one runtime flag.
+- The live backtest dashboard still uses a throttled replay model rather than a fully incremental simulator.
+
+## Dashboard And Live/Demo Workflows
+
+- The dashboard is local-first and server-rendered with FastAPI, Jinja, and WebSockets.
+- Dashboard auth uses `DASHBOARD_ADMIN_TOKEN` from the root `.env.local`.
+- Auto Mode and Kill Switch are persisted as runtime state, not a replacement for live-execution gating.
+- Demo sessions use connected Toobit account state and demo/private symbol rules such as `TBV_...` depending on exchange support.
+- Live sessions remain blocked unless `LIVE_TRADING_LIVE_MODE_ENABLED=true`.
 
 ## Ajil Gateway
 
-- Submodule location: `external/Ajil_Unified_AI_Gateway`
-- Docker Compose builds the gateway from Ajil's own Dockerfile and injects runtime env from root `.env.local`.
-- Local host runtime is started from Triak and must read only root `.env.local` via `UAG_ENV_FILE`.
-- `run-dashboard` auto-ensures the local gateway when `AI_GATEWAY_ENABLED=true` and the gateway base URL is local.
-- Do not create `.env` inside `external/Ajil_Unified_AI_Gateway`.
-- Unit tests use fakes/mocks; no real gateway required.
-- Real gateway tests must be explicitly guarded (`RUN_AI_GATEWAY_INTEGRATION_TESTS=1` with `AI_GATEWAY_ENABLED=true`).
-- First future real-world evaluation channel is `https://t.me/Tofan_Trade` (not hard-coded in parser logic).
-- If outbound networking is unstable, use root env keys such as `UAG_PROXY_ENABLED`, `UAG_PROXY_URL`, `UAG_BUILD_HTTP_PROXY`, and `UAG_BUILD_HTTPS_PROXY`.
+- The Ajil gateway lives in the git submodule at `external/Ajil_Unified_AI_Gateway`.
+- Compose builds it from the submodule and injects runtime env from the root `.env.local`.
+- Local host runtime helpers also read only the root `.env.local`.
+- Unit tests use fakes/mocks; real gateway access is optional and guard-gated.
 
-## Telegram Collection
+## Verification Before Finishing Work
 
-- Telethon integration is behind `TelegramClientInterface`; unit tests use fakes only.
-- `../Broccoli_Bot` may be used as setup/session-pattern reference only.
-- Real Telegram tests are guarded by `RUN_TELEGRAM_INTEGRATION_TESTS=1`.
-- Telethon sessions are local-only (`.sessions/`, `*.session*`) and must never be committed.
-- `https://t.me/Tofan_Trade` is an integration target, not a hard-coded strategy rule.
+Project policy requires:
 
-## Market Data
+```bash
+ruff check .
+mypy src
+pytest
+```
 
-- Market data is behind `MarketDataProvider` interface.
-- First provider is Toobit public klines (`/quote/v1/klines` by default, path configurable).
-- No signed/private Toobit endpoints are used in this module.
-- Unit tests use fakes/mocks only.
-- Real Toobit checks are optional and guarded by `RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1`.
-- Candle cache service stores/fetches OHLCV through repository for future backtesting.
+When a task touches a runtime interface, also run the smallest safe dry-run or smoke command for that module and inspect its output.
 
-## Toobit Signed Safety Layer
+## Documentation
 
-- Signed Toobit client exists for safe checks and Spot `orderTest` only.
-- Unit tests use mocks only; real signed checks are guard-gated.
-- Live trading is env-gated via `LIVE_TRADING_LIVE_MODE_ENABLED=true` in root `.env.local`.
-- Withdrawal endpoints are forbidden and not implemented.
-- Runtime secrets come only from root `.env.local`.
-
-## Backtesting
-
-- Backtest engine is available via CLI (`backtest-fixture`, `backtest-dry-run`).
-- Real backtest pipeline uses guarded real Telegram history plus Toobit public klines only.
-- `triak-trade real-backtest-check` shows readiness without printing secrets.
-- `triak-trade real-backtest-run` and `real-backtest-tofan` write JSON/Markdown reports under `runtime/reports/backtests`.
-- Dashboard `/backtests` and `/reports` surface the same real reports.
-- Backtest is simulation-only and never executes trades.
-- AI classification is target architecture; regex remains fallback/safety.
-- `https://t.me/Tofan_Trade` is a guarded real-world test target, not a hard-coded rule.
-
-## Verification Pack
-
-- Run `triak-trade verify-system` for safe local verification.
-- Run `triak-trade verify-system --mode safe --write-report` to generate JSON/Markdown reports.
-- Run `triak-trade verify-real` only after setting `RUN_SYSTEM_REAL_SMOKE_TESTS=1` plus specific service guards.
-- Use `triak-trade show-last-report` to inspect the latest generated report.
-- Reports redact secrets and real checks never execute live trades.
-
-## Processing Audit And Log Channel
-
-- Processing audit events capture per-message classification, state transition, proposed action, timing, and safe debug notes.
-- Telegram log-channel reports are English and target `@triak_logs` by default.
-- Real log-channel sending is disabled by default.
-- Enable real log-channel sending only with `TELEGRAM_LOG_CHANNEL_ENABLED=true`, `PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true`, and `RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1`.
-- `triak-trade log-channel-format-dry-run` and `triak-trade process-message-audit-dry-run` never call Telegram.
-- No secrets, account data, live orders, or trade execution are included in processing audit reports.
-
-## Management Dashboard
-
-- FastAPI/Jinja dashboard runs locally at `http://127.0.0.1:8088` by default.
-- In Docker Compose, the dashboard waits for MySQL, Redis, Ajil, runs migrations, and then starts automatically.
-- Auth uses `DASHBOARD_ADMIN_TOKEN`; the token is stored only in root `.env.local`.
-- Use `triak-trade dashboard-check` for safe non-secret config status.
-- Use `triak-trade dashboard-start`, `dashboard-status`, `dashboard-logs`, and `dashboard-stop` for runtime control.
-- The dashboard now includes a live-trading workspace for multi-session monitoring with per-session message impact tracing, active/inactive signal state, exchange snapshots, and dashboard-side history cleanup. Demo sessions use real Toobit public endpoints plus the production private futures API with `TBV_...` symbols and `business_type=VIRTUAL`, so exchange balances, positions, and order history come from the real demo account. Live/demo sizing no longer uses a manual initial balance override; both modes size from the connected Toobit account state. Entry-less open signals are resolved as market-style entries from the current mark price. Live protection orders now use Toobit v1 futures order management: stop-loss stays on `STOP_PROFIT_LOSS`, while each take-profit ladder step is placed as its own close order and re-armed after exchange fills. Live sessions remain env-gated behind `LIVE_TRADING_LIVE_MODE_ENABLED=true` in root `.env.local`.
-- Auto Mode and Kill Switch are runtime state toggles only; they do not replace explicit live-execution gating.
+Start with [docs/README.md](docs/README.md). The `docs/` folder is now the English source of truth for the architecture and known issues of this repository itself. Documentation inside `external/Ajil_Unified_AI_Gateway` belongs to the submodule and is not treated as Triak_Trade-owned docs.

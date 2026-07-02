@@ -1,52 +1,41 @@
-# مستندات Triak_Trade
+# Triak_Trade Documentation
 
-این پوشه مستندات فنی پروژه‌ی **Triak_Trade** است، با تمرکز ویژه روی **موتور بک‌تست (Backtesting)**.
-هدف این است که معماری، جزئیات پیاده‌سازی، تصمیم‌های طراحی، و نقاط ضعف/باگ‌های احتمالی به‌صورت دقیق و قابل‌ردیابی مستند شوند.
+This directory contains repository-owned technical documentation for Triak_Trade, with extra depth around backtesting, reporting, and runtime controls.
 
-> نسخه‌ی پایه‌ی کد در زمان نگارش: `triak-trade 0.1.0` — تاریخ بررسی: ۲۰۲۶/۰۶/۱۹.
-> تمام ارجاع‌ها به‌صورت `path:line` آمده‌اند تا مستقیماً قابل‌بازبینی باشند.
+Scope:
+- These files document the code that lives in this repository.
+- The Ajil gateway submodule keeps its own upstream documentation under `external/Ajil_Unified_AI_Gateway/`.
 
-## فهرست
+## Reading Order
 
-| فایل | موضوع |
+| File | Focus |
 |------|-------|
-| [01-overview.md](01-overview.md) | نمای کلی پروژه، ماژول‌ها و قابلیت‌ها |
-| [02-backtesting-architecture.md](02-backtesting-architecture.md) | معماری کلی بک‌تست، جریان داده، اجزا |
-| [03-simulator-internals.md](03-simulator-internals.md) | جزئیات شبیه‌ساز معاملات، PnL، fill، snapshot |
-| [04-real-backtest-pipeline.md](04-real-backtest-pipeline.md) | خط لوله‌ی بک‌تست واقعی (Telegram + AI + Market Data) |
-| [05-scoring-and-reports.md](05-scoring-and-reports.md) | امتیازدهی کانال، متریک‌ها و گزارش‌ها |
-| [06-strategies.md](06-strategies.md) | استراتژی‌های مدیریت معامله |
-| [07-data-and-config.md](07-data-and-config.md) | داده‌ی بازار، تنظیمات و گاردهای امنیتی |
-| [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md) | **باگ‌ها، نقاط ضعف و پیشنهادهای بهبود (مهم)** |
+| [01-overview.md](01-overview.md) | Product shape, module map, and user-facing capabilities |
+| [02-backtesting-architecture.md](02-backtesting-architecture.md) | Backtesting architecture and execution paths |
+| [03-simulator-internals.md](03-simulator-internals.md) | Simulator behavior, fills, sizing, and PnL rules |
+| [04-real-backtest-pipeline.md](04-real-backtest-pipeline.md) | Guarded Telegram + AI + market-data pipeline |
+| [05-scoring-and-reports.md](05-scoring-and-reports.md) | Metrics, scoring, summaries, and report artifacts |
+| [06-strategies.md](06-strategies.md) | Stateless trade-management strategies |
+| [07-data-and-config.md](07-data-and-config.md) | Market data, settings, and safety gates |
+| [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md) | Current risks, behavior gaps, and follow-up work |
 
-## خلاصه‌ی اجرایی (TL;DR)
+## Current Intent
 
-Triak_Trade یک پلتفرم ماژولار برای **هوش سیگنال تلگرام + بک‌تست + دمو-تریدینگ + مانیتورینگ** است.
-workspace جدید دمو-تریدینگ/لایو-مانیتورینگ در داشبورد
-برای sessionهای demo از endpointهای عمومی واقعی Toobit و نمادهای demo از جنس `TBV_...` استفاده می‌کند.
-برای endpointهای خصوصی هم همان production API واقعی Toobit با `TBV_...` و `business_type=VIRTUAL` صدا زده می‌شود، بنابراین balance/position/history از خود اکانت دمو Toobit می‌آید.
-در لایو/دمو، استاپ‌لاس روی خود Toobit به‌صورت `STOP_PROFIT_LOSS` ثبت می‌شود و از endpointهای واقعی `openOrders` و `order` واکشی/کنسل می‌شود.
-اگر سیگنال open ورودیِ صریح نداشته باشد، ورودی به‌صورت market-style از قیمت لحظه‌ای resolve می‌شود.
-برای targetها هم هر پله به‌صورت close order جداگانه روی Toobit ثبت و بعد از هر fill دوباره re-arm می‌شود.
-sessionهای live فقط با `LIVE_TRADING_LIVE_MODE_ENABLED=true` در `.env.local` باز می‌شوند.
+Triak_Trade is a modular platform for:
+- Telegram signal parsing and classification
+- Backtesting and report generation
+- Demo/live session monitoring through the dashboard
+- Safe operator observability and verification
 
-موتور بک‌تست از دو مسیر تشکیل شده:
+Key architectural rules reflected in the docs:
+- `Decimal` for financial logic
+- Adapters/interfaces around external services
+- Guard-gated real integrations
+- Simulation-only backtesting
+- Root `.env.local` as the single runtime configuration source
 
-1. **بک‌تست fixture/داخلی** (`BacktestEngine` + `BacktestSimulator`) — قطعی، بدون شبکه، برای تست و توسعه.
-2. **بک‌تست واقعی** (`RealBacktestRunner`) — تاریخچه‌ی واقعی تلگرام (Telethon) + طبقه‌بندی AI (Ajil Gateway) با فالبک regex + کندل‌های عمومی Binance/Toobit. خروجی، شبیه‌سازی رویدادمحور + گزارش + امتیاز کانال است.
+## Notes About Accuracy
 
-نکات کلیدی طراحی:
-- همه‌ی مقادیر مالی با `Decimal` (نه `float`).
-- سرویس‌های بیرونی پشت interface/adapter قرار دارند و در تست‌ها fake می‌شوند.
-- بک‌تست «simulation-only» است و هرگز نباید سفارش واقعی ثبت کند.
-
-**رفع‌شده در این بازبینی** (با تست؛ تفصیل در فایل ۰۸):
-- ✅ **B2** — یکپارچگی `total_pnl` با لیست تریدها (انتخاب واحد `primary_trades`).
-- ✅ **B3 (کارمزد)** — `BACKTEST_FEE_RATE_PCT` + کسر کارمزد از PnL/balance (اسلیپیج/فاندینگ هنوز باز).
-- ✅ **B6** — مخرج `win_rate` فقط روی تریدهای filled.
-- ✅ **B10** — warning صریح `account_blown_up=true`.
-
-**یافته‌های باز (هنوز پیشنهادی):**
-- **B1** — مشکل **کارایی O(N²)** در شبیه‌سازی زنده‌ی هر پیام (`_update_live_simulation_state`).
-- **B4** — **تطبیق نماد ناهمگون** (`==` در مقابل `same_market_symbol`) در `_first_candle_open_after`.
-- **B7/B9** — نبود سقف اکسپوژر تجمعی؛ drawdown بر اساس ترتیب لیست نه زمان.
+- These docs were updated against the current repository state on `2026-07-02`.
+- They intentionally prefer present behavior over aspirational behavior.
+- Known mismatches and open risks are tracked explicitly in [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md).

@@ -1,128 +1,75 @@
-# ۰۳ — جزئیات شبیه‌ساز معاملات (`simulator.py`)
+# 03 - Simulator Internals
 
-`BacktestSimulator` قلب قطعی و بدون شبکه‌ی بک‌تست است. رویدادمحور (event-driven) است: لیست `BacktestEvent` و لیست `Candle` می‌گیرد و لیست `SimulatedTrade` + موجودی نهایی + (اختیاری) snapshotها برمی‌گرداند.
+`BacktestSimulator` is the deterministic trade-simulation core. It accepts normalized `BacktestEvent` inputs plus candle data and returns simulated trades, balance outcomes, and optionally snapshots.
 
-## امضای ورودی
+## Main Responsibilities
 
-`_simulate_internal` (`simulator.py:166`) پارامترهای کلیدی:
-- `events`, `candles`, `initial_balance`, `risk_per_trade_pct`, `fill_policy`
-- `active_signal_hours` — انقضای سیگنال باز.
-- `max_effective_leverage` — سقف اهرم (None = مدل اهرم خاموش، سایزینگ legacy).
-- `min_allocation_pct`, `max_allocation_pct` — کف/سقف درصد درگیری سرمایه.
-- `default_stop_pct` — استاپ مصنوعی وقتی نه SL هست نه strategy.
-- `strategy` — `TradeStrategy` برای استاپ/TP مصنوعی و مدیریت partial.
-- `snapshot_interval` — برای snapshotهای دوره‌ای (داشبورد زنده).
+- Find entries from message-derived trade intent
+- Size positions
+- Apply stop-loss and take-profit logic
+- Handle manual close, cancel, and update events
+- Track partial exits
+- Model fees
+- Produce consistent final trade records
 
-دو API عمومی: `simulate(...)` (بدون snapshot) و `simulate_with_snapshots(...)`.
+## Entry Rules
 
-## حلقه‌ی اصلی
+Current entry behavior includes:
+- `MARKET`: first candle open at or after the signal timestamp
+- `LIMIT`: fill when the target price is touched
+- `RANGE`: fill at the midpoint once the range is touched
 
-برای هر event (به‌ترتیب timestamp):
+Known caveat:
+- `RANGE` entries still fill at midpoint, which can be mildly optimistic if only one edge was touched.
 
-1. **پردازش کندل‌ها تا زمان event** (`_process_candles_until`، stop_at=event.timestamp): همه‌ی کندل‌هایی که `close_time ≤ event.timestamp` هستند روی پوزیشن‌های باز اعمال می‌شوند (SL/TP/expiry).
-2. **اعمال خود event** بسته به `parsed.action`:
-   - `OPEN` → باز کردن پوزیشن جدید (سایزینگ، استاپ مصنوعی، فیلتر TP).
-   - `CLOSE` + `close_all` → بستن همه‌ی پوزیشن‌ها.
-   - follow-up روی `related_signal_id`: `CANCEL`, `CLOSE` (با `close_fraction`), `UPDATE_SL` (یا move-to-entry), `UPDATE_TP`.
-3. در حالت snapshot، بعد از هر event یک snapshot «message» ثبت می‌شود.
+## Position Sizing
 
-در پایان: کندل‌های باقیمانده پردازش، سپس هر پوزیشن باز با وضعیت `open_until_end`/`partial_tp_open_until_end` در آخرین قیمت بسته می‌شود (`simulator.py:523`).
+The simulator uses a leverage-aware allocation model. Important settings include:
+- `BACKTEST_DEFAULT_RISK_PER_TRADE_PCT`
+- `BACKTEST_MIN_ALLOCATION_PCT`
+- `BACKTEST_MAX_ALLOCATION_PCT`
+- `BACKTEST_MAX_EFFECTIVE_LEVERAGE`
+- `BACKTEST_DEFAULT_SIGNAL_LEVERAGE`
 
-## ورود (Entry) — `_find_entry_execution` (`simulator.py:542`)
+This value is better thought of as a sizing factor than a literal direct balance percentage.
 
-- فقط کندل‌هایی با `same_market_symbol(c.symbol, symbol)` و `open_time ≥ signal_time` در نظر گرفته می‌شوند → **بدون look-ahead** نسبت به زمان سیگنال.
-- `EntryType.MARKET` → فیل در `open` اولین کندل بعد از سیگنال.
-- `RANGE` (entry_low و entry_high): اگر کندلی `low ≤ entry_high و high ≥ entry_low` را لمس کند → فیل در **midpoint** بازه. (تصمیم: ساده‌سازی؛ کمی خوش‌بینانه — فایل ۰۸ B5.)
-- `LIMIT` (فقط entry_low): اگر `low ≤ entry_low ≤ high` → فیل در `entry_low`.
-- اگر هیچ کندلی لمس نکرد → `(None, None)` → ترید `not_filled` ثبت می‌شود (`simulator.py:238`).
+## Synthetic Protection
 
-## سایزینگ پوزیشن (`simulator.py:271`–367)
+If a signal has no explicit stop-loss:
+- The strategy can provide a synthetic stop.
+- Otherwise a default stop percentage is used.
 
-```
-allocation_pct    = clamp(risk_per_trade_pct / leverage, min_allocation_pct, max_allocation_pct)
-allocation_amount = balance * allocation_pct / 100
-qty               = (allocation_amount * leverage) / entry_price
-```
+The current default strategy caps worst-case synthetic-stop loss as a percent of balance at entry, which is more realistic than the earlier extremely distant synthetic-stop approach.
 
-- اگر `balance ≤ 0` → ورود جدید رد می‌شود.
-- اگر `allocation_amount ≤ 0` یا `stop_distance ≤ 0` → رد.
-- **استاپ مؤثر** (`effective_stop`):
-  1. `parsed.stop_loss` اگر موجود.
-  2. وگرنه `strategy.get_synthetic_stop(...)`.
-  3. وگرنه درصد ثابت `default_stop_pct` از entry.
-- **factor / leverage**: `risk_per_trade_pct` دیگر «درصد مستقیم تخصیص» نیست؛ یک factor است. نمونه:
-  - factor=`150`, leverage=`50` → allocation=`3%`
-  - factor=`150`, leverage=`20` → allocation=`7.5%`
-  - leverage پایین با `max_allocation_pct` cap می‌شود
-  - leverage خیلی بالا با `min_allocation_pct` floor می‌شود
-- **اهرم**: اگر `max_effective_leverage` تنظیم شده باشد، `effective_leverage = clamp(signal_leverage, 1, max)` و سپس check سطح portfolio margin اعمال می‌شود.
-- **فیلتر TP**: TPهایی که در سمت اشتباه entry هستند حذف می‌شوند (long: tp>entry, short: tp<entry). اگر همه حذف شدند و strategy هست → TP مصنوعی R-multiple.
+## Take-Profit Handling
 
-> درصد درگیری سرمایه روی موجودی لحظه‌ای compound می‌شود و برای هر سیگنال مجدداً محاسبه می‌شود.
+The simulator supports:
+- explicit TP ladders from the signal
+- synthetic fallback TP ladders from strategy rules
+- partial exits per TP
+- breakeven or trailing stop adjustment after TP hits
 
-## اعمال کندل به پوزیشن — `_apply_candle_to_position` (`simulator.py:720`)
+Conservative and optimistic fills differ mainly when the same candle can touch both SL and TP.
 
-محاسبه‌ی برخوردها:
-- `_hit_sl`: short → `high ≥ stop`؛ long → `low ≤ stop` (`simulator.py:1201`).
-- `_hit_tp`: short → `low ≤ tp`؛ long → `high ≥ tp`.
+## Fees
 
-سپس:
-- **SL و TP در یک کندل**:
-  - `CONSERVATIVE`: فرض بدترین حالت → SL اول، کل پوزیشن در stop بسته، status `sl_hit_same_candle`.
-  - `OPTIMISTIC`: TP(ها) اول اعمال، اگر باقیمانده ماند SL.
-- فقط TP: اعمال TP hits؛ اگر باقیمانده صفر شد → status tp.
-- فقط SL: بستن کامل در stop.
+Fees are now modeled through `BACKTEST_FEE_RATE_PCT`:
+- entry fee is charged on entry notional
+- exit fee is charged on each full or partial exit
+- trade `pnl` is net of fees
 
-این تفاوت conservative/optimistic فقط در «کندل‌های هم‌زمان SL+TP» اثر دارد؛ در بقیه‌ی موارد یکسان است. (پیامد در فایل ۰۸ B2.)
+This means balances, scores, and equity curves all reflect fee-aware net results.
 
-## برداشت سود پلکانی — `_apply_take_profit_hits` (`simulator.py:782`)
+## End-Of-Run Closing
 
-برای هر TP لمس‌شده:
-- اگر strategy هست: `get_target_hit_action(...)` تعیین می‌کند چه کسری بسته شود و آیا استاپ به entry/سطح جدید منتقل شود (risk-free / trailing).
-- اگر strategy نیست: تقسیم مساوی بین TPهای باقیمانده (`1/remaining`).
-- `_close_fraction_of_position` کسر مشخص را در قیمت TP می‌بندد، `realized_pnl` را جمع می‌کند، `remaining_quantity` را کم می‌کند، و `targets_hit++`.
+Open positions can be closed at the end of the candle series with statuses such as:
+- `open_until_end`
+- `partial_tp_open_until_end`
 
-## محاسبه‌ی PnL — `_calculate_pnl` (`simulator.py:1213`)
+This keeps reporting complete even when a signal never reaches a hard terminal condition during the available candle window.
 
-```
-direction = -1 if short else +1
-pnl = (exit_price - entry_price) * quantity * direction
-```
+## Current Risks
 
-- PnL **دلاری** مستقل از اهرم است (درست).
-- در `_finalize_position` (`simulator.py:921`):
-  `fees = max(realized_fees, 0)`؛ `net_pnl = realized_pnl - fees`
-  `margin = (entry*original_qty) / leverage`
-  `pnl_pct = net_pnl / margin * 100` → بازده‌ی روی margin (اهرم درصد را تقویت می‌کند).
-- `trade.pnl` اکنون **net از کارمزد** است و `trade.fees` کارمزد کل را جدا گزارش می‌کند.
-
-> ✅ B3 (کارمزد) رفع شد: با تنظیم `BACKTEST_FEE_RATE_PCT` (پیش‌فرض `0`)، در باز کردن `entry_fee = entry*qty*rate/100` و در هر بستن `exit_fee = exit*qty*rate/100` به `realized_fees` افزوده و در `_finalize_position` از PnL کسر می‌شود. چون balance از `trade.pnl` ساخته می‌شود، کارمزد به‌طور سازگار در balance/total_pnl/scoring/drawdown اعمال می‌شود.
-> ⚠️ **اسلیپیج و فاندینگ** هنوز مدل نشده‌اند (فایل ۰۸ B3 — باقی‌مانده).
-
-## وضعیت‌های ترید (status)
-
-نمونه‌ها: `tp_hit`, `tp_hit_same_candle`, `sl_hit`, `sl_hit_same_candle`, `partial_tp_then_sl`, `partial_tp_complete`, `partial_close_then_tp/sl`, `expired`, `partial_tp_expired`, `cancelled`, `partial_tp_then_cancel`, `manual_close`, `manual_partial_close`, `open_until_end`, `partial_tp_open_until_end`, `not_filled`.
-
-## انقضا — `_expire_position_if_needed` (`simulator.py:699`)
-
-اگر `active_signal_hours` تنظیم شده و `candle.open_time ≥ entry_time + hours` → بستن کامل در `candle.open` با status `expired`.
-
-## بستن دستی / کنسل
-
-- `CANCEL`: کل باقیمانده در `position.entry_price` بسته می‌شود (≈ خروج breakeven) (`simulator.py:409`).
-- `CLOSE` (follow-up): قیمت = اولین `open` کندل بعد از event، با fallback به `entry_price`. کسر = `close_fraction or 1`.
-- `close_all`: روی همه‌ی پوزیشن‌ها.
-
-> ✅ B4 رفع شد: `_first_candle_open_after` (`simulator.py:596`) اکنون از `same_market_symbol(c.symbol, symbol)` استفاده می‌کند (مطابق `_last_price` و `_find_entry_execution`) تا فرمت‌های متفاوت نماد (مثل `BTCUSDT` در مقابل `BTC-SWAP-USDT`) به‌درستی match شوند.
-
-## Snapshotها — `_build_snapshot` (`simulator.py:924`)
-
-برای داشبورد زنده، در دو نوع `checkpoint_kind`:
-- `message` — بعد از هر event.
-- `interval` — در گام‌های `snapshot_interval` (لنگر اولیه با `_initial_snapshot_anchor`).
-
-هر snapshot شامل: موجودی realized/current، PnL realized/unrealized، wins/losses، و `signal_states` (per-signal با تاریخچه‌ی قیمت، تاریخچه‌ی SL/TP به‌صورت `PriceLevelSpan`، margin، leverage و …). این داده‌ها مستقیماً به نمودار سیگنال در داشبورد feed می‌شوند.
-
-## SimulatedTrade (خروجی نهایی، `domain/models.py:255`)
-
-`trade_id, signal_id, channel_id, symbol, side, entry_time, exit_time, entry_price, exit_price, quantity, pnl, pnl_pct, fees, status, notes[]`. `quantity` و `fees` باید `≥ 0` باشند.
+- The simulator still processes the entry candle itself for post-entry TP/SL evaluation, which can create same-candle exits.
+- `RANGE` midpoint fills remain an approximation rather than a true path-aware fill model.
+- The model does not yet include slippage or funding.

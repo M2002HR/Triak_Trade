@@ -1,50 +1,54 @@
-# ۰۶ — استراتژی‌های مدیریت معامله (`strategies/`)
+# 06 - Trade Strategies
 
-استراتژی‌ها مجموعه قوانین **بدون حالت** (stateless) برای مدیریت پوزیشن‌اند و قابل‌استفاده در بک‌تست و (در آینده) اجرای واقعی. سه مسئولیت دارند:
+The backtesting strategy layer is intentionally stateless so the same trade-management logic can be reused in backtesting and future execution flows.
 
-1. استاپ مصنوعی وقتی سیگنال SL ندارد.
-2. نردبان TP مصنوعی وقتی TP ندارد.
-3. تصمیم partial-close و جابه‌جایی استاپ هنگام برخورد هر TP.
+## Strategy Protocol
 
-## پروتکل — `TradeStrategy` (`strategies/base.py:27`)
+`TradeStrategy` defines three responsibilities:
 
-`@runtime_checkable Protocol` با `name` و سه متد:
-- `get_synthetic_stop(side, entry_price) -> Decimal`
-- `get_synthetic_take_profits(side, entry_price, stop_loss) -> list[Decimal]`
-- `get_target_hit_action(targets_hit_so_far, remaining_targets_including_this, entry_price, take_profits) -> TargetHitAction`
+1. Provide a synthetic stop when a signal has no stop-loss.
+2. Provide fallback take-profit targets when a signal has no TP ladder.
+3. Decide what to do when each target is hit.
 
-`TargetHitAction` (`base.py:12`): `close_fraction`, `move_sl_to_entry`, `new_stop_loss`.
+That decision can include:
+- what fraction of remaining position to close
+- whether to move stop-loss to entry
+- whether to move stop-loss to a new explicit level
 
-## `DefaultRiskManagedStrategy` (`strategies/default_risk.py`)
+## Default Strategy
 
-پارامترها:
-- `no_sl_loss_pct = 100` — استاپ مصنوعی ۱۰۰٪ دور از entry.
-  - long: `entry*(1-1)=0` (عملاً استاپ بسیار دور؛ قیمت کریپتو به صفر نمی‌رسد).
-  - short: `entry*2`.
-- `risk_free_on_first_tp = True` — بعد از TP1، استاپ به entry منتقل (breakeven).
-- `tp_close_fractions = [0.35, 0.40, 0.50]` — کسر بستن در هر TP (آخرین تکرار می‌شود؛ TP نهایی همیشه ۱۰۰٪).
-- `synthetic_tp_r_multiples = [1, 2, 3]` — نردبان R-multiple برای TP مصنوعی.
+`DefaultRiskManagedStrategy` currently provides:
+- synthetic stop based on a capped percent-of-balance loss model
+- optional breakeven after the first TP
+- synthetic TP ladder from configured profit-percentage steps
+- partial exits using configured close fractions
 
-> ⚠️ پیامد طراحی: با `no_sl_loss_pct=100`، سیگنال‌های **بدون SL** استاپ بسیار دور می‌گیرند → `stop_distance ≈ entry` → `qty = risk_amount/entry` بسیار کوچک → سهم این سیگنال‌ها در PnL تقریباً صفر. یعنی سیگنال‌های بدون SL عملاً no-op می‌شوند و عملکرد کانال را کم‌نمایی می‌کنند (فایل ۰۸ B10).
+Its defaults are much more realistic than the older "extremely far synthetic stop" behavior described in stale earlier docs.
 
-`get_target_hit_action`:
-- TP نهایی → بستن ۱۰۰٪ + (در TP1) breakeven.
-- وگرنه کسر از `tp_close_fractions[min(targets_hit, len-1)]`، clamp به (0.01, 0.99).
+## Trailing Strategy
 
-## `TrailingTakeProfitStrategy` (`strategies/trailing_tp.py`)
+`TrailingTakeProfitStrategy` extends the default behavior by promoting stop-loss to the previous TP after later TP hits.
 
-ارث‌بری از Default + trailing استاپ روی نردبان TP:
-- بعد از TP2 → استاپ به TP1، بعد از TP3 → استاپ به TP2، و…
-- `get_target_hit_action` ابتدا base را می‌گیرد، سپس `new_stop_loss = take_profits[targets_hit-1]`.
+In practice:
+- TP1 can move to breakeven
+- TP2 can move stop to TP1
+- TP3 can move stop to TP2
 
-## رجیستری و بارگذاری — `strategies/registry.py`
+## Registry And Config
 
-- `_STRATEGY_CLASSES`: `default_risk_managed`, `tp_trailing_risk_managed`.
-- `load_strategy(config_path=None)`: از `config/strategies.yaml` (project root = `parents[4]`)؛ اگر فایل نبود/خراب بود/`pyyaml` نبود → defaults.
-- `load_strategy_from_dict`, `build_strategy_from_key` (برای انتخاب از داشبورد), `list_available_strategies` (با پارامترهای serialize‌شده).
+The strategy registry:
+- loads strategy configuration from `config/strategies.yaml`
+- falls back to built-in defaults if the file is missing or invalid
+- logs warnings before fallback on config parsing failures
+- exposes a small catalog for dashboard use
 
-> نکته‌ی استحکام: همه‌ی خطاهای بارگذاری config با `except Exception` بی‌صدا به default برمی‌گردند — اگر کاربر strategies.yaml را اشتباه بنویسد، بی‌هیچ هشداری نسخه‌ی پیش‌فرض اجرا می‌شود (فایل ۰۸ W3).
+Available built-in keys:
+- `default_risk_managed`
+- `tp_trailing_risk_managed`
 
-## تصمیم طراحی کلیدی
+## Why This Layer Matters
 
-استراتژی‌ها عمداً از منطق شبیه‌ساز جدا شده‌اند تا همان قوانین بعداً در اجرای دمو/واقعی هم استفاده شوند. این جداسازی تمیز و قابل‌تست است؛ نقطه‌ی قوت معماری.
+This separation is one of the cleaner parts of the architecture:
+- it keeps simulation rules testable
+- it avoids burying TP/SL behavior inside the simulator
+- it prepares the codebase for backtest/live rule reuse

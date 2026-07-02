@@ -1,100 +1,94 @@
-# ۰۲ — معماری بک‌تست
+# 02 - Backtesting Architecture
 
-## دو مسیر بک‌تست
+## Two Execution Paths
 
-پروژه دو مسیر بک‌تست دارد که هسته‌ی شبیه‌ساز مشترکی دارند:
+Triak_Trade has two backtesting paths that share the same simulator core:
 
-```
-            ┌──────────────────────────────────────────────────────────┐
-            │                  BacktestSimulator                        │
-            │   (هسته‌ی رویدادمحور؛ بدون شبکه؛ کاملاً قطعی و Decimal)     │
-            └──────────────────────────────────────────────────────────┘
-                        ▲                              ▲
-                        │                              │
-        ┌───────────────┴───────────┐     ┌────────────┴───────────────────┐
-        │      BacktestEngine        │     │      RealBacktestRunner          │
-        │  (fixture / in-memory)     │     │  (Telegram واقعی + AI + Market)  │
-        └────────────────────────────┘     └──────────────────────────────────┘
-```
+1. `BacktestEngine`
+   Uses deterministic fixture-style inputs or injected messages/candles. This is the safer path for tests and local development.
 
-- **مسیر ۱ — `BacktestEngine`** (`backtesting/engine.py`): قطعی، روی fixtureها یا پیام/کندل تزریق‌شده. برای تست و امتیازدهی استفاده می‌شود. خروجی: `BacktestReport`.
-- **مسیر ۲ — `RealBacktestRunner`** (`backtesting/real_runner.py`, ۳۰۹۹ خط): خط لوله‌ی کامل واقعی که در نهایت **همان** `BacktestEngine` را روی رویدادها/کندل‌های واقعی صدا می‌زند، به‌علاوه‌ی trace هر پیام و شبیه‌سازی زنده.
+2. `RealBacktestRunner`
+   Uses guarded real Telegram history, classifier selection, public market data, simulation, tracing, and persisted reports.
 
-## اجزای ماژول `backtesting/`
+Both paths ultimately rely on `BacktestSimulator` for trade simulation.
 
-| فایل | خطوط | نقش |
-|------|------|-----|
-| `models.py` | 74 | `BacktestRequest`, `BacktestEvent` (مدل‌های ورودی). |
-| `engine.py` | 148 | ارکستراسیون: messages→events→simulate(conservative+optimistic)→score→report. |
-| `simulator.py` | 1220 | شبیه‌ساز رویدادمحور؛ fill، SL/TP، partial، leverage، snapshot. |
-| `timeline.py` | 80 | تبدیل پیام‌ها به `BacktestEvent` با classifier + `ChannelContext`. |
-| `directives.py` | 185 | استخراج دستورهای متنی (close %، breakeven، tp list، close all). |
-| `correlation.py` | 164 | حل قطعی `related_signal_id` برای follow-upها. |
-| `scoring.py` | 232 | متریک‌ها + امتیاز ۰..۱۰۰ کانال با وزن‌دهی. |
-| `report.py` | 156 | فرمت‌دهی JSON / Telegram / Markdown + equity curve + symbol summary. |
-| `report_store.py` | 112 | ذخیره‌ی گزارش‌های واقعی روی دیسک. |
-| `real_runner.py` | 3099 | خط لوله‌ی واقعی، trace per-message، live snapshot. |
-| `telegram_source.py` | 53 | wrapper گرفتن تاریخچه‌ی تلگرام. |
-| `symbol_mapper.py` | 19 | re-export توابع نرمال‌سازی نماد از `core.symbols`. |
-| `fixtures.py` | 69 | پیام/کندل نمونه. |
-| `strategies/` | — | استراتژی‌های مدیریت معامله (فایل ۰۶). |
+## Core Backtesting Files
 
-## مدل‌های ورودی
+| File | Purpose |
+|------|---------|
+| `models.py` | Request and event models |
+| `engine.py` | Orchestration for fixture/in-memory runs |
+| `timeline.py` | Message-to-event transformation |
+| `simulator.py` | Core trade simulation |
+| `real_runner.py` | Guarded real backtest pipeline |
+| `scoring.py` | Metrics and channel score calculation |
+| `report.py` | JSON, Telegram-style, and Markdown summaries |
+| `report_store.py` | Disk persistence for reports |
+| `correlation.py` | Defensive follow-up-to-signal attachment |
+| `directives.py` | Explicit text directive extraction |
+| `strategies/` | Stateless trade-management rules |
 
-### `BacktestRequest` (`models.py:15`)
-ورودی موتور fixture/داخلی:
-- `channel, from_date, to_date, initial_balance, interval, fill_policy, risk_per_trade_pct`
-- `use_ai_classifier, use_regex_fallback, max_messages, symbols`
-- اعتبارسنجی: `to_date > from_date`، `initial_balance > 0`، `risk_per_trade_pct > 0`، interval معتبر.
-- `risk_per_trade_pct` در مسیر فعلی یک `allocation factor` است، نه درصد مستقیم سرمایه.
-  درصد واقعی سرمایه‌ی درگیر در هر سیگنال از `factor / leverage` محاسبه می‌شود و سپس
-  بین `BACKTEST_MIN_ALLOCATION_PCT` و `BACKTEST_MAX_ALLOCATION_PCT` clamp می‌شود.
+## `BacktestEngine`
 
-### `BacktestEvent` (`models.py:44`)
-واحد اتمی timeline که شبیه‌ساز مصرف می‌کند:
-- `timestamp, action (SignalAction), signal_id, parsed_signal (ParsedSignal), related_signal_id`
-- `source_message_id, source_text, close_fraction, close_all, move_stop_to_entry, leverage`
-- اعتبارسنجی: `leverage > 0`، `0 < close_fraction ≤ 1`.
+`BacktestEngine`:
+- Builds events from messages using `BacktestTimelineBuilder`
+- Runs both conservative and optimistic simulations
+- Chooses the primary trade set based on the requested fill policy
+- Scores the run and builds a `BacktestReport`
 
-### `ParsedSignal` (`domain/models.py:89`)
-خروجی classifier — قلب داده:
-- `action (open/close/update_sl/update_tp/update_entry/update_leverage/cancel/ignore/unknown)`
-- `market, symbol, side (long/short/buy/sell/unknown), entry_type (market/limit/range/unknown)`
-- `entry_low, entry_high, stop_loss, take_profits[], leverage, confidence (0..1)`
-- `invalid_reason, source_channel_id, source_message_id, parser_version`
+One important improvement already present in the code:
+- The report now uses the same trade set as the selected `fill_policy`, so `report.trades`, `final_balance`, and `total_pnl` stay consistent.
 
-### `Candle` (`domain/models.py:225`)
-- `symbol, interval, open_time, close_time, open, high, low, close, volume, source (CandleSource)`
-- اعتبارسنجی هندسه‌ی قیمت: `close_time > open_time`، `high ≥ max(o,c,l)`، `low ≤ min(o,c,h)`، `volume ≥ 0`. همه `Decimal`.
+## `RealBacktestRunner`
 
-## جریان مسیر ۱ (`BacktestEngine`)
+`RealBacktestRunner` adds:
+- readiness checks
+- Telegram history collection
+- AI or regex classifier selection
+- message tracing
+- per-symbol market-data fetches
+- simulator replay with live-progress snapshots
+- disk report persistence
+- optional Telegram log-channel summary hooks
 
-`engine.py:62 run_from_events`:
+This is the most complex part of the backtesting subsystem and also where most performance and readiness caveats live.
 
-1. ساخت events از messages توسط `BacktestTimelineBuilder` (`timeline.py`).
-2. اجرای **دوبار** شبیه‌سازی: یک‌بار `CONSERVATIVE` و یک‌بار `OPTIMISTIC` (برای متریک consistency).
-3. `final_balance = max(balance طبق fill_policy درخواست, 0)`.
-4. `total_pnl = final_balance - initial_balance`.
-5. امتیازدهی با `ChannelScorer.score_with_breakdown`.
-6. ساخت `BacktestReport` با `trades = conservative_trades` و افزودن `warnings.append("channel_score=…")`.
+## Data Flow
 
-> ⚠️ نکته‌ی مهم: `report.trades` همیشه **conservative** است ولی `final_balance/total_pnl` می‌تواند **optimistic** باشد → ناهماهنگی (فایل ۰۸، باگ B2).
+High-level flow:
 
-## ساخت timeline (`timeline.py`)
+1. Fetch messages
+2. Preprocess message text and media context
+3. Classify message
+4. Build or attach `BacktestEvent`
+5. Prefetch required candles
+6. Simulate positions
+7. Score results
+8. Write reports
+9. Emit dashboard/log summaries
 
-`BacktestTimelineBuilder.build` پیام‌ها را به ترتیب تاریخ مرتب می‌کند و برای هر پیام:
-- اگر متن خالی بود → رویداد `IGNORE`.
-- وگرنه `classifier.classify(message, context)` صدا زده می‌شود.
-- اگر `is_potential_new_signal` → `signal_id` جدید با `make_signal_id`.
-- اگر follow-up → `related_signal_id` و normal‌سازی action با `normalize_related_signal_action`.
-- استخراج `close_fraction` و `move_stop_to_entry` از متن.
+## Event Model
 
-این مسیر ساده است؛ منطق پیچیده‌ی correlation/promotion فقط در مسیر واقعی (`real_runner`) وجود دارد.
+`BacktestEvent` is the simulator input unit. It captures:
+- timestamp
+- action
+- signal id
+- parsed signal
+- related signal id
+- source message metadata
+- close fractions and move-to-entry directives when relevant
 
-## نقش `ChannelContext` (`agents/context.py`)
+This separation is important because the simulator does not need Telegram or AI concepts directly. It only needs normalized events plus candles.
 
-وضعیت per-channel در حافظه: پیام‌های اخیر، نگاشت message→signal، `active_signals`, `pending_signal_ids`, کاتالوگ پیام‌ها، و **merge_signal** که follow-upها را در `current_signal` تاشده می‌کند (entry/SL/TP/leverage را غنی‌سازی، action را با اولویت مقدار غیر-unknown).
+## Architectural Strengths
 
-> نکته: چون merge_signal، `action` را هم از follow-up می‌گیرد، در مسیر واقعی `_sync_signal_tracking` پس از merge، action رویداد base را به‌زور به `OPEN` برمی‌گرداند تا شبیه‌ساز سیگنال را نادیده نگیرد (`real_runner.py:2073`).
+- Simulation logic is separate from Telegram/network code.
+- Strategy logic is stateless and reusable across backtest and live/demo paths.
+- Correlation logic for follow-up messages is isolated and testable.
+- Reports include explicit honesty flags such as whether AI or real market data were used.
 
-ادامه در [۰۳ — جزئیات شبیه‌ساز](03-simulator-internals.md).
+## Architectural Caveats
+
+- `RealBacktestRunner.readiness()` still mixes runtime gating with test-style env guards.
+- `readiness()` creates directories as a side effect.
+- The live-simulation preview inside the real pipeline is throttled, not fully incremental.

@@ -1,67 +1,76 @@
-# ۰۱ — نمای کلی پروژه و قابلیت‌ها
+# 01 - Project Overview
 
-## هدف پروژه
+## Purpose
 
-`Triak_Trade` یک «پایه‌ی ماژولار هوش سیگنال» است که پیام‌های کانال‌های سیگنال تلگرام را دریافت، طبقه‌بندی و تحلیل می‌کند، روی داده‌ی تاریخی بازار **بک‌تست** می‌گیرد، و در فازهای بعدی دمو-تریدینگ/مانیتورینگ را پشتیبانی می‌کند. تصمیم نهایی پارس/طبقه‌بندی قرار است AI-محور باشد (Ajil Unified AI Gateway) و regex فقط fallback/safety است.
+Triak_Trade is a modular signal-intelligence platform centered on Telegram message processing, AI-assisted classification, backtesting, dashboard-driven monitoring, and guarded demo/live execution workflows.
 
-منابع مرجع داخل ریپو:
-- `README.md` — راهنمای نصب و دستورات CLI.
-- `AGENTS.md` — قوانین سخت‌گیرانه‌ی ایمنی/تست (مرجع اصلی «باید/نباید»های پروژه).
+The intended parsing/classification end-state is AI-driven through Ajil Unified AI Gateway. Regex parsing remains a fallback and safety layer, not the final decision engine.
 
-## پشته‌ی فناوری
+## Main Technology Stack
 
-- **زبان**: Python ≥ 3.10، typing سخت‌گیرانه (`mypy --strict`).
-- **مدل‌ها/اعتبارسنجی**: Pydantic v2.
-- **ذخیره‌سازی**: SQLAlchemy 2.0 + Alembic + MySQL (PyMySQL)، Redis برای کش.
-- **HTTP**: httpx (async).
-- **تلگرام**: Telethon (پشت interface).
-- **CLI**: Typer + Rich.
-- **داشبورد**: FastAPI + Jinja2 + WebSocket (local-first، بدون Node/React).
-- **لاگ**: structlog + python-json-logger.
+- Python 3.10+
+- Pydantic v2 and `pydantic-settings`
+- Typer CLI
+- FastAPI + Jinja + WebSockets dashboard
+- SQLAlchemy + Alembic + MySQL
+- Redis
+- Telethon behind interfaces
+- `httpx` for service calls
+- `structlog` and JSON/human logging
 
-پیکربندی واحد از طریق `pydantic-settings` در `src/triak_trade/config/settings.py` و فایل ریشه‌ی `.env.local`.
+## Repository Map
 
-## نقشه‌ی ماژول‌ها (`src/triak_trade/`)
+| Module | Role |
+|-------|------|
+| `agents/` | Channel context, consolidation logic, and action proposals |
+| `ai/` | Ajil gateway client, runtime management, prompts, and AI classifier |
+| `backtesting/` | Fixture engine, real pipeline, simulator, scoring, strategies, and reports |
+| `cache/` | Redis support |
+| `config/` | Runtime settings sourced from root `.env.local` |
+| `core/` | Logging, time handling, formatting, health checks, and symbol helpers |
+| `dashboard/` | Local dashboard, backtest runtime, live/demo workspace, and settings views |
+| `db/` | Engines, models, sessions, and repositories |
+| `deployment/` | Ajil bootstrap and runtime-env helpers |
+| `domain/` | Core Pydantic models and enums |
+| `exchange/toobit/` | Toobit public/signed/demo-safe adapters |
+| `live_trading/` | Demo/live session orchestration and state |
+| `market_data/` | Binance public, Toobit public, composite providers, and candle cache |
+| `observability/` | Processing audit, redaction, Telegram log channel, and event bus |
+| `parsing/` | Text normalization, regex parsing, and validation |
+| `telegram/` | Telegram client interfaces, history sync, and listener plumbing |
+| `verification/` | Safe and guarded real-system verification |
 
-| ماژول | نقش |
-|-------|-----|
-| `domain/` | مدل‌های دامنه (Pydantic) و enumها: `ParsedSignal`, `Candle`, `SimulatedTrade`, `SignalState`, `BacktestReport`, `ChannelMetrics` و … |
-| `parsing/` | normalizer + regex parser + validator — تبدیل متن خام به `ParsedSignal`. |
-| `agents/` | لایه‌ی classifier (پروتکل `MessageClassifier`)، `ChannelContext` (وضعیت per-channel)، `RegexMessageClassifier`. |
-| `ai/` | کلاینت Ajil Gateway، `AIMessageClassifier`، schemas و prompts. |
-| `market_data/` | تأمین‌کننده‌های کندل: Binance public (آرشیو + REST)، Toobit، Composite (fallback)، Candle cache، factory، intervals. |
-| `backtesting/` | **هسته‌ی بک‌تست** — موضوع اصلی این مستندات. |
-| `telegram/` | کلاینت Telethon، history sync، live listener، mapper. |
-| `exchange/toobit/` | امضاکننده، اکانت، spot، futures، demo execution، safety. |
-| `dashboard/` | UI کنترل محلی، runtime بک‌تست زنده، workspace دمو-تریدینگ، جزییات سشن/سیگنال/پیام، routes، realtime/WebSocket. |
-| `observability/` | event bus، processing audit، کانال لاگ تلگرام، redaction. |
-| `verification/` | اجراکننده‌ی verify-system و گزارش‌های سلامت. |
-| `core/` | logging، health، symbols (نرمال‌سازی نماد)، time (TZ تهران)، errors. |
-| `db/` | engine، session، models، repositories. |
-| `deployment/` | bootstrap گیت‌وی Ajil و runtime env. |
+## User-Facing Capabilities
 
-## قابلیت‌های اصلی (از منظر کاربر)
+- Safe parsing and validation of signal-like Telegram messages
+- Dry-run agent simulation
+- AI gateway runtime checks and dry-run classification
+- Telegram history dry-runs
+- Public market-data dry-runs
+- Fixture backtesting and guarded real backtesting
+- Dashboard-based backtest execution and report browsing
+- Dashboard live/demo session monitoring
+- Processing-audit formatting and guarded log-channel delivery
+- Verification reports with redacted summaries
 
-دستورات CLI کلیدی (از `README.md` و `src/triak_trade/cli.py`):
+## Non-Negotiable Project Rules
 
-- **بک‌تست fixture**: `triak-trade backtest-fixture` — اجرای قطعی روی داده‌ی نمونه.
-- **بک‌تست واقعی**:
-  - `real-backtest-check` — نمایش readiness بدون افشای راز.
-  - `real-backtest-run --channel … --hours … --interval …`
-  - `real-backtest-tofan --hours …` — کانال پیش‌فرض پیکربندی‌شده.
-  - `backtest-show-latest` — آخرین گزارش ذخیره‌شده.
-- **داشبورد**: اجرای بک‌تست زنده با progress لحظه‌ای، نمودار سیگنال، live metrics، امکان stop/rerun، و workspace دمو-تریدینگ چند-session با modal جزییات سشن، اثر هر پیام روی سیگنال، snapshot اکسچنج، و پاک‌سازی history.
-- پارس/طبقه‌بندی پیام، بررسی گیت‌وی AI، تاریخچه‌ی تلگرام، داده‌ی بازار، کانال لاگ، verify-system.
+These come from `AGENTS.md` and shape the implementation:
 
-## اصول طراحی غیرقابل‌مذاکره (از `AGENTS.md`)
+1. Each module should be independently testable.
+2. Unit tests must not call real external services.
+3. Integration tests must be explicitly guard-gated.
+4. Financial values use `Decimal`, not `float`.
+5. Secrets must never be printed or committed.
+6. Backtesting is simulation-only and must not execute trades.
+7. Real integrations must live behind interfaces/adapters.
+8. Runtime configuration comes from the root `.env.local`.
+9. Live sessions require `LIVE_TRADING_LIVE_MODE_ENABLED=true`.
+10. If AI is unavailable, the system must say so explicitly instead of pretending AI was used.
 
-1. هر ماژول مستقلاً قابل‌تست؛ سرویس بیرونی پشت interface.
-2. تست‌های unit هرگز سرویس واقعی صدا نمی‌زنند؛ تست‌های integration پشت گارد env.
-3. sessionهای `live` فقط وقتی باز می‌شوند که `LIVE_TRADING_LIVE_MODE_ENABLED=true` در `.env.local` تنظیم شده باشد. sessionهای `demo` برای داده/اعتبارسنجی عمومی از API واقعی Toobit و نمادهای `TBV_...` استفاده می‌کنند. برای endpointهای خصوصی هم همان production API واقعی صدا زده می‌شود، اما با symbolهای `TBV_...` و پارامتر `business_type=VIRTUAL`؛ بنابراین balance/position/history از خود اکانت دمو Toobit می‌آید و در صورت نامعتبر بودن demo symbol، داشبورد همان خطای exchange-side واقعی را نشان می‌دهد.
-4. همه‌ی مقادیر مالی `Decimal`.
-5. هرگز چاپ/کامیت راز.
-6. بک‌تست simulation-only؛ از endpointهای خصوصی استفاده نمی‌کند.
-7. بک‌تست باید از interface طبقه‌بندی (AI-ready) استفاده کند، نه مستقیم از regex.
-8. اگر AI در دسترس نبود، صریحاً گزارش شود؛ هرگز وانمود نشود AI استفاده شده.
+## Important Current Reality
 
-این اصول مستقیماً معماری بک‌تست را شکل داده‌اند (در فایل‌های بعدی توضیح داده می‌شود).
+- The Ajil gateway exists as a git submodule under `external/Ajil_Unified_AI_Gateway`.
+- The repository already contains dashboard and live/demo trading code, not just backtesting.
+- The CLI surface is broader than the original README used to imply, but it no longer includes an admin-bot command set.
+- Real backtesting is available, but its readiness gate is intentionally strict and still somewhat test-flag-shaped.
