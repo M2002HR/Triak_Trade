@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import socket
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -152,7 +153,7 @@ class TelethonTelegramClient:
                 raw = telethon_message_to_raw(msg, channel=channel)
                 self._cache_message(raw, msg)
                 if start is not None and raw.date < start:
-                    continue
+                    break
                 if end is not None and raw.date > end:
                     continue
                 if min_message_id is not None and raw.message_id < min_message_id:
@@ -162,6 +163,26 @@ class TelethonTelegramClient:
         if limit is not None:
             result = result[:limit]
         return result
+
+    async def forward_message_by_link(
+        self,
+        message_link: str,
+        destination_channel: str,
+    ) -> RawTelegramMessage:
+        client = await self._ensure_client()
+        source_channel, message_id = self._parse_message_link(message_link)
+        async with client:
+            source_message = await client.get_messages(source_channel, ids=message_id)
+            if source_message is None:
+                raise ValueError("source_message_not_found")
+            forwarded = await client.forward_messages(destination_channel, source_message)
+            if isinstance(forwarded, list):
+                if not forwarded:
+                    raise ValueError("forwarded_message_missing")
+                forwarded = forwarded[0]
+            raw = telethon_message_to_raw(forwarded, channel=destination_channel)
+            self._cache_message(raw, forwarded)
+            return raw
 
     async def listen_new_messages(
         self,
@@ -263,6 +284,14 @@ class TelethonTelegramClient:
             except Exception:
                 pass
             self._client = None
+
+    @staticmethod
+    def _parse_message_link(message_link: str) -> tuple[str, int]:
+        match = re.match(r"^https?://t\.me/([^/]+)/(\d+)$", message_link.strip())
+        if match is None:
+            raise ValueError("invalid_message_link")
+        channel_slug, raw_message_id = match.groups()
+        return f"https://t.me/{channel_slug}", int(raw_message_id)
 
     async def ensure_media_payload(
         self,

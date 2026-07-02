@@ -33,6 +33,8 @@ class TelegramClientInterface(Protocol):
         allow_captionless: bool = False,
     ) -> RawTelegramMessage: ...
 
+    async def stop(self) -> None: ...
+
 
 class FakeTelegramClient:
     def __init__(
@@ -80,3 +82,6 @@ class FakeTelegramClient:
         allow_captionless: bool = False,
     ) -> RawTelegramMessage:
         return message
+
+    async def stop(self) -> None:
+        return None

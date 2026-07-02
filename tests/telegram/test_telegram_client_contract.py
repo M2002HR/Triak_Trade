@@ -345,3 +345,139 @@ async def test_telethon_fetch_history_only_passes_min_id_when_requested(
 
     assert stub.calls[0] == {"limit": 1}
     assert stub.calls[1] == {"min_id": 10}
+
+
+@pytest.mark.asyncio
+async def test_telethon_fetch_history_stops_scanning_once_start_boundary_is_crossed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_API_ID=123,
+        TELEGRAM_API_HASH="hash",
+    )
+    client = TelethonTelegramClient(settings)
+    yielded_ids: list[int] = []
+
+    class StubMessage:
+        def __init__(self, message_id: int, date: datetime) -> None:
+            self.id = message_id
+            self.text = f"message-{message_id}"
+            self.message = self.text
+            self.raw_text = self.text
+            self.date = date
+            self.edit_date = None
+            self.reply_to_msg_id = None
+            self.media = None
+            self.photo = None
+            self.file = None
+            self.sender_id = None
+            self.chat_id = None
+
+        def to_dict(self) -> dict[str, object]:
+            return {"id": self.id}
+
+    class StubClient:
+        async def __aenter__(self) -> StubClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def iter_messages(self, channel: str, **kwargs: int):
+            async def _items():
+                for message in [
+                    StubMessage(10, datetime(2026, 7, 1, 14, 20, tzinfo=timezone.utc)),
+                    StubMessage(9, datetime(2026, 7, 1, 14, 19, tzinfo=timezone.utc)),
+                    StubMessage(8, datetime(2026, 7, 1, 14, 17, tzinfo=timezone.utc)),
+                    StubMessage(7, datetime(2026, 7, 1, 14, 10, tzinfo=timezone.utc)),
+                ]:
+                    yielded_ids.append(message.id)
+                    yield message
+
+            return _items()
+
+    stub = StubClient()
+
+    async def _return_stub() -> StubClient:
+        return stub
+
+    monkeypatch.setattr(client, "_ensure_client", _return_stub)
+
+    got = await client.fetch_history(
+        "https://t.me/Tofan_Trade",
+        start=datetime(2026, 7, 1, 14, 18, tzinfo=timezone.utc),
+    )
+
+    assert [item.message_id for item in got] == [9, 10]
+    assert yielded_ids == [10, 9, 8]
+
+
+@pytest.mark.asyncio
+async def test_telethon_forward_message_by_link_forwards_to_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_API_ID=123,
+        TELEGRAM_API_HASH="hash",
+    )
+    client = TelethonTelegramClient(settings)
+
+    class StubMessage:
+        def __init__(self, message_id: int, text: str) -> None:
+            self.id = message_id
+            self.text = text
+            self.message = text
+            self.raw_text = text
+            self.date = datetime(2026, 7, 1, 18, 30, tzinfo=timezone.utc)
+            self.edit_date = None
+            self.reply_to_msg_id = None
+            self.media = None
+            self.photo = None
+            self.file = None
+            self.sender_id = None
+            self.chat_id = None
+
+        def to_dict(self) -> dict[str, object]:
+            return {"id": self.id}
+
+    class StubClient:
+        def __init__(self) -> None:
+            self.get_messages_calls: list[tuple[str, int]] = []
+            self.forward_calls: list[tuple[str, int]] = []
+
+        async def __aenter__(self) -> StubClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get_messages(self, channel: str, ids: int) -> StubMessage:
+            self.get_messages_calls.append((channel, ids))
+            return StubMessage(ids, "source")
+
+        async def forward_messages(
+            self,
+            destination_channel: str,
+            source_message: StubMessage,
+        ) -> StubMessage:
+            self.forward_calls.append((destination_channel, source_message.id))
+            return StubMessage(14780, "forwarded")
+
+    stub = StubClient()
+
+    async def _return_stub() -> StubClient:
+        return stub
+
+    monkeypatch.setattr(client, "_ensure_client", _return_stub)
+
+    forwarded = await client.forward_message_by_link(
+        "https://t.me/kiwibot_log/14779",
+        "@kiwibot_log",
+    )
+
+    assert stub.get_messages_calls == [("https://t.me/kiwibot_log", 14779)]
+    assert stub.forward_calls == [("@kiwibot_log", 14779)]
+    assert forwarded.message_id == 14780
+    assert forwarded.channel_id == "@kiwibot_log"
