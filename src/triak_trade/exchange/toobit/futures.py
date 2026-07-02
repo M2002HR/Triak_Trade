@@ -1092,6 +1092,38 @@ class ToobitFuturesClient:
                 params=request_params,
             )
         except ToobitAPIError as exc:
+            if _should_retry_demo_private_symbol_with_live_symbol(
+                use_demo_symbol=use_demo_symbol,
+                attempted_symbol=exchange_symbol,
+                exc=exc,
+            ):
+                retry_params = dict(request_params)
+                retry_params["symbol"] = to_exchange_futures_symbol(
+                    symbol,
+                    use_demo_symbol=False,
+                )
+                try:
+                    return await self._client.signed_request(
+                        method,
+                        path,
+                        params=retry_params,
+                    )
+                except ToobitAPIError as retry_exc:
+                    if _should_rewrite_demo_private_symbol_error(
+                        use_demo_symbol=use_demo_symbol,
+                        attempted_symbol=exchange_symbol,
+                        exc=retry_exc,
+                        demo_private_symbol_mode=self.demo_private_symbol_mode,
+                    ):
+                        raise ToobitAPIError(
+                            "Toobit demo order rejected for "
+                            f"{exchange_symbol}: demo futures must use the TBV symbol family "
+                            "through the production private API with business_type=VIRTUAL",
+                            status_code=retry_exc.status_code,
+                            error_code=retry_exc.error_code,
+                            payload=retry_exc.payload,
+                        ) from retry_exc
+                    raise
             if _should_rewrite_demo_private_symbol_error(
                 use_demo_symbol=use_demo_symbol,
                 attempted_symbol=exchange_symbol,
@@ -1323,3 +1355,14 @@ def _should_rewrite_demo_private_symbol_error(
     if not use_demo_symbol or not attempted_symbol.startswith(DEMO_SYMBOL_PREFIX):
         return False
     return demo_private_symbol_mode == "tbv_only" and exc.error_code in {-1130, -1131}
+
+
+def _should_retry_demo_private_symbol_with_live_symbol(
+    *,
+    use_demo_symbol: bool,
+    attempted_symbol: str,
+    exc: ToobitAPIError,
+) -> bool:
+    if not use_demo_symbol or not attempted_symbol.startswith(DEMO_SYMBOL_PREFIX):
+        return False
+    return exc.error_code in {-1130, -1131}

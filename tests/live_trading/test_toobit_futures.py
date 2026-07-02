@@ -594,12 +594,20 @@ class TestToobitFuturesClientAPI:
         client = _make_client()
         client.demo_private_symbol_mode = "tbv_only"
         client._client.signed_request = AsyncMock(
-            side_effect=ToobitAPIError(
-                "Toobit API HTTP error: 400: invalid",
-                status_code=400,
-                error_code=-1130,
-                payload={"code": -1130, "msg": "Data sent for paramter '%s' is not valid."},
-            )
+            side_effect=[
+                ToobitAPIError(
+                    "Toobit API HTTP error: 400: invalid",
+                    status_code=400,
+                    error_code=-1130,
+                    payload={"code": -1130, "msg": "Data sent for paramter '%s' is not valid."},
+                ),
+                ToobitAPIError(
+                    "Toobit API HTTP error: 400: invalid",
+                    status_code=400,
+                    error_code=-1130,
+                    payload={"code": -1130, "msg": "Data sent for paramter '%s' is not valid."},
+                ),
+            ]
         )
         with pytest.raises(ToobitAPIError, match="business_type=VIRTUAL"):
             await client.open_long(
@@ -607,6 +615,45 @@ class TestToobitFuturesClientAPI:
                 quantity=Decimal("0.00230942"),
                 use_demo_symbol=True,
             )
+        assert client._client.signed_request.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_place_order_demo_retries_with_live_symbol_after_tbv_invalid_param(self) -> None:
+        client = _make_client()
+        client._client.signed_request = AsyncMock(
+            side_effect=[
+                ToobitAPIError(
+                    "Toobit API HTTP error: 400: invalid",
+                    status_code=400,
+                    error_code=-1130,
+                    payload={"code": -1130, "msg": "Data sent for paramter '%s' is not valid."},
+                ),
+                {
+                    "orderId": "demo_retry_ok",
+                    "symbol": "BTC-SWAP-USDT",
+                    "side": "SELL_CLOSE",
+                    "status": "NEW",
+                    "type": "LIMIT",
+                },
+            ]
+        )
+
+        order = await client.place_order(
+            symbol="BTCUSDT",
+            side="SELL_CLOSE",
+            order_type="LIMIT",
+            quantity=Decimal("0.001"),
+            price=Decimal("59999.9"),
+            use_demo_symbol=True,
+        )
+
+        first_params = client._client.signed_request.await_args_list[0].kwargs["params"]
+        second_params = client._client.signed_request.await_args_list[1].kwargs["params"]
+        assert first_params["symbol"] == "TBV_BTC-SWAP-TBV_USDT"
+        assert second_params["symbol"] == "BTC-SWAP-USDT"
+        assert first_params["business_type"] == "VIRTUAL"
+        assert second_params["business_type"] == "VIRTUAL"
+        assert order.order_id == "demo_retry_ok"
 
     @pytest.mark.asyncio
     async def test_close_long_uses_sell_close(self) -> None:
