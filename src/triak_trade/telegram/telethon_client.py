@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import re
 import socket
 from collections.abc import Awaitable, Callable
@@ -80,21 +81,7 @@ class TelethonTelegramClient:
         if not self.settings.TELEGRAM_PROXY_ENABLED:
             return None
 
-        import os
-        # Inside Docker: prefer TELEGRAM_PROXY_HOST_DOCKER / TELEGRAM_PROXY_PORT_DOCKER
-        in_docker = os.path.exists("/.dockerenv")
-        if in_docker:
-            docker_host = getattr(self.settings, "TELEGRAM_PROXY_HOST_DOCKER", "").strip()
-            docker_port = getattr(self.settings, "TELEGRAM_PROXY_PORT_DOCKER", 0)
-            if docker_host and docker_port > 0:
-                host = self._resolve_proxy_host(docker_host)
-                port = docker_port
-            else:
-                host = self._resolve_proxy_host(self.settings.TELEGRAM_PROXY_HOST.strip())
-                port = self.settings.TELEGRAM_PROXY_PORT
-        else:
-            host = self._resolve_proxy_host(self.settings.TELEGRAM_PROXY_HOST.strip())
-            port = self.settings.TELEGRAM_PROXY_PORT
+        host, port = self._effective_proxy_host_port()
 
         if not host or port <= 0:
             raise TelegramCredentialError(
@@ -116,6 +103,29 @@ class TelethonTelegramClient:
             username,
             password,
         )
+
+    def _effective_proxy_host_port(self) -> tuple[str, int]:
+        base_host = self._resolve_proxy_host(self.settings.TELEGRAM_PROXY_HOST.strip())
+        base_port = self.settings.TELEGRAM_PROXY_PORT
+        if not os.path.exists("/.dockerenv"):
+            return base_host, base_port
+
+        docker_host = getattr(self.settings, "TELEGRAM_PROXY_HOST_DOCKER", "").strip()
+        docker_port = getattr(self.settings, "TELEGRAM_PROXY_PORT_DOCKER", 0)
+        if not docker_host or docker_port <= 0:
+            return base_host, base_port
+
+        resolved_docker_host = self._resolve_proxy_host(docker_host)
+        if self._can_connect(resolved_docker_host, docker_port):
+            return resolved_docker_host, docker_port
+        return base_host, base_port
+
+    def _can_connect(self, host: str, port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except OSError:
+            return False
 
     def _resolve_proxy_host(self, host: str) -> str:
         if host != "host.docker.internal":

@@ -4,7 +4,9 @@ from pathlib import Path
 
 from triak_trade.deployment.runtime_env import (
     build_ai_gateway_runtime_env,
+    build_container_proxy_candidates,
     build_dashboard_runtime_env,
+    choose_first_reachable_proxy_url,
     load_root_env_file,
 )
 
@@ -42,8 +44,52 @@ def test_build_dashboard_runtime_env_uses_docker_overrides() -> None:
     assert values["DASHBOARD_PORT"] == "9090"
     assert values["TELEGRAM_SESSION_DIR"] == "/data/sessions"
     assert values["HTTP_PROXY"] == "http://proxy-bridge:32080"
-    assert values["TELEGRAM_PROXY_HOST"] == "proxy-bridge"
-    assert values["TELEGRAM_PROXY_PORT"] == "32080"
+    assert values["TELEGRAM_PROXY_HOST"] == "host.docker.internal"
+    assert values["TELEGRAM_PROXY_PORT"] == "3128"
+
+
+def test_build_dashboard_runtime_env_rewrites_loopback_proxy_for_docker() -> None:
+    values = build_dashboard_runtime_env(
+        {
+            "HTTP_PROXY": "http://127.0.0.1:3128",
+            "HTTPS_PROXY": "http://localhost:2080",
+            "TELEGRAM_PROXY_ENABLED": "true",
+            "TELEGRAM_PROXY_TYPE": "http",
+            "TELEGRAM_PROXY_HOST": "127.0.0.1",
+            "TELEGRAM_PROXY_PORT": "3128",
+        }
+    )
+    assert values["HTTP_PROXY"] == "http://host.docker.internal:3128"
+    assert values["HTTPS_PROXY"] == "http://host.docker.internal:2080"
+    assert values["TELEGRAM_PROXY_HOST"] == "host.docker.internal"
+    assert values["TELEGRAM_PROXY_PORT"] == "3128"
+
+
+def test_build_container_proxy_candidates_prioritizes_specific_docker_overrides() -> None:
+    candidates = build_container_proxy_candidates(
+        {
+            "UAG_PROXY_URL_DOCKER": "http://host.docker.internal:32080",
+            "HTTP_PROXY": "http://127.0.0.1:3128",
+            "TELEGRAM_PROXY_ENABLED": "true",
+            "TELEGRAM_PROXY_TYPE": "http",
+            "TELEGRAM_PROXY_HOST": "127.0.0.1",
+            "TELEGRAM_PROXY_PORT": "3128",
+        },
+        include_uag=True,
+    )
+    assert candidates[0] == "http://host.docker.internal:32080"
+    assert "http://host.docker.internal:3128" in candidates
+
+
+def test_choose_first_reachable_proxy_url_returns_first_working_candidate() -> None:
+    chosen = choose_first_reachable_proxy_url(
+        [
+            "http://host.docker.internal:32080",
+            "http://host.docker.internal:3128",
+        ],
+        probe=lambda url: url.endswith(":3128"),
+    )
+    assert chosen == "http://host.docker.internal:3128"
 
 
 def test_build_ai_gateway_runtime_env_maps_root_ai_settings() -> None:

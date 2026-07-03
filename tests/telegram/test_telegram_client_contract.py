@@ -85,6 +85,40 @@ def test_telethon_client_falls_back_to_loopback_for_host_docker_internal(
     assert proxy[1] == "127.0.0.1"
 
 
+def test_telethon_client_prefers_base_proxy_when_docker_override_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_API_ID=123,
+        TELEGRAM_API_HASH="hash",
+        TELEGRAM_PROXY_ENABLED=True,
+        TELEGRAM_PROXY_TYPE="http",
+        TELEGRAM_PROXY_HOST="host.docker.internal",
+        TELEGRAM_PROXY_PORT=3128,
+        TELEGRAM_PROXY_HOST_DOCKER="host.docker.internal",
+        TELEGRAM_PROXY_PORT_DOCKER=32080,
+    )
+    client = TelethonTelegramClient(settings)
+
+    monkeypatch.setattr("triak_trade.telegram.telethon_client.os.path.exists", lambda _: True)
+    monkeypatch.setattr(
+        client,
+        "_resolve_proxy_host",
+        lambda host: "docker-proxy" if host == "host.docker.internal" else host,
+    )
+    monkeypatch.setattr(
+        client,
+        "_can_connect",
+        lambda host, port: (host, port) == ("docker-proxy", 3128),
+    )
+
+    proxy = client._proxy_tuple()
+    assert proxy is not None
+    assert proxy[1] == "docker-proxy"
+    assert proxy[2] == 3128
+
+
 @pytest.mark.asyncio
 async def test_telethon_client_ensure_media_payload_downloads_only_caption_media(
     monkeypatch: pytest.MonkeyPatch,

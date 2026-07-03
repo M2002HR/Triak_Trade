@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -14,6 +16,31 @@ def _bool_env(name: str, default: bool = False) -> bool:
     if not value:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _can_reach_proxy_url(proxy_url: str) -> bool:
+    parsed = urlsplit(proxy_url)
+    host = parsed.hostname
+    port = parsed.port
+    if not host or port is None:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _load_proxy_source_env(env_file: Path) -> dict[str, str]:
+    if env_file.exists():
+        from triak_trade.deployment.runtime_env import load_root_env_file
+
+        return load_root_env_file(env_file)
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if isinstance(value, str)
+    }
 
 
 def main() -> int:
@@ -25,8 +52,32 @@ def main() -> int:
         pollinations_module_exists,
         prepare_optional_provider_stubs,
     )
+    from triak_trade.deployment.runtime_env import (
+        build_container_proxy_candidates,
+        choose_first_reachable_proxy_url,
+    )
 
     gateway_root = Path("/app")
+    env_file = Path(os.environ.get("UAG_ENV_FILE", "/app/.env.local"))
+    root_env = _load_proxy_source_env(env_file)
+    selected_proxy = choose_first_reachable_proxy_url(
+        build_container_proxy_candidates(root_env, include_uag=True),
+        probe=_can_reach_proxy_url,
+    )
+    if selected_proxy:
+        for key in (
+            "UAG_PROXY_URL",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "GEMINI_HTTP_PROXY",
+            "GEMINI_HTTPS_PROXY",
+        ):
+            os.environ[key] = selected_proxy
+
     stub_root = gateway_root
     pollinations_enabled = _bool_env("UAG_POLLINATIONS_ENABLED", default=False)
     if pollinations_enabled and not pollinations_module_exists(gateway_root):

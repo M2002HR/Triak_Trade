@@ -10,11 +10,13 @@ import sys
 import time
 from pathlib import Path
 from typing import Final
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from triak_trade.deployment.runtime_env import (
     build_ai_gateway_runtime_env,
+    build_container_proxy_candidates,
     build_dashboard_runtime_env,
+    choose_first_reachable_proxy_url,
     load_root_env_file,
 )
 
@@ -58,6 +60,37 @@ def _wait_for_tcp(host: str, port: int, *, timeout_seconds: int = 180) -> None:
     raise RuntimeError(f"timed out waiting for tcp://{host}:{port}")
 
 
+def _can_reach_proxy_url(proxy_url: str) -> bool:
+    parsed = urlsplit(proxy_url)
+    host = parsed.hostname
+    port = parsed.port
+    if not host or port is None:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _apply_best_proxy_env(root_env: dict[str, str], *, include_uag: bool) -> str | None:
+    selected = choose_first_reachable_proxy_url(
+        build_container_proxy_candidates(root_env, include_uag=include_uag),
+        probe=_can_reach_proxy_url,
+    )
+    if not selected:
+        return None
+    os.environ["HTTP_PROXY"] = selected
+    os.environ["HTTPS_PROXY"] = selected
+    os.environ["ALL_PROXY"] = selected
+    os.environ["http_proxy"] = selected
+    os.environ["https_proxy"] = selected
+    os.environ["all_proxy"] = selected
+    os.environ["GEMINI_HTTP_PROXY"] = selected
+    os.environ["GEMINI_HTTPS_PROXY"] = selected
+    return selected
+
+
 def _run_with_retries(
     cmd: list[str],
     *,
@@ -85,6 +118,7 @@ def _run_with_retries(
 
 def _run_dashboard() -> int:
     root_env = _load_and_apply_root_env()
+    _apply_best_proxy_env(root_env, include_uag=True)
     for key, value in build_dashboard_runtime_env(root_env).items():
         os.environ[key] = value
     Path("/app/runtime").mkdir(parents=True, exist_ok=True)
@@ -109,9 +143,12 @@ def _run_dashboard() -> int:
 
 def _run_ai_gateway() -> int:
     root_env = _load_and_apply_root_env()
+    selected_proxy = _apply_best_proxy_env(root_env, include_uag=True)
     env_file = os.environ.get("TRIAK_ENV_FILE", str(_DEFAULT_ENV_FILE))
     for key, value in build_ai_gateway_runtime_env(root_env, env_file_path=env_file).items():
         os.environ[key] = value
+    if selected_proxy:
+        os.environ["UAG_PROXY_URL"] = selected_proxy
     _wait_for_tcp("redis", 6379)
     cmd = [
         "python3",
