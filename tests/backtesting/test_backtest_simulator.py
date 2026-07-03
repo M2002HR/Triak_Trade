@@ -409,6 +409,153 @@ def test_simulator_snapshots_update_live_pnl_per_message_time() -> None:
     assert snapshots[1].current_balance > snapshots[1].realized_balance
 
 
+def test_simulator_incremental_live_preview_matches_full_replay() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    update_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+        action=SignalAction.UPDATE_TP,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.UPDATE_TP),
+        related_signal_id="s1",
+        debug_notes=[],
+        source_message_id=2,
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(1, "103", "100.5", o="100.5", c="102.5"),
+    ]
+    simulator = BacktestSimulator()
+
+    (
+        _trades_first,
+        _balance_first,
+        first_snapshots,
+        state,
+    ) = simulator.simulate_live_preview_incremental(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    (
+        _trades_second,
+        _balance_second,
+        second_snapshots,
+        _,
+    ) = simulator.simulate_live_preview_incremental(
+        events=[open_event, update_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        previous_state=state,
+    )
+    _trades_full, _balance_full, full_snapshots = simulator.simulate_with_snapshots(
+        events=[open_event, update_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        close_open_positions_at_end=False,
+    )
+
+    assert first_snapshots
+    assert second_snapshots
+    assert full_snapshots
+    assert second_snapshots[-1].signal_states["s1"] == full_snapshots[-1].signal_states["s1"]
+    assert second_snapshots[-1].current_balance == full_snapshots[-1].current_balance
+
+
+def test_simulator_incremental_live_preview_handles_new_symbol_with_older_candles() -> None:
+    btc_open = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="btc",
+        parsed_signal=_parsed(SignalAction.OPEN).model_copy(update={"symbol": "BTCUSDT"}),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    eth_open = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="eth",
+        parsed_signal=_parsed(SignalAction.OPEN).model_copy(update={"symbol": "ETHUSDT"}),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=2,
+    )
+    btc_candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(1, "102", "100", o="100.5", c="101.5"),
+        _candle(2, "103", "101", o="101.5", c="102.5"),
+    ]
+    eth_candles = [
+        Candle(
+            symbol="ETHUSDT",
+            interval="1m",
+            open_time=datetime(2026, 6, 1, 0, minute, tzinfo=timezone.utc),
+            close_time=datetime(2026, 6, 1, 0, minute + 1, tzinfo=timezone.utc),
+            open=Decimal("50"),
+            high=Decimal("51"),
+            low=Decimal("49.5"),
+            close=Decimal("50.5"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for minute in range(3)
+    ]
+    simulator = BacktestSimulator()
+
+    (
+        _trades_first,
+        _balance_first,
+        _first_snapshots,
+        state,
+    ) = simulator.simulate_live_preview_incremental(
+        events=[btc_open],
+        candles=btc_candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    (
+        _trades_second,
+        _balance_second,
+        second_snapshots,
+        _,
+    ) = simulator.simulate_live_preview_incremental(
+        events=[btc_open, eth_open],
+        candles=btc_candles + eth_candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        previous_state=state,
+    )
+    _trades_full, _balance_full, full_snapshots = simulator.simulate_with_snapshots(
+        events=[btc_open, eth_open],
+        candles=btc_candles + eth_candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        close_open_positions_at_end=False,
+    )
+
+    assert second_snapshots
+    assert full_snapshots
+    assert second_snapshots[-1].signal_states["btc"] == full_snapshots[-1].signal_states["btc"]
+    assert second_snapshots[-1].signal_states["eth"] == full_snapshots[-1].signal_states["eth"]
+
+
 def test_simulator_snapshots_include_not_filled_signals() -> None:
     signal = _parsed(SignalAction.OPEN)
     signal.entry_type = EntryType.MARKET
@@ -439,6 +586,39 @@ def test_simulator_snapshots_include_not_filled_signals() -> None:
     assert snapshots[0].closed_trades == 1
     assert "s1" in snapshots[0].signal_states
     assert snapshots[0].signal_states["s1"].status == "not_filled"
+
+
+def test_simulator_records_not_filled_when_open_is_rejected_for_zero_stop_distance() -> None:
+    signal = _parsed(SignalAction.OPEN)
+    signal.entry_low = Decimal("100")
+    signal.entry_high = Decimal("100")
+    signal.stop_loss = Decimal("100")
+    signal.take_profits = [Decimal("104")]
+    event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=signal,
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+        leverage=10,
+    )
+
+    trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[event],
+        candles=[_candle(0, "101", "99.5", o="100", c="100.2")],
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("3"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        max_effective_leverage=Decimal("10"),
+    )
+
+    assert len(trades) == 1
+    assert trades[0].status == "not_filled"
+    assert "rejected_zero_stop_distance" in trades[0].notes
+    assert snapshots[-1].signal_states["s1"].status == "not_filled"
+    assert "rejected_zero_stop_distance" in snapshots[-1].signal_states["s1"].notes
 
 
 def test_simulator_fills_limit_signal_when_message_arrives_mid_candle() -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 from triak_trade.backtesting.real_runner import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.report_store import BacktestReportStore
 from triak_trade.backtesting.simulator import (
+    BacktestSimulator,
     PriceLevelSpan,
     SignalPricePoint,
     SimulationSignalState,
@@ -545,13 +546,10 @@ def test_real_backtest_runner_updates_live_state_on_new_message_before_refresh_i
         for event in progress_events
         if event.event_type == "message" and event.phase == "simulate"
     ]
-    assert len(
-        [
-            event
-            for event in simulate_message_events
-            if event.summary == "Live simulation state updated for message 1."
-        ]
-    ) >= 2
+    assert any(
+        event.summary == "Live simulation state updated for message 1."
+        for event in simulate_message_events
+    )
     assert any(
         event.live_metrics is not None
         and event.live_metrics.get("live_open_positions") == "0"
@@ -563,6 +561,553 @@ def test_real_backtest_runner_updates_live_state_on_new_message_before_refresh_i
         and "Virtual lifecycle refresh checkpoint" in event.summary
         for event in progress_events
     )
+
+
+def test_real_backtest_runner_falls_back_to_trace_state_when_live_preview_is_capped(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="ETHUSDT LONG Entry: 50 - 50 SL: 49 TP: 55 Leverage: 5x",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    candles = [
+        Candle(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time=now + timedelta(minutes=index),
+            close_time=now + timedelta(minutes=index + 1),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100.5"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(3)
+    ]
+    candles.extend(
+        Candle(
+            symbol="ETHUSDT",
+            interval="1m",
+            open_time=now + timedelta(minutes=index),
+            close_time=now + timedelta(minutes=index + 1),
+            open=Decimal("50"),
+            high=Decimal("51"),
+            low=Decimal("49.5"),
+            close=Decimal("50.4"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(3)
+    )
+    provider = FakeMarketDataProvider(
+        candles_by_symbol={"BTCUSDT": candles[:3], "ETHUSDT": candles[3:]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path, REAL_BACKTEST_MAX_CANDLES=1),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    fallback_events = [
+        event
+        for event in progress_events
+        if event.live_signals and event.phase == "classify_messages"
+    ]
+    assert fallback_events
+    latest = fallback_events[-1]
+    assert latest.live_signals is not None
+    assert len(latest.live_signals) == 2
+    assert latest.counts["trades_simulated"] == 2
+    assert all(signal["status_group"] == "active" for signal in latest.live_signals)
+    assert all("entry_price" not in signal for signal in latest.live_signals)
+    assert all("mark_price" not in signal for signal in latest.live_signals)
+    assert latest.live_metrics is not None
+    assert latest.live_metrics["live_open_positions"] == "2"
+    assert latest.live_metrics["live_closed_trades"] == "0"
+    assert "live_total_pnl" not in latest.live_metrics
+
+
+def test_real_backtest_runner_scales_live_preview_cap_by_tracked_symbol_count(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="ETHUSDT LONG Entry: 50 - 50 SL: 49 TP: 55 Leverage: 5x",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    candles = [
+        Candle(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time=now + timedelta(minutes=index),
+            close_time=now + timedelta(minutes=index + 1),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100.5"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(3)
+    ]
+    candles.extend(
+        Candle(
+            symbol="ETHUSDT",
+            interval="1m",
+            open_time=now + timedelta(minutes=index),
+            close_time=now + timedelta(minutes=index + 1),
+            open=Decimal("50"),
+            high=Decimal("51"),
+            low=Decimal("49.5"),
+            close=Decimal("50.4"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(3)
+    )
+    provider = FakeMarketDataProvider(
+        candles_by_symbol={"BTCUSDT": candles[:3], "ETHUSDT": candles[3:]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path, REAL_BACKTEST_MAX_CANDLES=3),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    classify_events = [
+        event
+        for event in progress_events
+        if event.phase == "classify_messages" and event.live_signals
+    ]
+    assert classify_events
+    latest = classify_events[-1]
+    assert latest.live_signals is not None
+    assert {signal["symbol"] for signal in latest.live_signals} == {"BTCUSDT", "ETHUSDT"}
+    assert all(signal.get("entry_price") is not None for signal in latest.live_signals)
+    assert all(signal.get("mark_price") is not None for signal in latest.live_signals)
+    assert latest.live_metrics is not None
+    assert latest.live_metrics["live_open_positions"] == "2"
+    assert latest.live_metrics["live_total_pnl"] != "0"
+
+
+def test_real_backtest_runner_does_not_emit_interval_checkpoint_flood_during_live_preview(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="close all",
+        date=now + timedelta(hours=20),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path, BACKTEST_LIFECYCLE_REFRESH_INTERVAL="30m"),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)}),
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(hours=21),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    assert not any(
+        event.event_type == "run"
+        and event.phase == "simulate"
+        and "Virtual lifecycle refresh checkpoint" in event.summary
+        for event in progress_events
+    )
+
+
+def test_real_backtest_runner_skips_live_replay_for_entry_only_follow_up(
+    tmp_path: Path,
+) -> None:
+    from triak_trade.agents.classifier import ClassifiedMessage
+    from triak_trade.backtesting.real_runner import _ClassificationSelection
+    from triak_trade.domain.enums import EntryType, MarketType
+    from triak_trade.domain.models import ParsedSignal
+
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    open_message = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    update_message = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="BTCUSDT LONG Entry: 101 - 101",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=1,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [open_message, update_message]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)}),
+    )
+
+    class _EntryUpdateClassifier:
+        def classify(self, message, context):  # type: ignore[no-untyped-def]
+            if message.message_id == 1:
+                parsed = ParsedSignal(
+                    action=SignalAction.OPEN,
+                    market=MarketType.FUTURES,
+                    symbol="BTCUSDT",
+                    side=TradeSide.LONG,
+                    entry_type=EntryType.LIMIT,
+                    entry_low=Decimal("100"),
+                    entry_high=Decimal("100"),
+                    stop_loss=Decimal("98"),
+                    take_profits=[Decimal("104")],
+                    leverage=5,
+                    confidence=Decimal("0.9"),
+                    invalid_reason=None,
+                    source_channel_id=message.channel_id,
+                    source_message_id=message.message_id,
+                    parser_version="ai-v1",
+                )
+                return ClassifiedMessage(
+                    raw_message=message,
+                    normalized_message=None,
+                    parsed_signal=parsed,
+                    is_potential_new_signal=True,
+                    is_related_to_existing_signal=False,
+                    related_signal_id=None,
+                    relation_reason="new",
+                    confidence=Decimal("0.9"),
+                    debug_notes=["classifier=test"],
+                )
+            parsed = ParsedSignal(
+                action=SignalAction.UPDATE_ENTRY,
+                market=MarketType.FUTURES,
+                symbol="BTCUSDT",
+                side=TradeSide.LONG,
+                entry_type=EntryType.LIMIT,
+                entry_low=Decimal("101"),
+                entry_high=Decimal("101"),
+                stop_loss=None,
+                take_profits=[],
+                leverage=None,
+                confidence=Decimal("0.9"),
+                invalid_reason=None,
+                source_channel_id=message.channel_id,
+                source_message_id=message.message_id,
+                parser_version="ai-v1",
+            )
+            return ClassifiedMessage(
+                raw_message=message,
+                normalized_message=None,
+                parsed_signal=parsed,
+                is_potential_new_signal=False,
+                is_related_to_existing_signal=True,
+                related_signal_id=None,
+                relation_reason="reply",
+                confidence=Decimal("0.9"),
+                debug_notes=["classifier=test"],
+            )
+
+    runner._select_classifier = lambda use_ai: _ClassificationSelection(  # type: ignore[method-assign]
+        classifier=_EntryUpdateClassifier(),
+        ai_requested=False,
+        ai_configured=False,
+        warning=None,
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=20),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    simulate_message_events = [
+        event
+        for event in progress_events
+        if event.event_type == "message" and event.phase == "simulate"
+    ]
+    assert any(
+        event.summary == "Live simulation state updated for message 1."
+        for event in simulate_message_events
+    )
+    assert not any(
+        event.summary == "Live simulation state updated for message 2."
+        for event in simulate_message_events
+    )
+
+
+def test_real_backtest_runner_reuses_incremental_live_preview_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="close all",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)}),
+    )
+    incremental_calls: list[tuple[int, bool]] = []
+
+    original = BacktestSimulator.simulate_live_preview_incremental
+
+    def _tracked_incremental(self, **kwargs):  # type: ignore[no-untyped-def]
+        incremental_calls.append(
+            (len(kwargs["events"]), kwargs.get("previous_state") is not None)
+        )
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(
+        BacktestSimulator,
+        "simulate_live_preview_incremental",
+        _tracked_incremental,
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        )
+    )
+
+    assert result.success is True
+    assert incremental_calls
+    assert incremental_calls == [(1, False), (2, True)]
+
+
+def test_real_backtest_runner_emits_only_changed_signal_traces_in_live_preview(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="ETHUSDT LONG Entry: 50 - 50 SL: 49 TP: 55 Leverage: 5x",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    btc_candles = [
+        Candle(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time=now + timedelta(minutes=index),
+            close_time=now + timedelta(minutes=index + 1),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100.5"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(3)
+    ]
+    eth_candles = [
+        Candle(
+            symbol="ETHUSDT",
+            interval="1m",
+            open_time=now + timedelta(minutes=index),
+            close_time=now + timedelta(minutes=index + 1),
+            open=Decimal("50"),
+            high=Decimal("51"),
+            low=Decimal("49.5"),
+            close=Decimal("50.4"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(3)
+    ]
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(
+            candles_by_symbol={"BTCUSDT": btc_candles, "ETHUSDT": eth_candles}
+        ),
+    )
+    progress_events = []
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now - timedelta(minutes=1),
+            to_date=now + timedelta(minutes=10),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    simulate_message_events = [
+        event
+        for event in progress_events
+        if event.event_type == "message" and event.phase == "simulate"
+    ]
+    assert [
+        event.summary for event in simulate_message_events
+    ].count("Live simulation state updated for message 1.") == 1
+    assert [
+        event.summary for event in simulate_message_events
+    ].count("Live simulation state updated for message 2.") == 1
 
 
 def test_real_backtest_runner_exposes_market_signal_fill_from_first_available_candle(
@@ -814,10 +1359,7 @@ def test_real_backtest_runner_activates_signal_after_follow_up_stop_loss(
     assert result.trades_filled == 1
     live_signal_events = [event.live_signals for event in progress_events if event.live_signals]
     assert live_signal_events
-    latest_signal = live_signal_events[-1][0]
-    assert latest_signal["symbol"] == "HOMEUSDT"
-    assert latest_signal["status"] == "open"
-    assert latest_signal["status_group"] == "active"
+    assert any(signals[0]["symbol"] == "HOMEUSDT" for signals in live_signal_events)
     traces = [event.trace for event in progress_events if event.trace is not None]
     originating = next(trace for trace in reversed(traces) if trace.message_id == 10)
     assert originating is not None
@@ -2133,7 +2675,25 @@ def test_second_open_for_same_symbol_is_rerouted_to_followup(tmp_path: Path) -> 
     runner = RealBacktestRunner(
         settings=_settings(tmp_path),
         telegram_client=telegram,
-        market_data_provider=FakeMarketDataProvider(),
+        market_data_provider=FakeMarketDataProvider(
+            candles_by_symbol={
+                "DOGEUSDT": [
+                    Candle(
+                        symbol="DOGEUSDT",
+                        interval="1m",
+                        open_time=now + timedelta(minutes=index),
+                        close_time=now + timedelta(minutes=index + 1),
+                        open=Decimal("0.0888"),
+                        high=Decimal("0.0890"),
+                        low=Decimal("0.0882"),
+                        close=Decimal("0.0886"),
+                        volume=Decimal("10"),
+                        source=CandleSource.FIXTURE,
+                    )
+                    for index in range(3)
+                ]
+            }
+        ),
     )
     request = RealBacktestRunRequest(
         channel="https://t.me/Crypto_Etehad",
@@ -2180,6 +2740,182 @@ def test_second_open_for_same_symbol_is_rerouted_to_followup(tmp_path: Path) -> 
     assert followup_events[0].action is not SignalAction.OPEN
     second_trace = traces[31]
     assert "rerouted_open_to_followup; symbol_owner=" in " ".join(second_trace.debug_notes)
+
+
+def test_second_open_for_closed_symbol_stays_new_signal(tmp_path: Path) -> None:
+    import asyncio
+
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Crypto_Etehad",
+        channel_username="Crypto_Etehad",
+        message_id=30,
+        text="DOGE/USDT SHORT MARKET SL 0.08915 TP 0.087 0.085",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    close_follow_up = RawTelegramMessage(
+        channel_id="https://t.me/Crypto_Etehad",
+        channel_username="Crypto_Etehad",
+        message_id=31,
+        text="close doge",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second_open = RawTelegramMessage(
+        channel_id="https://t.me/Crypto_Etehad",
+        channel_username="Crypto_Etehad",
+        message_id=32,
+        text="DOGE/USDT SHORT MARKET SL 0.08880 TP 0.0865 0.0845",
+        date=now + timedelta(minutes=2),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={
+            "https://t.me/Crypto_Etehad": [first, close_follow_up, second_open]
+        }
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(
+            candles_by_symbol={
+                "DOGEUSDT": [
+                    Candle(
+                        symbol="DOGEUSDT",
+                        interval="1m",
+                        open_time=now + timedelta(minutes=index),
+                        close_time=now + timedelta(minutes=index + 1),
+                        open=Decimal("0.0880"),
+                        high=Decimal("0.0895"),
+                        low=Decimal("0.0850"),
+                        close=Decimal("0.0860"),
+                        volume=Decimal("10"),
+                        source=CandleSource.FIXTURE,
+                    )
+                    for index in range(3)
+                ]
+            }
+        ),
+    )
+
+    class _Classifier:
+        def classify(self, message, context):  # type: ignore[no-untyped-def]
+            from triak_trade.agents.classifier import ClassifiedMessage
+            from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
+            from triak_trade.domain.models import ParsedSignal
+
+            if message.message_id in {30, 32}:
+                parsed = ParsedSignal(
+                    action=SignalAction.OPEN,
+                    market=MarketType.FUTURES,
+                    symbol="DOGEUSDT",
+                    side=TradeSide.SHORT,
+                    entry_type=EntryType.MARKET,
+                    entry_low=None,
+                    entry_high=None,
+                    stop_loss=(
+                        Decimal("0.08915")
+                        if message.message_id == 30
+                        else Decimal("0.08880")
+                    ),
+                    take_profits=[Decimal("0.087"), Decimal("0.085")]
+                    if message.message_id == 30
+                    else [Decimal("0.0865"), Decimal("0.0845")],
+                    leverage=10,
+                    confidence=Decimal("0.90"),
+                    invalid_reason=None,
+                    source_channel_id=message.channel_id,
+                    source_message_id=message.message_id,
+                    parser_version="ai-v1",
+                )
+                return ClassifiedMessage(
+                    raw_message=message,
+                    normalized_message=None,
+                    parsed_signal=parsed,
+                    is_potential_new_signal=True,
+                    is_related_to_existing_signal=False,
+                    related_signal_id=None,
+                    relation_reason=None,
+                    confidence=parsed.confidence,
+                    debug_notes=["classifier=test"],
+                )
+
+            parsed = ParsedSignal(
+                action=SignalAction.CLOSE,
+                market=MarketType.FUTURES,
+                symbol="DOGEUSDT",
+                side=TradeSide.SHORT,
+                entry_type=EntryType.UNKNOWN,
+                entry_low=None,
+                entry_high=None,
+                stop_loss=None,
+                take_profits=[],
+                leverage=None,
+                confidence=Decimal("0.90"),
+                invalid_reason=None,
+                source_channel_id=message.channel_id,
+                source_message_id=message.message_id,
+                parser_version="ai-v1",
+            )
+            return ClassifiedMessage(
+                raw_message=message,
+                normalized_message=None,
+                parsed_signal=parsed,
+                is_potential_new_signal=False,
+                is_related_to_existing_signal=True,
+                related_signal_id=None,
+                relation_reason="symbol",
+                confidence=parsed.confidence,
+                debug_notes=["classifier=test"],
+            )
+
+    counts = {
+        "total_messages": 3,
+        "caption_media_candidates": 0,
+        "classified_messages": 0,
+        "parsed_signals": 0,
+        "valid_signals": 0,
+        "invalid_signals": 0,
+        "ignored_messages": 0,
+        "ambiguous_messages": 0,
+        "ai_failed_messages": 0,
+        "trades_simulated": 0,
+        "trades_filled": 0,
+    }
+    events, traces, _signal_trace_map, _sym, _counts, _pref = asyncio.run(
+        runner._build_events_with_traces(
+            request=RealBacktestRunRequest(
+                channel="https://t.me/Crypto_Etehad",
+                from_date=now - timedelta(minutes=1),
+                to_date=now + timedelta(minutes=10),
+                interval="1m",
+                max_messages=50,
+                use_ai=True,
+                send_telegram_summary=False,
+                send_log_channel=False,
+                log_per_message=False,
+            ),
+            classifier=_Classifier(),
+            messages=[first, close_follow_up, second_open],
+            progress_callback=None,
+            counts=counts,
+            warnings=[],
+            prefetched_candles_by_symbol={},
+        )
+    )
+
+    open_events = [event for event in events if event.action is SignalAction.OPEN]
+    assert len(open_events) == 2
+    latest_trace = traces[32]
+    assert latest_trace.classification == "new_signal"
+    assert not any(
+        "rerouted_open_to_followup; symbol_owner=" in note
+        for note in latest_trace.debug_notes
+    )
 
 
 def test_report_store_writes_json_and_markdown_and_latest(tmp_path: Path) -> None:

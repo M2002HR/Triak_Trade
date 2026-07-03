@@ -191,6 +191,22 @@ def test_resolve_reply_to_closed_signal_for_audit_visibility() -> None:
     assert result.method == "reply_to"
 
 
+def test_resolve_ignores_ineligible_ai_target_and_falls_back_to_reply() -> None:
+    closed = _signal("sig_closed", "BTCUSDT", 10, _NOW)
+    open_sig = _signal("sig_open", "ETHUSDT", 20, _NOW + timedelta(minutes=1))
+    ctx = _ctx(closed, open_sig)
+    result = resolve_related_signal_id(
+        context=ctx,
+        parsed=_parsed(None, SignalAction.UPDATE_SL),
+        raw_related_id="sig_closed",
+        message=_msg(21, reply_to=20),
+        action=SignalAction.UPDATE_SL,
+        signal_filter=lambda signal, _method: signal.signal_id == "sig_open",
+    )
+    assert result.signal_id == "sig_open"
+    assert result.method == "reply_to"
+
+
 def test_resolve_multi_signal_same_symbol_picks_most_recent() -> None:
     older = _signal("sig_old", "BTCUSDT", 10, _NOW)
     newer = _signal("sig_new", "BTCUSDT", 20, _NOW + timedelta(hours=1))

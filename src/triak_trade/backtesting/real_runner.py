@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from html import escape
@@ -42,6 +42,7 @@ from triak_trade.backtesting.report import (
 )
 from triak_trade.backtesting.report_store import BacktestReportStore
 from triak_trade.backtesting.simulator import (
+    IncrementalPreviewState,
     PriceLevelSpan,
     SignalPricePoint,
     SimulationSnapshot,
@@ -263,6 +264,22 @@ class _ClassificationSelection:
     ai_requested: bool
     ai_configured: bool
     warning: str | None
+
+
+@dataclass
+class _LivePreviewCache:
+    state: IncrementalPreviewState | None = None
+    processed_event_count: int = 0
+    last_trace_fingerprints: dict[str, tuple[Any, ...]] = field(default_factory=dict)
+
+
+_SIGNAL_ACTIONS_THAT_REQUIRE_LIVE_REPLAY = {
+    SignalAction.OPEN,
+    SignalAction.CLOSE,
+    SignalAction.CANCEL,
+    SignalAction.UPDATE_SL,
+    SignalAction.UPDATE_TP,
+}
 
 
 class RealBacktestRunner:
@@ -869,14 +886,22 @@ class RealBacktestRunner:
                 warnings=warnings,
             )
 
-        # Enforce the candle cap to bound memory/CPU. Candles are already sorted
-        # by open_time ascending; we keep the LATEST ones (most likely to cover
-        # the signal timestamps) by slicing off the oldest end.
+        # Enforce the candle cap to bound memory/CPU. We sort globally by time
+        # before capping; slicing the append-order list can bias the replay
+        # toward whichever symbols were fetched last and silently drop older
+        # candles for earlier signals.
         max_candles = self.settings.REAL_BACKTEST_MAX_CANDLES
-        if max_candles > 0 and len(candles) > max_candles:
-            candles = candles[-max_candles:]
+        symbol_count_for_cap = max(
+            1,
+            len({normalize_market_symbol(item.symbol) for item in candles if item.symbol}),
+        )
+        effective_candle_cap = max_candles * symbol_count_for_cap if max_candles > 0 else 0
+        if effective_candle_cap > 0 and len(candles) > effective_candle_cap:
+            candles = sorted(candles, key=lambda item: item.open_time)[-effective_candle_cap:]
             warnings.append(
-                f"candles_capped=true; kept last {max_candles} of fetched candles"
+                "candles_capped=true; "
+                f"kept last {effective_candle_cap} of fetched candles across "
+                f"{symbol_count_for_cap} symbols"
             )
 
         report_request = BacktestRequest(
@@ -1381,8 +1406,10 @@ class RealBacktestRunner:
         # to the dashboard.  Shared across all _update_live_simulation_state calls
         # for this run so each call only emits NEW snapshots.
         _emitted_interval_count: list[int] = [0]
+        _live_preview_cache = _LivePreviewCache()
 
         for index, message in enumerate(sorted_messages):
+            _force_live_preview_rebuild = False
             next_message_time = (
                 self._to_utc(sorted_messages[index + 1].date)
                 if index + 1 < len(sorted_messages)
@@ -1586,7 +1613,16 @@ class RealBacktestRunner:
             # returned.  This prevents orphan "new signal" entries that never open
             # a position while the real instruction (move SL, close, etc.) is lost.
             reply_owner = context.find_signal_by_message_reply(message.reply_to_msg_id)
-            if classified.is_potential_new_signal and reply_owner is not None:
+            if (
+                classified.is_potential_new_signal
+                and reply_owner is not None
+                and self._is_signal_eligible_for_backtest_follow_up(
+                    reply_owner,
+                    "reply_to",
+                    traces_by_message_id=traces_by_message_id,
+                    signal_trace_map=signal_trace_map,
+                )
+            ):
                 classified.is_potential_new_signal = False
                 classified.is_related_to_existing_signal = True
                 if not classified.related_signal_id:
@@ -1599,6 +1635,8 @@ class RealBacktestRunner:
                     context=context,
                     parsed=parsed_for_event,
                     message=message,
+                    traces_by_message_id=traces_by_message_id,
+                    signal_trace_map=signal_trace_map,
                 )
                 if symbol_reuse_owner is not None:
                     classified.is_potential_new_signal = False
@@ -1684,6 +1722,7 @@ class RealBacktestRunner:
                     classified.debug_notes.append(
                         f"promoted_reply_parent={promoted_parent_id}"
                     )
+                    _force_live_preview_rebuild = True
                 correlation = resolve_related_signal_id(
                     context=context,
                     parsed=parsed,
@@ -1692,6 +1731,14 @@ class RealBacktestRunner:
                     action=effective_action,
                     allow_last_resort=(
                         self.settings.REAL_BACKTEST_FOLLOWUP_LAST_RESORT_ATTACH
+                    ),
+                    signal_filter=lambda signal, method: (
+                        self._is_signal_eligible_for_backtest_follow_up(
+                            signal,
+                            method,
+                            traces_by_message_id=traces_by_message_id,
+                            signal_trace_map=signal_trace_map,
+                        )
                     ),
                 )
                 if correlation.note:
@@ -1747,10 +1794,12 @@ class RealBacktestRunner:
             )
 
             if signal_id is not None:
+                _was_signal_tracked_before = signal_id in signal_trace_map
                 await self._sync_signal_tracking(
                     request=request,
                     context=context,
                     signal_id=signal_id,
+                    trigger_message_id=message.message_id,
                     traces_by_message_id=traces_by_message_id,
                     signal_trace_map=signal_trace_map,
                     event_index_by_signal_id=event_index_by_signal_id,
@@ -1761,6 +1810,14 @@ class RealBacktestRunner:
                     counts=counts,
                     warnings=warnings,
                 )
+                if not _was_signal_tracked_before:
+                    refreshed_state = context.get_signal(signal_id)
+                    if (
+                        refreshed_state is not None
+                        and refreshed_state.created_from_message_id != message.message_id
+                        and signal_id in signal_trace_map
+                    ):
+                        _force_live_preview_rebuild = True
                 if classified.is_potential_new_signal:
                     refreshed_state = context.get_signal(signal_id)
                     if refreshed_state is not None and refreshed_state.current_signal is not None:
@@ -1945,9 +2002,8 @@ class RealBacktestRunner:
             # B1 throttle: always re-simulate on signal-bearing events (OPEN /
             # CLOSE / CANCEL / UPDATE_*) since they change position state.  For
             # IGNORE / UNKNOWN events, coalesce updates via the passive counter.
-            _is_signal_event = parsed_for_event.action not in (
-                SignalAction.IGNORE,
-                SignalAction.UNKNOWN,
+            _is_signal_event = (
+                parsed_for_event.action in _SIGNAL_ACTIONS_THAT_REQUIRE_LIVE_REPLAY
             )
             _enriched_existing_signal = (
                 signal_id is not None
@@ -1967,6 +2023,8 @@ class RealBacktestRunner:
                     current_message_id=message.message_id,
                     simulation_end_time=next_message_time,
                     emitted_interval_count=_emitted_interval_count,
+                    preview_cache=_live_preview_cache,
+                    force_full_rebuild=_force_live_preview_rebuild,
                 )
             else:
                 _passive_since_update += 1
@@ -1982,6 +2040,8 @@ class RealBacktestRunner:
                         current_message_id=message.message_id,
                         simulation_end_time=next_message_time,
                         emitted_interval_count=_emitted_interval_count,
+                        preview_cache=_live_preview_cache,
+                        force_full_rebuild=_force_live_preview_rebuild,
                     )
                     _passive_since_update = 0
             self._emit_run_progress(
@@ -2008,6 +2068,8 @@ class RealBacktestRunner:
         context: ChannelContext,
         parsed: ParsedSignal,
         message: RawTelegramMessage,
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        signal_trace_map: dict[str, int],
     ) -> SignalState | None:
         if parsed.action is not SignalAction.OPEN or parsed.symbol is None:
             return None
@@ -2016,18 +2078,58 @@ class RealBacktestRunner:
             for signal in context.find_signals_by_symbol(parsed.symbol)
             if signal.current_signal is not None
             and signal.created_from_message_id != message.message_id
-            and signal.status not in {
-                SignalStatus.CLOSED,
-                SignalStatus.CANCELLED,
-                SignalStatus.EXPIRED,
-                SignalStatus.REJECTED,
-                SignalStatus.INVALID,
-            }
+            and self._is_signal_currently_open_for_follow_up(
+                signal=signal,
+                traces_by_message_id=traces_by_message_id,
+                signal_trace_map=signal_trace_map,
+            )
             and self.validator.validate_for_backtest_open(signal.current_signal)[0]
         ]
         if not candidates:
             return None
         return max(candidates, key=lambda signal: signal.updated_at)
+
+    @staticmethod
+    def _is_signal_pending_follow_up_completion(
+        *,
+        signal: SignalState,
+        signal_trace_map: dict[str, int],
+    ) -> bool:
+        return signal.current_signal is not None and signal.signal_id not in signal_trace_map
+
+    @staticmethod
+    def _is_signal_currently_open_for_follow_up(
+        *,
+        signal: SignalState,
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        signal_trace_map: dict[str, int],
+    ) -> bool:
+        base_message_id = signal_trace_map.get(signal.signal_id)
+        if base_message_id is None:
+            return False
+        base_trace = traces_by_message_id.get(base_message_id)
+        return base_trace is not None and base_trace.final_status == "simulation_tracking"
+
+    def _is_signal_eligible_for_backtest_follow_up(
+        self,
+        signal: SignalState,
+        method: str,
+        *,
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        signal_trace_map: dict[str, int],
+    ) -> bool:
+        if self._is_signal_currently_open_for_follow_up(
+            signal=signal,
+            traces_by_message_id=traces_by_message_id,
+            signal_trace_map=signal_trace_map,
+        ):
+            return True
+        if method in {"reply_to", "reply_chain"}:
+            return self._is_signal_pending_follow_up_completion(
+                signal=signal,
+                signal_trace_map=signal_trace_map,
+            )
+        return False
 
     async def _maybe_promote_reply_parent(
         self,
@@ -2113,6 +2215,7 @@ class RealBacktestRunner:
             request=request,
             context=context,
             signal_id=signal_id,
+            trigger_message_id=message.message_id,
             traces_by_message_id=traces_by_message_id,
             signal_trace_map=signal_trace_map,
             event_index_by_signal_id=event_index_by_signal_id,
@@ -2138,6 +2241,7 @@ class RealBacktestRunner:
         request: RealBacktestRunRequest,
         context: ChannelContext,
         signal_id: str,
+        trigger_message_id: int,
         traces_by_message_id: dict[int, RealBacktestMessageTrace],
         signal_trace_map: dict[str, int],
         event_index_by_signal_id: dict[str, int],
@@ -2397,29 +2501,70 @@ class RealBacktestRunner:
         current_message_id: int,
         simulation_end_time: datetime | None = None,
         emitted_interval_count: list[int] | None = None,
+        preview_cache: _LivePreviewCache | None = None,
+        force_full_rebuild: bool = False,
     ) -> tuple[dict[str, str], list[dict[str, Any]]]:
+        tracked_symbols = {
+            normalize_market_symbol(trace.symbol)
+            for message_id in signal_trace_map.values()
+            for trace in [traces_by_message_id.get(message_id)]
+            if trace is not None and trace.symbol
+        }
         available_candles = [
             candle
             for candle_group in prefetched_candles_by_symbol.values()
             for candle in candle_group
-            if simulation_end_time is None or candle.close_time <= simulation_end_time
+            if (
+                (not tracked_symbols or normalize_market_symbol(candle.symbol) in tracked_symbols)
+                and (simulation_end_time is None or candle.close_time <= simulation_end_time)
+            )
         ]
         if not events or not available_candles or not signal_trace_map:
+            if preview_cache is not None:
+                preview_cache.state = None
+                preview_cache.processed_event_count = 0
+                preview_cache.last_trace_fingerprints.clear()
             return self._empty_live_metrics(), []
         # Skip the live preview simulation when the candle dataset is very large
         # to avoid repeated O(signals x candles) in-memory spikes during
-        # classification. The final simulation after classification uses the full
-        # (capped) candle set, so the dashboard results are still correct.
+        # classification. The cap scales with the number of tracked symbols:
+        # a flat global cap causes multi-symbol runs to degrade prematurely even
+        # when each symbol is individually within the allowed budget.
         live_candle_cap = self.settings.REAL_BACKTEST_MAX_CANDLES
-        if live_candle_cap > 0 and len(available_candles) > live_candle_cap:
-            return self._empty_live_metrics(), []
+        effective_live_candle_cap = (
+            live_candle_cap * max(1, len(tracked_symbols))
+            if live_candle_cap > 0
+            else 0
+        )
+        if (
+            effective_live_candle_cap > 0
+            and len(available_candles) > effective_live_candle_cap
+        ):
+            if preview_cache is not None:
+                preview_cache.state = None
+                preview_cache.processed_event_count = 0
+                preview_cache.last_trace_fingerprints.clear()
+            metrics, signals = self._fallback_live_state_from_traces(
+                traces_by_message_id=traces_by_message_id,
+                signal_trace_map=signal_trace_map,
+            )
+            counts["trades_simulated"] = len(signals)
+            counts["trades_filled"] = sum(
+                1
+                for signal in signals
+                if signal.get("status") not in {"simulation_tracking", "not_filled"}
+            )
+            return metrics, signals
 
         active_strategy = self._active_strategy()
         simulator = BacktestEngine(classifier=RegexMessageClassifier()).simulator
-        refresh_interval = timedelta(
-            seconds=interval_to_seconds(self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL)
+        prior_state = None if force_full_rebuild or preview_cache is None else preview_cache.state
+        previous_trace_fingerprints = (
+            {}
+            if force_full_rebuild or preview_cache is None
+            else dict(preview_cache.last_trace_fingerprints)
         )
-        _trades, _balance, snapshots = simulator.simulate_with_snapshots(
+        _trades, _balance, snapshots, resumed_state = simulator.simulate_live_preview_incremental(
             events=events,
             candles=available_candles,
             initial_balance=request.initial_balance,
@@ -2434,15 +2579,30 @@ class RealBacktestRunner:
                 self.settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE
             ),
             strategy=active_strategy,
-            snapshot_interval=refresh_interval,
             fee_rate_pct=Decimal(self.settings.BACKTEST_FEE_RATE_PCT),
             default_signal_leverage=Decimal(self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE),
-            close_open_positions_at_end=False,
+            previous_state=prior_state,
         )
+        if preview_cache is not None:
+            preview_cache.state = resumed_state
+            preview_cache.processed_event_count = len(events)
         if not snapshots:
-            return self._empty_live_metrics(), []
+            if preview_cache is not None:
+                preview_cache.state = None
+                preview_cache.processed_event_count = 0
+                preview_cache.last_trace_fingerprints.clear()
+            metrics, signals = self._fallback_live_state_from_traces(
+                traces_by_message_id=traces_by_message_id,
+                signal_trace_map=signal_trace_map,
+            )
+            counts["trades_simulated"] = len(signals)
+            counts["trades_filled"] = sum(
+                1
+                for signal in signals
+                if signal.get("status") not in {"simulation_tracking", "not_filled"}
+            )
+            return metrics, signals
         snapshot = snapshots[-1]
-        interval_snapshots = [item for item in snapshots if item.checkpoint_kind == "interval"]
         counts["trades_simulated"] = len(snapshot.signal_states)
         counts["trades_filled"] = sum(
             1 for state in snapshot.signal_states.values() if state.status != "not_filled"
@@ -2458,29 +2618,69 @@ class RealBacktestRunner:
         live_signals = self._live_signals_from_snapshot(snapshot, signal_links=signal_links)
         # Only emit NEW interval snapshots (those beyond the cursor) to prevent
         # re-broadcasting already-sent snapshots every call (B1 event explosion).
-        already_emitted = emitted_interval_count[0] if emitted_interval_count is not None else 0
-        new_interval_snapshots = interval_snapshots[already_emitted:]
-        self._emit_interval_snapshots(
-            snapshots=new_interval_snapshots,
-            latest_snapshot=snapshot,
-            counts=counts,
-            progress_callback=progress_callback,
-            live_metrics=metrics,
-            current_message_id=current_message_id,
-        )
-        if emitted_interval_count is not None:
-            emitted_interval_count[0] = len(interval_snapshots)
         self._apply_snapshot_to_traces(
             snapshot=snapshot,
             traces_by_message_id=traces_by_message_id,
             signal_trace_map=signal_trace_map,
+            previous_trace_fingerprints=previous_trace_fingerprints,
             progress_callback=progress_callback,
             counts=counts,
             current_message_id=current_message_id,
             live_metrics=metrics,
             live_signals=live_signals,
         )
+        if preview_cache is not None:
+            preview_cache.last_trace_fingerprints = {
+                signal_id: self._signal_trace_fingerprint(signal_state)
+                for signal_id, signal_state in snapshot.signal_states.items()
+            }
         return metrics, live_signals
+
+    def _fallback_live_state_from_traces(
+        self,
+        *,
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        signal_trace_map: dict[str, int],
+    ) -> tuple[dict[str, str], list[dict[str, Any]]]:
+        fallback_signals: list[dict[str, Any]] = []
+        active_count = 0
+        closed_count = 0
+        for signal_id, message_id in signal_trace_map.items():
+            trace = traces_by_message_id.get(message_id)
+            if trace is None:
+                continue
+            is_active = trace.final_status == "simulation_tracking"
+            if is_active:
+                active_count += 1
+            else:
+                closed_count += 1
+            fallback_signals.append(
+                {
+                    "signal_id": signal_id,
+                    "symbol": trace.symbol or "unknown",
+                    "side": trace.side or "unknown",
+                    "status": trace.final_status,
+                    "status_group": "active" if is_active else "inactive",
+                    "entry_time": trace.message_date.isoformat(),
+                    "entry_time_tehran": trace.message_date.astimezone(TEHRAN_TZ).isoformat(),
+                    "lifecycle": list(trace.debug_notes or []),
+                    "message_link": trace.message_link,
+                }
+            )
+        fallback_signals.sort(
+            key=lambda item: (
+                item.get("status_group") != "active",
+                str(item.get("entry_time") or ""),
+                str(item.get("signal_id") or ""),
+            ),
+        )
+        return (
+            {
+                "live_open_positions": str(active_count),
+                "live_closed_trades": str(closed_count),
+            },
+            fallback_signals,
+        )
 
     def _emit_interval_snapshots(
         self,
@@ -2518,6 +2718,7 @@ class RealBacktestRunner:
         snapshot: SimulationSnapshot,
         traces_by_message_id: dict[int, RealBacktestMessageTrace],
         signal_trace_map: dict[str, int],
+        previous_trace_fingerprints: dict[str, tuple[Any, ...]],
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         current_message_id: int,
@@ -2528,6 +2729,9 @@ class RealBacktestRunner:
             trace = traces_by_message_id.get(message_id)
             signal_state = snapshot.signal_states.get(signal_id)
             if trace is None or signal_state is None:
+                continue
+            current_fingerprint = self._signal_trace_fingerprint(signal_state)
+            if previous_trace_fingerprints.get(signal_id) == current_fingerprint:
                 continue
             if signal_state.status == "open":
                 trace.final_status = "simulation_tracking"
@@ -2585,6 +2789,27 @@ class RealBacktestRunner:
                 live_metrics=live_metrics,
                 live_signals=live_signals,
             )
+
+    @staticmethod
+    def _signal_trace_fingerprint(signal_state: Any) -> tuple[Any, ...]:
+        return (
+            signal_state.status,
+            signal_state.symbol,
+            signal_state.side.value,
+            signal_state.entry_time,
+            signal_state.exit_time,
+            signal_state.entry_price,
+            signal_state.exit_price,
+            signal_state.stop_loss,
+            tuple(signal_state.take_profits),
+            signal_state.original_quantity,
+            signal_state.open_quantity,
+            signal_state.targets_hit,
+            signal_state.realized_pnl,
+            tuple(signal_state.notes),
+            signal_state.declared_leverage,
+            signal_state.effective_leverage,
+        )
 
     @staticmethod
     def _live_metrics_from_snapshot(snapshot: SimulationSnapshot) -> dict[str, str]:

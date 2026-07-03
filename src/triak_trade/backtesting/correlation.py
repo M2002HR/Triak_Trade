@@ -20,6 +20,7 @@ The resolver never mutates context; the caller performs attach/merge.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from triak_trade.agents.context import ChannelContext
@@ -80,6 +81,21 @@ def _is_trackable(signal: SignalState) -> bool:
     return signal.status not in _TERMINAL_STATUSES
 
 
+def _is_resolution_eligible(
+    signal: SignalState,
+    *,
+    method: str,
+    signal_filter: Callable[[SignalState, str], bool] | None,
+) -> bool:
+    if signal_filter is not None:
+        return signal_filter(signal, method)
+    if method in {"reply_to", "reply_chain"}:
+        return True
+    if method == "ai":
+        return True
+    return _is_trackable(signal)
+
+
 def resolve_related_signal_id(
     *,
     context: ChannelContext,
@@ -88,6 +104,7 @@ def resolve_related_signal_id(
     message: RawTelegramMessage,
     action: SignalAction,
     allow_last_resort: bool = False,
+    signal_filter: Callable[[SignalState, str], bool] | None = None,
 ) -> CorrelationResult:
     """Resolve which active signal a follow-up message belongs to.
 
@@ -97,7 +114,12 @@ def resolve_related_signal_id(
     # 1) Trust a valid AI id.
     if not is_invalid_ai_related_id(raw_related_id):
         assert raw_related_id is not None
-        if context.get_signal(raw_related_id) is not None:
+        signal = context.get_signal(raw_related_id)
+        if signal is not None and _is_resolution_eligible(
+            signal,
+            method="ai",
+            signal_filter=signal_filter,
+        ):
             return CorrelationResult(signal_id=raw_related_id, method="ai")
     ai_note = (
         None
@@ -107,11 +129,19 @@ def resolve_related_signal_id(
 
     # 2) reply_to chain.
     by_reply = context.find_signal_by_message_reply(message.reply_to_msg_id)
-    if by_reply is not None:
+    if by_reply is not None and _is_resolution_eligible(
+        by_reply,
+        method="reply_to",
+        signal_filter=signal_filter,
+    ):
         return CorrelationResult(signal_id=by_reply.signal_id, method="reply_to", note=ai_note)
     for parent in context.get_reply_chain(message):
         owner = context.find_signal_by_message_reply(parent.message_id)
-        if owner is not None:
+        if owner is not None and _is_resolution_eligible(
+            owner,
+            method="reply_chain",
+            signal_filter=signal_filter,
+        ):
             return CorrelationResult(
                 signal_id=owner.signal_id, method="reply_chain", note=ai_note
             )
@@ -122,6 +152,11 @@ def resolve_related_signal_id(
             signal
             for signal in context.active_signals.values()
             if _is_trackable(signal)
+            and _is_resolution_eligible(
+                signal,
+                method="symbol_match",
+                signal_filter=signal_filter,
+            )
             and signal.current_signal is not None
             and same_market_symbol(signal.current_signal.symbol, parsed.symbol)
         ]
@@ -140,7 +175,16 @@ def resolve_related_signal_id(
     #    mean that one. High precision, so it is on by default (not gated behind
     #    the last-resort flag, which exists for the *ambiguous* multi-signal case).
     if action in _FOLLOW_UP_ACTIONS:
-        trackable = [s for s in context.active_signals.values() if _is_trackable(s)]
+        trackable = [
+            s
+            for s in context.active_signals.values()
+            if _is_trackable(s)
+            and _is_resolution_eligible(
+                s,
+                method="single_active",
+                signal_filter=signal_filter,
+            )
+        ]
         if len(trackable) == 1:
             return CorrelationResult(
                 signal_id=trackable[0].signal_id, method="single_active", note=ai_note
@@ -148,7 +192,16 @@ def resolve_related_signal_id(
 
     # 5) Last resort: ambiguous follow-up with several open signals; only if enabled.
     if allow_last_resort and action in _FOLLOW_UP_ACTIONS:
-        trackable = [s for s in context.active_signals.values() if _is_trackable(s)]
+        trackable = [
+            s
+            for s in context.active_signals.values()
+            if _is_trackable(s)
+            and _is_resolution_eligible(
+                s,
+                method="most_recent_followup",
+                signal_filter=signal_filter,
+            )
+        ]
         if trackable:
             most_recent = max(trackable, key=lambda s: s.updated_at)
             return CorrelationResult(
