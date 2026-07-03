@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
+from decimal import ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, Decimal, InvalidOperation
 from typing import Any
 
 from triak_trade.agents.classifier import MessageClassifier, RegexMessageClassifier
@@ -90,6 +91,14 @@ class _ExchangeCloseResult:
     executed_quantity: Decimal
     realized_pnl: Decimal
     fees: Decimal
+
+
+@dataclass(frozen=True)
+class _TakeProfitLadderPlan:
+    pending_take_profits: list[Decimal]
+    required_quantity: Decimal | None
+    original_count: int
+    target_count: int
 
 
 class LiveTradingEngine:
@@ -2019,18 +2028,27 @@ class LiveTradingEngine:
         pending_targets = trade.take_profits[trade.targets_hit :]
         if len(pending_targets) <= 1:
             return
-        minimum_ladder_quantity = self._minimum_exchange_take_profit_ladder_quantity(
-            trade,
-            spec,
+        if len(self._exchange_take_profit_orders(trade, spec=spec)) >= len(pending_targets):
+            return
+        plan = self._plan_exchange_take_profit_ladder_for_open(
+            trade=trade,
+            spec=spec,
         )
-        if minimum_ladder_quantity is None:
+        if plan is None:
             raise ValueError(
                 "Position is too small for the configured take-profit ladder "
                 "within allocation limits"
             )
+        self._apply_exchange_take_profit_ladder_plan(
+            trade=trade,
+            plan=plan,
+            reason="allocation_limits",
+        )
+        if plan.required_quantity is None:
+            return
         self._promote_exchange_open_quantity_if_needed(
             trade=trade,
-            required_quantity=minimum_ladder_quantity,
+            required_quantity=plan.required_quantity,
             note_prefix="exchange_tp_ladder_quantity_promoted",
             insufficient_balance_error=(
                 "Insufficient balance to support the configured take-profit ladder on exchange"
@@ -2041,10 +2059,194 @@ class LiveTradingEngine:
             ),
         )
 
+    def _plan_exchange_take_profit_ladder_for_open(
+        self,
+        *,
+        trade: LiveTrade,
+        spec: Any,
+    ) -> _TakeProfitLadderPlan | None:
+        max_supported_quantity = self._max_exchange_quantity_within_allocation_limits(trade)
+        return self._plan_exchange_take_profit_ladder(
+            trade=trade,
+            spec=spec,
+            max_supported_quantity=max_supported_quantity,
+        )
+
+    def _plan_exchange_take_profit_ladder_for_current_quantity(
+        self,
+        *,
+        trade: LiveTrade,
+        spec: Any,
+    ) -> _TakeProfitLadderPlan | None:
+        return self._plan_exchange_take_profit_ladder(
+            trade=trade,
+            spec=spec,
+            max_supported_quantity=None,
+        )
+
+    def _plan_exchange_take_profit_ladder(
+        self,
+        *,
+        trade: LiveTrade,
+        spec: Any,
+        max_supported_quantity: Decimal | None,
+    ) -> _TakeProfitLadderPlan | None:
+        pending_targets = list(trade.take_profits[trade.targets_hit :])
+        original_count = len(pending_targets)
+        if original_count == 0:
+            return None
+        if original_count == 1:
+            return _TakeProfitLadderPlan(
+                pending_take_profits=pending_targets,
+                required_quantity=trade.quantity.quantize(Decimal("0.00000001")),
+                original_count=1,
+                target_count=1,
+            )
+
+        for target_count in self._take_profit_ladder_target_counts(original_count):
+            rebalanced_pending_targets = self._rebalance_take_profit_ladder_prices(
+                pending_targets,
+                target_count,
+            )
+            candidate_trade = trade.model_copy(deep=True)
+            candidate_trade.take_profits = (
+                list(trade.take_profits[: trade.targets_hit]) + rebalanced_pending_targets
+            )
+            if target_count <= 1:
+                return _TakeProfitLadderPlan(
+                    pending_take_profits=rebalanced_pending_targets,
+                    required_quantity=trade.quantity.quantize(Decimal("0.00000001")),
+                    original_count=original_count,
+                    target_count=target_count,
+                )
+            if max_supported_quantity is None:
+                supported_orders = self._exchange_take_profit_orders(candidate_trade, spec=spec)
+                if len(supported_orders) >= target_count:
+                    return _TakeProfitLadderPlan(
+                        pending_take_profits=rebalanced_pending_targets,
+                        required_quantity=trade.quantity.quantize(Decimal("0.00000001")),
+                        original_count=original_count,
+                        target_count=target_count,
+                    )
+                continue
+
+            required_quantity = self._minimum_exchange_take_profit_ladder_quantity(
+                candidate_trade,
+                spec,
+                max_supported_quantity=max_supported_quantity,
+            )
+            if required_quantity is None:
+                continue
+            if required_quantity <= max_supported_quantity:
+                return _TakeProfitLadderPlan(
+                    pending_take_profits=rebalanced_pending_targets,
+                    required_quantity=required_quantity,
+                    original_count=original_count,
+                    target_count=target_count,
+                )
+        if pending_targets:
+            return _TakeProfitLadderPlan(
+                pending_take_profits=self._rebalance_take_profit_ladder_prices(
+                    pending_targets,
+                    1,
+                ),
+                required_quantity=trade.quantity.quantize(Decimal("0.00000001")),
+                original_count=original_count,
+                target_count=1,
+            )
+        return None
+
+    def _apply_exchange_take_profit_ladder_plan(
+        self,
+        *,
+        trade: LiveTrade,
+        plan: _TakeProfitLadderPlan,
+        reason: str,
+    ) -> None:
+        if plan.original_count <= 0:
+            return
+        trade.take_profits = (
+            list(trade.take_profits[: trade.targets_hit]) + list(plan.pending_take_profits)
+        )
+        if trade.message_history and plan.target_count < plan.original_count:
+            trade.message_history[-1].notes.append(
+                f"exchange_tp_ladder_compressed={plan.original_count}->{plan.target_count}"
+                f"_due_to_{reason}"
+            )
+            formula = (
+                "nearest_target_singleton_v1"
+                if plan.target_count == 1
+                else "weighted_bucket_mean_v1"
+            )
+            trade.message_history[-1].notes.append(
+                f"exchange_tp_ladder_rebalanced={formula}"
+            )
+
+    @staticmethod
+    def _take_profit_ladder_target_counts(original_count: int) -> list[int]:
+        if original_count <= 0:
+            return []
+        counts = [original_count]
+        current = original_count
+        while current > 1:
+            if current > 5:
+                current = max(1, current - 2)
+            elif current > 3:
+                current = 3
+            else:
+                current = 1
+            if current not in counts:
+                counts.append(current)
+        return counts
+
+    @staticmethod
+    def _rebalance_take_profit_ladder_prices(
+        take_profits: list[Decimal],
+        target_count: int,
+    ) -> list[Decimal]:
+        if target_count <= 0 or not take_profits:
+            return []
+        if target_count >= len(take_profits):
+            return list(take_profits)
+        if target_count == 1:
+            return [take_profits[0].quantize(Decimal("0.00000001"))]
+
+        total = len(take_profits)
+        boundaries = [0]
+        for bucket in range(1, target_count):
+            raw_boundary = (
+                Decimal(bucket) * Decimal(total) / Decimal(target_count)
+            ).to_integral_value(rounding=ROUND_HALF_UP)
+            boundary = int(raw_boundary)
+            minimum_boundary = boundaries[-1] + 1
+            maximum_boundary = total - (target_count - bucket)
+            boundary = max(minimum_boundary, min(boundary, maximum_boundary))
+            boundaries.append(boundary)
+        boundaries.append(total)
+
+        denominator = Decimal(max(total - 1, 1))
+        rebalanced: list[Decimal] = []
+        for start_index, end_index in itertools.pairwise(boundaries):
+            bucket_prices = take_profits[start_index:end_index]
+            if len(bucket_prices) == 1:
+                rebalanced.append(bucket_prices[0].quantize(Decimal("0.00000001")))
+                continue
+            weighted_sum = Decimal("0")
+            total_weight = Decimal("0")
+            for index in range(start_index, end_index):
+                rank_weight = Decimal("1") + (Decimal(index) / denominator)
+                weighted_sum += take_profits[index] * rank_weight
+                total_weight += rank_weight
+            price = (weighted_sum / total_weight).quantize(Decimal("0.00000001"))
+            rebalanced.append(price)
+        return rebalanced
+
     def _minimum_exchange_take_profit_ladder_quantity(
         self,
         trade: LiveTrade,
         spec: Any,
+        *,
+        max_supported_quantity: Decimal | None = None,
     ) -> Decimal | None:
         pending_targets = trade.take_profits[trade.targets_hit :]
         if len(pending_targets) <= 1 or self._strategy is None:
@@ -2063,7 +2265,8 @@ class LiveTradingEngine:
         if len(self._exchange_take_profit_orders(trade, spec=spec)) >= len(pending_targets):
             return trade.quantity.quantize(Decimal("0.00000001"))
 
-        max_supported_quantity = self._max_exchange_quantity_within_allocation_limits(trade)
+        if max_supported_quantity is None:
+            max_supported_quantity = self._max_exchange_quantity_within_allocation_limits(trade)
         max_exchange_qty = self._floor_exchange_contract_quantity(max_supported_quantity, spec)
         max_units = self._exchange_quantity_units(max_exchange_qty, entry_contract_step)
         if max_units <= 0:
@@ -2775,7 +2978,6 @@ class LiveTradingEngine:
         trade.stop_loss = stop_loss
         trade.take_profits = normalized_take_profits
         tp_orders: list[tuple[int, Decimal, Decimal]] = []
-        pending_target_count = len(trade.take_profits[trade.targets_hit :])
         if refresh_take_profits:
             spec: Any | None = None
             if self._futures_client is not None:
@@ -2787,16 +2989,18 @@ class LiveTradingEngine:
                         trade.symbol,
                         exc,
                     )
-            tp_orders = self._exchange_take_profit_orders(trade, spec=spec)
-            if (
-                pending_target_count > 0
-                and len(tp_orders) < pending_target_count
-                and trade.message_history
-            ):
-                trade.message_history[-1].notes.append(
-                    "exchange_tp_ladder_compressed="
-                    f"{pending_target_count}->{len(tp_orders)}_due_to_contract_size"
+            if spec is not None:
+                plan = self._plan_exchange_take_profit_ladder_for_current_quantity(
+                    trade=trade,
+                    spec=spec,
                 )
+                if plan is not None:
+                    self._apply_exchange_take_profit_ladder_plan(
+                        trade=trade,
+                        plan=plan,
+                        reason="contract_size",
+                    )
+            tp_orders = self._exchange_take_profit_orders(trade, spec=spec)
         if refresh_take_profits or refresh_stop_loss:
             await self._cancel_existing_trade_protection(
                 trade,

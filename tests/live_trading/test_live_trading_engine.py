@@ -161,6 +161,16 @@ def _engine(tmp_path: Path) -> LiveTradingEngine:
     return engine
 
 
+def _target_hit_action_by_remaining(**kwargs: object) -> SimpleNamespace:
+    remaining = int(kwargs["remaining_targets_including_this"])
+    close_fraction = Decimal("1") if remaining <= 1 else Decimal("0.35")
+    return SimpleNamespace(
+        close_fraction=close_fraction,
+        move_sl_to_entry=False,
+        new_stop_loss=None,
+    )
+
+
 def _ignored_signal() -> ParsedSignal:
     return ParsedSignal(
         action=SignalAction.IGNORE,
@@ -1162,18 +1172,7 @@ async def test_sync_trade_protection_normalizes_trade_levels_before_exchange_sub
         Decimal("0.07656"),
         [Decimal("0.07209"), Decimal("0.07062")],
     )
-    engine._strategy.get_target_hit_action.side_effect = [
-        SimpleNamespace(
-            close_fraction=Decimal("0.35"),
-            move_sl_to_entry=False,
-            new_stop_loss=None,
-        ),
-        SimpleNamespace(
-            close_fraction=Decimal("1"),
-            move_sl_to_entry=False,
-            new_stop_loss=None,
-        ),
-    ]
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_by_remaining
     engine._futures_client.place_order.side_effect = [
         SimpleNamespace(order_id="tp_doge_1"),
         SimpleNamespace(order_id="tp_doge_2"),
@@ -1397,12 +1396,7 @@ async def test_sync_trade_protection_compresses_tiny_tp_ladder_to_valid_exchange
             ],
         }
     )
-    engine._strategy.get_target_hit_action.side_effect = [
-        SimpleNamespace(close_fraction=Decimal("0.35"), move_sl_to_entry=False, new_stop_loss=None),
-        SimpleNamespace(close_fraction=Decimal("0.40"), move_sl_to_entry=False, new_stop_loss=None),
-        SimpleNamespace(close_fraction=Decimal("0.50"), move_sl_to_entry=False, new_stop_loss=None),
-        SimpleNamespace(close_fraction=Decimal("1"), move_sl_to_entry=False, new_stop_loss=None),
-    ]
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_by_remaining
     engine._futures_client.set_trading_stop.return_value = {"ok": True}
     engine._futures_client.place_order.return_value = SimpleNamespace(order_id="tp_btc_1")
     engine._futures_client.get_open_orders.side_effect = [
@@ -1434,6 +1428,10 @@ async def test_sync_trade_protection_compresses_tiny_tp_ladder_to_valid_exchange
     assert engine._futures_client.place_order.await_args.kwargs["quantity"] == Decimal("0.00010000")
     assert any(
         note == "exchange_tp_ladder_compressed=4->1_due_to_contract_size"
+        for note in trade.message_history[-1].notes
+    )
+    assert any(
+        note == "exchange_tp_ladder_rebalanced=nearest_target_singleton_v1"
         for note in trade.message_history[-1].notes
     )
 
@@ -1574,12 +1572,7 @@ def test_exchange_take_profit_orders_compresses_small_contract_position_to_valid
         Decimal("56980"),
         Decimal("54600"),
     ]
-    engine._strategy.get_target_hit_action.side_effect = [
-        SimpleNamespace(close_fraction=Decimal("0.35"), move_sl_to_entry=False, new_stop_loss=None),
-        SimpleNamespace(close_fraction=Decimal("0.40"), move_sl_to_entry=False, new_stop_loss=None),
-        SimpleNamespace(close_fraction=Decimal("0.50"), move_sl_to_entry=False, new_stop_loss=None),
-        SimpleNamespace(close_fraction=Decimal("1"), move_sl_to_entry=False, new_stop_loss=None),
-    ]
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_by_remaining
     spec = FuturesContractSpec(
         {
             "symbol": "BTC-SWAP-USDT",
@@ -1602,6 +1595,143 @@ def test_exchange_take_profit_orders_compresses_small_contract_position_to_valid
     assert orders == [
         (0, Decimal("58850"), Decimal("0.00010000")),
     ]
+
+
+def _target_hit_action_for_promoted_ladder(**kwargs: object) -> SimpleNamespace:
+    targets_hit = int(kwargs["targets_hit_so_far"])
+    remaining = int(kwargs["remaining_targets_including_this"])
+    fractions = [
+        Decimal("0.35"),
+        Decimal("0.40"),
+        Decimal("0.50"),
+        Decimal("0.50"),
+    ]
+    if remaining <= 1:
+        close_fraction = Decimal("1")
+    else:
+        close_fraction = fractions[min(targets_hit, len(fractions) - 1)]
+    return SimpleNamespace(
+        close_fraction=close_fraction,
+        move_sl_to_entry=False,
+        new_stop_loss=None,
+    )
+
+
+def test_plan_exchange_take_profit_ladder_compresses_seven_targets_to_five_with_rebalanced_prices(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.side = "short"
+    trade.entry_price = Decimal("4185")
+    trade.quantity = Decimal("1")
+    trade.remaining_quantity = Decimal("1")
+    trade.take_profits = [
+        Decimal("4180"),
+        Decimal("4177"),
+        Decimal("4174"),
+        Decimal("4171"),
+        Decimal("4168"),
+        Decimal("4165"),
+        Decimal("4162"),
+    ]
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_by_remaining
+    spec = FuturesContractSpec(
+        {
+            "symbol": "XAU-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "1",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "1",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
+                }
+            ],
+        }
+    )
+
+    plan = engine._plan_exchange_take_profit_ladder(
+        trade=trade,
+        spec=spec,
+        max_supported_quantity=Decimal("6"),
+    )
+
+    assert plan is not None
+    assert plan.original_count == 7
+    assert plan.target_count == 5
+    assert plan.pending_take_profits == [
+        Decimal("4180.00000000"),
+        Decimal("4175.40000000"),
+        Decimal("4171.00000000"),
+        Decimal("4166.42857143"),
+        Decimal("4162.00000000"),
+    ]
+    assert plan.required_quantity == Decimal("6.00000000")
+
+
+def test_plan_exchange_take_profit_ladder_falls_back_to_three_then_one_when_needed(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.side = "short"
+    trade.entry_price = Decimal("4185")
+    trade.quantity = Decimal("1")
+    trade.remaining_quantity = Decimal("1")
+    trade.take_profits = [
+        Decimal("4180"),
+        Decimal("4177"),
+        Decimal("4174"),
+        Decimal("4171"),
+        Decimal("4168"),
+        Decimal("4165"),
+        Decimal("4162"),
+    ]
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_by_remaining
+    spec = FuturesContractSpec(
+        {
+            "symbol": "XAU-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "1",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "1",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
+                }
+            ],
+        }
+    )
+
+    plan_three = engine._plan_exchange_take_profit_ladder(
+        trade=trade,
+        spec=spec,
+        max_supported_quantity=Decimal("3"),
+    )
+    plan_one = engine._plan_exchange_take_profit_ladder(
+        trade=trade,
+        spec=spec,
+        max_supported_quantity=Decimal("1"),
+    )
+
+    assert plan_three is not None
+    assert plan_three.target_count == 3
+    assert plan_three.pending_take_profits == [
+        Decimal("4178.38461538"),
+        Decimal("4170.77777778"),
+        Decimal("4163.43478261"),
+    ]
+    assert plan_three.required_quantity == Decimal("3.00000000")
+
+    assert plan_one is not None
+    assert plan_one.target_count == 1
+    assert plan_one.pending_take_profits == [Decimal("4180.00000000")]
+    assert plan_one.required_quantity == Decimal("1.00000000")
 
 
 def test_ensure_exchange_quantity_supports_take_profit_ladder_promotes_open_quantity() -> None:
@@ -1636,26 +1766,7 @@ def test_ensure_exchange_quantity_supports_take_profit_ladder_promotes_open_quan
             notes=[],
         )
     ]
-    def _target_hit_action(**kwargs: object) -> SimpleNamespace:
-        targets_hit = int(kwargs["targets_hit_so_far"])
-        remaining = int(kwargs["remaining_targets_including_this"])
-        fractions = [
-            Decimal("0.35"),
-            Decimal("0.40"),
-            Decimal("0.50"),
-            Decimal("0.50"),
-        ]
-        if remaining <= 1:
-            close_fraction = Decimal("1")
-        else:
-            close_fraction = fractions[min(targets_hit, len(fractions) - 1)]
-        return SimpleNamespace(
-            close_fraction=close_fraction,
-            move_sl_to_entry=False,
-            new_stop_loss=None,
-        )
-
-    engine._strategy.get_target_hit_action.side_effect = _target_hit_action
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_for_promoted_ladder
     spec = FuturesContractSpec(
         {
             "symbol": "BTC-SWAP-USDT",
