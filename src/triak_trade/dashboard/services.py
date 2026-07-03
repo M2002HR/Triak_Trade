@@ -446,6 +446,17 @@ class DashboardService:
             return None
         return run.model_dump(mode="json")
 
+    def get_backtest_run_messages(
+        self,
+        run_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[dict[str, Any]] | None:
+        messages = self.backtests.get_run_messages(run_id, limit=limit)
+        if messages is None:
+            return None
+        return [message.model_dump(mode="json") for message in messages]
+
     def list_backtest_runs(self, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
         return [
             run.model_dump(mode="json")

@@ -61,6 +61,7 @@ class DashboardBacktestRun(BaseModel):
     current_phase_label: str = "Queued"
     current_phase_summary: str = "Waiting to start."
     current_message_id: int | None = None
+    processed_messages: int = 0
     total_messages: int = 0
     classified_messages: int = 0
     parsed_signals: int = 0
@@ -112,6 +113,7 @@ class DashboardBacktestRunSummary(BaseModel):
     current_phase_label: str = "Queued"
     current_phase_summary: str = "Waiting to start."
     current_message_id: int | None = None
+    processed_messages: int = 0
     total_messages: int = 0
     classified_messages: int = 0
     parsed_signals: int = 0
@@ -403,6 +405,18 @@ class DashboardBacktestCoordinator:
     def get_run(self, run_id: str) -> DashboardBacktestRun | None:
         return self.store.read(run_id)
 
+    def get_run_messages(
+        self,
+        run_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[RealBacktestMessageTrace] | None:
+        run = self.store.read(run_id)
+        if run is None:
+            return None
+        safe_limit = max(1, limit)
+        return list(run.messages[:safe_limit])
+
     def list_runs(self, limit: int = 20) -> list[DashboardBacktestRun]:
         return self.store.list_runs(limit=limit)
 
@@ -576,10 +590,18 @@ class DashboardBacktestCoordinator:
         )
         run.events = run.events[-120:]
         if event.trace is not None:
+            is_new_trace = not any(
+                existing.message_id == event.trace.message_id
+                for existing in run.messages
+            )
             self._merge_trace(run, event.trace)
+            if is_new_trace:
+                run.processed_messages += 1
+            else:
+                run.processed_messages = max(run.processed_messages, len(run.messages))
         self.store.write(run)
         self._append_run_progress_log(run, event)
-        self._notify(run)
+        self._notify(run, latest_trace=event.trace)
 
     _MAX_STORED_TRACES = 500
 
@@ -609,8 +631,10 @@ class DashboardBacktestCoordinator:
             if not signal_id:
                 continue
             base = merged.get(signal_id, {})
-            base.update(signal)
-            merged[signal_id] = base
+            merged[signal_id] = DashboardBacktestCoordinator._merge_signal_payload(
+                base,
+                signal,
+            )
         return sorted(
             merged.values(),
             key=lambda item: (
@@ -619,6 +643,89 @@ class DashboardBacktestCoordinator:
                 str(item.get("signal_id") or ""),
             ),
         )
+
+    @staticmethod
+    def _merge_signal_payload(
+        existing: dict[str, Any],
+        incoming: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(existing)
+        for key, value in incoming.items():
+            if DashboardBacktestCoordinator._is_destructive_placeholder_overwrite(
+                key=key,
+                existing=merged.get(key),
+                incoming=value,
+            ):
+                continue
+            merged[key] = value
+        return merged
+
+    @staticmethod
+    def _is_destructive_placeholder_overwrite(
+        *,
+        key: str,
+        existing: Any,
+        incoming: Any,
+    ) -> bool:
+        if existing is None:
+            return False
+        if incoming is None and key in {
+            "entry_price",
+            "entry_price_raw",
+            "stop_loss",
+            "stop_loss_raw",
+            "exit_time",
+            "exit_time_tehran",
+            "mark_price",
+            "mark_price_raw",
+        }:
+            return True
+        if key in {
+            "mark_price",
+            "mark_price_raw",
+            "realized_pnl",
+            "unrealized_pnl",
+            "total_pnl",
+            "total_pnl_pct",
+            "margin_pnl_pct",
+            "notional_value",
+            "risk_amount",
+            "open_quantity",
+            "original_quantity",
+            "margin",
+            "balance_basis",
+        } and DashboardBacktestCoordinator._is_zero_like(incoming):
+            return not DashboardBacktestCoordinator._is_zero_like(existing)
+        if key in {
+            "take_profits",
+            "take_profit_levels",
+            "take_profit_levels_raw",
+            "lifecycle",
+            "chart",
+        }:
+            if DashboardBacktestCoordinator._is_empty_like(incoming):
+                return not DashboardBacktestCoordinator._is_empty_like(existing)
+        return False
+
+    @staticmethod
+    def _is_zero_like(value: Any) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        try:
+            return Decimal(text) == Decimal("0")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_empty_like(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) == 0
+        return False
 
     @staticmethod
     def _refresh_signal_aggregate_metrics(run: DashboardBacktestRun) -> None:
@@ -666,15 +773,23 @@ class DashboardBacktestCoordinator:
         run.live_realized_balance = str(initial_balance + realized_pnl)
         run.live_current_balance = str(initial_balance + total_pnl)
 
-    def _notify(self, run: DashboardBacktestRun) -> None:
+    def _notify(
+        self,
+        run: DashboardBacktestRun,
+        *,
+        latest_trace: RealBacktestMessageTrace | None = None,
+    ) -> None:
         if self.notifier is None:
             return
         # Exclude the per-message trace list from real-time WebSocket pushes.
-        # Clients that need trace detail can request it via the dedicated
-        # /api/backtests/<run_id>/messages endpoint. This prevents serializing
-        # and pushing hundreds of full-text trace objects on every progress tick.
+        # Push only the latest trace delta so the dashboard can keep the
+        # message stream live without re-sending the full trace history on
+        # every progress tick.
         payload = run.model_dump(mode="json", exclude={"messages"})
-        self.notifier({"type": "backtest_run", "run": payload})
+        message: dict[str, Any] = {"type": "backtest_run", "run": payload}
+        if latest_trace is not None:
+            message["trace"] = latest_trace.model_dump(mode="json")
+        self.notifier(message)
 
     def _is_cancel_requested(self, run_id: str) -> bool:
         with self._lock:

@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from triak_trade.backtesting.real_runner import RealBacktestMessageTrace
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
+from triak_trade.dashboard.backtest_runtime import DashboardBacktestRun
 from triak_trade.dashboard.local_client import LocalASGIClient
 from triak_trade.live_trading.models import (
     LiveMessageTrace,
@@ -70,6 +72,51 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     log_per_message_slice = response.text.split('id="backtest-log-per-message"', 1)[1][:160]
     assert "checked" in send_log_slice
     assert "checked" in log_per_message_slice
+
+
+def test_backtest_run_messages_endpoint_returns_trace_list(tmp_path: Path) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    service = app.state.dashboard_service
+    service.backtests.store.write(
+        DashboardBacktestRun(
+            run_id="backtest_trace_api",
+            channel_input="@Tofan_Trade",
+            channel_resolved="https://t.me/Tofan_Trade",
+            from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_log_channel=False,
+            log_per_message=False,
+            status="running",
+            created_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+            messages=[
+                RealBacktestMessageTrace(
+                    message_id=77,
+                    channel_id="https://t.me/Tofan_Trade",
+                    channel_username="Tofan_Trade",
+                    message_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+                    last_updated_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+                    preview_text="BTCUSDT LONG",
+                    classification="new_signal",
+                    parsed_action="open",
+                )
+            ],
+        )
+    )
+    client_obj = LocalASGIClient(app)
+
+    response = client_obj.get(
+        "/api/backtests/runs/backtest_trace_api/messages",
+        headers=headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limit"] == 500
+    assert len(payload["messages"]) == 1
+    assert payload["messages"][0]["message_id"] == 77
 
 
 def test_logs_page_renders_log_channel_status(tmp_path: Path) -> None:

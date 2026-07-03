@@ -195,6 +195,19 @@ def build_router(
             return JSONResponse({"detail": "run_not_found"}, status_code=404)
         return JSONResponse(run)
 
+    @router.get("/api/backtests/runs/{run_id}/messages")
+    async def get_backtest_run_messages(
+        request: Request,
+        run_id: str,
+        limit: int = 500,
+    ) -> JSONResponse:
+        auth.require_api(request)
+        safe_limit = min(max(limit, 1), 500)
+        messages = service.get_backtest_run_messages(run_id, limit=safe_limit)
+        if messages is None:
+            return JSONResponse({"detail": "run_not_found"}, status_code=404)
+        return JSONResponse({"messages": messages, "limit": safe_limit})
+
     @router.post("/api/backtests/start")
     async def start_backtest_run(request: Request) -> JSONResponse:
         auth.require_api(request)

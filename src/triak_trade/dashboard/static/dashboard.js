@@ -70,6 +70,10 @@ document.documentElement.dataset.dashboardReady = "true";
     currentPhaseSummary: document.getElementById("current-phase-summary"),
     currentMessageLabel: document.getElementById("current-message-label"),
     currentMessageSummary: document.getElementById("current-message-summary"),
+    progressLabel: document.getElementById("backtest-progress-label"),
+    progressTrack: document.getElementById("backtest-progress-track"),
+    progressFill: document.getElementById("backtest-progress-fill"),
+    progressMeta: document.getElementById("backtest-progress-meta"),
     messageCountLabel: document.getElementById("message-count-label"),
     messageFilterBar: document.getElementById("message-filter-bar"),
     messageStream: document.getElementById("message-stream"),
@@ -493,9 +497,9 @@ document.documentElement.dataset.dashboardReady = "true";
         return;
       }
       state.activeRunId = data.run.run_id;
-      state.activeRun = data.run;
+      state.activeRun = mergeRunPayload(state.activeRun, data.run);
       upsertRun(data.run);
-      renderRun(data.run);
+      renderRun(state.activeRun);
       setFormStatus("Backtest started. Streaming live progress now.", "success");
       if (!state.wsReady) {
         startPolling();
@@ -562,9 +566,9 @@ document.documentElement.dataset.dashboardReady = "true";
         return;
       }
       const run = await response.json();
-      state.activeRun = run;
+      state.activeRun = mergeRunPayload(state.activeRun, run);
       upsertRun(run);
-      renderRun(run);
+      renderRun(state.activeRun);
       if (!isActiveStatus(run.status) && state.pollTimer) {
         window.clearInterval(state.pollTimer);
         state.pollTimer = null;
@@ -659,6 +663,36 @@ document.documentElement.dataset.dashboardReady = "true";
     return [...runs].sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
   }
 
+  function mergeRunPayload(existingRun, incomingRun, latestTrace = null) {
+    const base = existingRun && existingRun.run_id === incomingRun.run_id ? existingRun : null;
+    const merged = { ...(base || {}), ...incomingRun };
+    const incomingMessages = Array.isArray(incomingRun.messages) ? incomingRun.messages : null;
+    if (incomingMessages) {
+      merged.messages = incomingMessages;
+    } else if (base && Array.isArray(base.messages)) {
+      merged.messages = base.messages;
+    } else {
+      merged.messages = [];
+    }
+    if (latestTrace && typeof latestTrace === "object") {
+      merged.messages = upsertTrace(merged.messages, latestTrace);
+    }
+    return merged;
+  }
+
+  function upsertTrace(existingMessages, trace) {
+    const messages = Array.isArray(existingMessages) ? [...existingMessages] : [];
+    const index = messages.findIndex((item) => item.message_id === trace.message_id);
+    if (index >= 0) {
+      messages[index] = { ...messages[index], ...trace };
+    } else {
+      messages.push(trace);
+    }
+    return messages
+      .sort((left, right) => new Date(right.message_date) - new Date(left.message_date))
+      .slice(0, 500);
+  }
+
   function renderReadiness(readiness) {
     const ready = Boolean(readiness.ready);
     nodes.readinessHeadline.textContent = ready ? "Ready" : "Blocked";
@@ -691,6 +725,7 @@ document.documentElement.dataset.dashboardReady = "true";
   function renderRun(run) {
     renderCurrentRunHeader(run);
     renderMetrics(run);
+    renderProgress(run);
     renderEventFeed(run.events || []);
     renderMessages(run.messages || []);
     renderSignals(run.signals || []);
@@ -731,6 +766,37 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.currentMessageSummary.textContent = currentTrace
       ? `${currentTrace.current_stage} • ${currentTrace.result_summary || currentTrace.preview_text || "Processing"}`
       : "No message is being processed right now.";
+  }
+
+  function renderProgress(run) {
+    if (!nodes.progressLabel || !nodes.progressTrack || !nodes.progressFill || !nodes.progressMeta) {
+      return;
+    }
+    const totalMessages = Number(run.total_messages || 0);
+    const fallbackProcessed = Array.isArray(run.messages) ? run.messages.length : 0;
+    const processedMessages = Math.max(Number(run.processed_messages || 0), fallbackProcessed);
+    const safeProcessed = totalMessages > 0
+      ? Math.min(processedMessages, totalMessages)
+      : processedMessages;
+    const percent = totalMessages > 0
+      ? Math.min(100, Math.round((safeProcessed / totalMessages) * 100))
+      : 0;
+
+    nodes.progressLabel.textContent = `${percent}%`;
+    nodes.progressFill.style.width = `${percent}%`;
+    nodes.progressTrack.setAttribute("aria-valuenow", String(percent));
+
+    if (!totalMessages) {
+      nodes.progressMeta.textContent = isActiveStatus(run.status)
+        ? "Preparing the message queue..."
+        : "Waiting for Telegram history.";
+      return;
+    }
+
+    const remaining = Math.max(totalMessages - safeProcessed, 0);
+    const noun = totalMessages === 1 ? "message" : "messages";
+    const remainingNoun = remaining === 1 ? "message" : "messages";
+    nodes.progressMeta.textContent = `${safeProcessed} of ${totalMessages} ${noun} processed • ${remaining} ${remainingNoun} remaining`;
   }
 
   function renderMetrics(run) {
@@ -856,6 +922,18 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.currentPhaseSummary.textContent = "Waiting to start.";
     nodes.currentMessageLabel.textContent = "None";
     nodes.currentMessageSummary.textContent = "No message is being processed yet.";
+    if (nodes.progressLabel) {
+      nodes.progressLabel.textContent = "0%";
+    }
+    if (nodes.progressFill) {
+      nodes.progressFill.style.width = "0%";
+    }
+    if (nodes.progressTrack) {
+      nodes.progressTrack.setAttribute("aria-valuenow", "0");
+    }
+    if (nodes.progressMeta) {
+      nodes.progressMeta.textContent = "Waiting for Telegram history.";
+    }
     renderSignals([]);
   }
 
@@ -1379,8 +1457,8 @@ document.documentElement.dataset.dashboardReady = "true";
       if (data.run) {
         upsertRun(data.run);
         if (state.activeRunId === data.run.run_id) {
-          state.activeRun = data.run;
-          renderRun(data.run);
+          state.activeRun = mergeRunPayload(state.activeRun, data.run);
+          renderRun(state.activeRun);
         }
       }
       if (!response.ok) {
@@ -1388,8 +1466,8 @@ document.documentElement.dataset.dashboardReady = "true";
         return;
       }
       state.activeRunId = data.run.run_id;
-      state.activeRun = data.run;
-      renderRun(data.run);
+      state.activeRun = mergeRunPayload(state.activeRun, data.run);
+      renderRun(state.activeRun);
       setFormStatus("Stop requested. Waiting for the next safe checkpoint.", "success");
       if (!state.wsReady) {
         startPolling();
@@ -1414,11 +1492,11 @@ document.documentElement.dataset.dashboardReady = "true";
         return;
       }
       state.activeRunId = data.run.run_id;
-      state.activeRun = data.run;
+      state.activeRun = mergeRunPayload(state.activeRun, data.run);
       upsertRun(data.run);
       closePanelModal();
       closeModal();
-      renderRun(data.run);
+      renderRun(state.activeRun);
       setFormStatus("Rerun started with the previous run parameters.", "success");
       if (!state.wsReady) {
         startPolling();
@@ -1511,8 +1589,8 @@ document.documentElement.dataset.dashboardReady = "true";
     renderRecentRuns(state.recentRuns);
     if (!state.activeRunId || state.activeRunId === run.run_id || run.status === "running") {
       state.activeRunId = run.run_id;
-      state.activeRun = run;
-      renderRun(run);
+      state.activeRun = mergeRunPayload(state.activeRun, run, payload.trace || null);
+      renderRun(state.activeRun);
     }
   }
 

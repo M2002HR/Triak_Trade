@@ -1980,6 +1980,50 @@ pre {
   gap: 14px;
 }
 
+.backtest-progress-panel {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: linear-gradient(
+    135deg,
+    rgba(6, 214, 160, 0.08) 0%,
+    rgba(255, 255, 255, 0.02) 100%
+  );
+}
+
+.backtest-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.backtest-progress-track {
+  position: relative;
+  overflow: hidden;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.backtest-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #06d6a0 0%, #38bdf8 100%);
+  box-shadow: 0 0 18px rgba(6, 214, 160, 0.28);
+  transition: width 180ms ease;
+}
+
+.backtest-progress-meta {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .phase-card,
 .metric-card {
   padding: 16px;

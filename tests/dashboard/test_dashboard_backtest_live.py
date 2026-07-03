@@ -217,6 +217,9 @@ def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> No
     assert 'id="signal-state-preview"' in response.text
     assert 'data-open-panel-modal="signals"' in response.text
     assert 'id="run-action-bar"' in response.text
+    assert 'id="backtest-progress-track"' in response.text
+    assert 'id="backtest-progress-fill"' in response.text
+    assert 'id="backtest-progress-meta"' in response.text
     assert 'data-message-filter="signals"' in response.text
     assert 'id="message-modal" class="modal-shell" hidden' in response.text
     assert 'id="panel-modal" class="modal-shell" hidden' in response.text
@@ -257,6 +260,7 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
     assert loaded["status"] == "completed"
     assert loaded["channel_resolved"] == "https://t.me/Tofan_Trade"
     assert loaded["strategy_key"] == "tp_trailing_risk_managed"
+    assert loaded["processed_messages"] == 1
     assert loaded["messages"][0]["message_id"] == 501
     assert loaded["messages"][0]["classification"] == "new_signal"
     assert loaded["signals"][0]["signal_id"] == "sig_501"

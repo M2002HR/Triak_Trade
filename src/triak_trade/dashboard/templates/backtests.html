@@ -81,6 +81,27 @@
           <p id="current-message-summary" class="phase-summary">No message is being processed yet.</p>
         </div>
       </div>
+
+      <div class="backtest-progress-panel" aria-live="polite">
+        <div class="backtest-progress-head">
+          <span class="phase-card-label">Message Progress</span>
+          <strong id="backtest-progress-label">0%</strong>
+        </div>
+        <div
+          id="backtest-progress-track"
+          class="backtest-progress-track"
+          role="progressbar"
+          aria-label="Backtest message processing progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div id="backtest-progress-fill" class="backtest-progress-fill" style="width: 0%"></div>
+        </div>
+        <p id="backtest-progress-meta" class="backtest-progress-meta">
+          Waiting for Telegram history.
+        </p>
+      </div>
     </section>
 
     <section class="panel message-stream-panel">
