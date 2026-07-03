@@ -129,9 +129,10 @@ def test_leverage_non_positive_rejected() -> None:
         _parsed_signal(leverage=0)
 
 
-def test_entry_low_greater_than_entry_high_rejected() -> None:
-    with pytest.raises(ValidationError):
-        _parsed_signal(entry_low="106", entry_high="105")
+def test_entry_low_greater_than_entry_high_is_normalized() -> None:
+    signal = _parsed_signal(entry_low="106", entry_high="105")
+    assert signal.entry_low == Decimal("105")
+    assert signal.entry_high == Decimal("106")
 
 
 def test_signal_state_requires_origin_message_in_related_ids() -> None:

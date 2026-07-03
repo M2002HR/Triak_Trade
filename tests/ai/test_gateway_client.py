@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -154,6 +155,27 @@ def test_gateway_client_prefers_more_specific_symbol_raw_hint() -> None:
     result = client.classify_message(ai_context)
     assert result.symbol == "1000SHIBUSDT"
     assert result.symbol_raw == "1000SHIB/USDT"
+
+
+def test_gateway_client_normalizes_reversed_entry_range_when_symbol_comes_from_hint(
+    context: AIMessageContext,
+) -> None:
+    payload = _ok_payload()
+    payload["symbol"] = None
+    payload["symbol_raw"] = "BTC/USDT"
+    payload["entry_low"] = "68200"
+    payload["entry_high"] = "68000"
+
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+
+    result = client.classify_message(context)
+    assert result.symbol == "BTCUSDT"
+    assert result.entry_low == Decimal("68000")
+    assert result.entry_high == Decimal("68200")
 
 
 def test_gateway_client_routes_caption_images_to_gemini_multimodal() -> None:

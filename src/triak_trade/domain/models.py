@@ -131,12 +131,8 @@ class ParsedSignal(BaseModel):
 
     @model_validator(mode="after")
     def validate_entry_range(self) -> ParsedSignal:
-        if (
-            self.entry_low is not None
-            and self.entry_high is not None
-            and self.entry_low > self.entry_high
-        ):
-            raise ValueError("entry_low must be less than or equal to entry_high")
+        if self.entry_low is not None and self.entry_high is not None:
+            self.entry_low, self.entry_high = sorted((self.entry_low, self.entry_high))
         return self
 
 

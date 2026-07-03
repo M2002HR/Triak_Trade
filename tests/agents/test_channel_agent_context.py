@@ -171,3 +171,33 @@ def test_merge_signal_does_not_move_signal_updated_at_backwards() -> None:
     ctx.merge_signal("sig-1", parsed, now - timedelta(minutes=15))
 
     assert state.updated_at == now
+
+
+def test_merge_signal_normalizes_reversed_entry_range_from_partial_update() -> None:
+    now = datetime.now(timezone.utc)
+    ctx = ChannelContext(channel_id="c1", max_message_limit=10, max_update_window_hours=48)
+    state = _signal("sig-1", "BTCUSDT", now)
+    ctx.add_signal(state, pending=True)
+    parsed = ParsedSignal(
+        action=SignalAction.UPDATE_ENTRY,
+        market=MarketType.FUTURES,
+        symbol="BTCUSDT",
+        side=TradeSide.LONG,
+        entry_type=EntryType.RANGE,
+        entry_low=Decimal("102"),
+        entry_high=None,
+        stop_loss=None,
+        take_profits=[],
+        leverage=None,
+        confidence=Decimal("0.9"),
+        invalid_reason=None,
+        source_channel_id="c1",
+        source_message_id=2,
+        parser_version="v2",
+    )
+
+    ctx.merge_signal("sig-1", parsed, now)
+
+    assert state.current_signal is not None
+    assert state.current_signal.entry_low == Decimal("101")
+    assert state.current_signal.entry_high == Decimal("102")

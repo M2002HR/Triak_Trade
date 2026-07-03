@@ -91,14 +91,15 @@ class AIClassificationResult(BaseModel):
         hinted = canonical_market_symbol(self.symbol_raw)
         if primary is None:
             self.symbol = hinted
-            return self
-        if hinted is None:
+        elif hinted is None:
             self.symbol = primary
-            return self
-        if len(hinted) > len(primary) and hinted.endswith(primary):
+        elif len(hinted) > len(primary) and hinted.endswith(primary):
             self.symbol = hinted
-            return self
-        self.symbol = primary
+        else:
+            self.symbol = primary
+
+        if self.entry_low is not None and self.entry_high is not None:
+            self.entry_low, self.entry_high = sorted((self.entry_low, self.entry_high))
         return self
 
     @field_validator("entry_low", "entry_high", "stop_loss", mode="before")

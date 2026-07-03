@@ -192,6 +192,20 @@ def test_ai_classifier_decimal_fields_are_decimal() -> None:
     assert isinstance(result.parsed_signal.confidence, Decimal)
 
 
+def test_ai_classifier_normalizes_reversed_entry_range_from_ai() -> None:
+    payload = _result_payload("NEW_SIGNAL", "open")
+    payload["entry_low"] = "68200"
+    payload["entry_high"] = "68000"
+    classifier = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(payload),
+    )
+    result = classifier.classify(_raw("x"), _context())
+    assert result.parsed_signal.action is SignalAction.OPEN
+    assert result.parsed_signal.entry_low == Decimal("68000")
+    assert result.parsed_signal.entry_high == Decimal("68200")
+
+
 def test_ai_classifier_fallback_to_regex_on_failure() -> None:
     failing = AjilGatewayClient(
         base_url="http://mocked.local",
