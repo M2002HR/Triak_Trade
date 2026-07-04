@@ -13,6 +13,7 @@ from triak_trade.live_trading.models import (
     LiveMessageTrace,
     LiveSession,
     LiveSessionDetail,
+    LiveTrade,
 )
 
 
@@ -131,6 +132,62 @@ def test_reports_page_handles_no_reports(tmp_path: Path) -> None:
     response = client(tmp_path).get("/reports", headers=headers())
     assert response.status_code == 200
     assert "No real backtest reports found" in response.text
+
+
+def test_live_reports_page_reads_db_backed_sessions_and_trades(tmp_path: Path) -> None:
+    app = create_dashboard_app(settings(tmp_path, live_mode_enabled=True))
+    store = app.state.live_coordinator.store
+    session = LiveSession(
+        session_id="ls_live_report",
+        channels=["https://t.me/sample_chan"],
+        channel_labels=["@sample_chan"],
+        trading_mode="demo",
+        initial_balance=Decimal("0"),
+        risk_per_trade_pct=Decimal("120"),
+        strategy_key="tp_trailing_risk_managed",
+        use_ai=False,
+        interval="1m",
+        status="running",
+        total_messages_processed=14,
+        total_signals_received=9,
+        total_signals_opened=6,
+        open_positions_count=1,
+        closed_trades_count=1,
+        wins=1,
+        losses=0,
+        total_realized_pnl=Decimal("4.25"),
+        total_unrealized_pnl=Decimal("1.10"),
+    )
+    store.save_session(session)
+    store.save_trade(
+        LiveTrade(
+            trade_id="lt_closed",
+            session_id=session.session_id,
+            signal_id="sig_closed",
+            channel_id="https://t.me/sample_chan",
+            channel_input="@sample_chan",
+            channel_label="@sample_chan",
+            symbol="BTCUSDT",
+            side="long",
+            leverage=5,
+            entry_price=Decimal("100"),
+            quantity=Decimal("1"),
+            status="closed",
+            realized_pnl=Decimal("4.25"),
+            exit_price=Decimal("104.25"),
+            balance_at_entry=Decimal("100"),
+            closed_at=datetime(2026, 7, 4, tzinfo=timezone.utc),
+        )
+    )
+
+    client_obj = LocalASGIClient(app)
+    response = client_obj.get("/reports/live", headers=headers())
+
+    assert response.status_code == 200
+    assert "sample_chan" in response.text
+    assert "tp_trailing_risk_managed" in response.text
+    assert "+5.35" in response.text
+    assert "Signals Received" in response.text
 
 
 def test_status_json_contains_no_secrets(tmp_path: Path) -> None:

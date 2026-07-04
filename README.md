@@ -171,6 +171,8 @@ These checks are intentionally strict:
 - The fixture path uses deterministic in-memory messages and candles.
 - The real pipeline is driven by `RealBacktestRunner`.
 - Real backtests read Telegram history, classify messages, fetch public market data, simulate trades, and write JSON/Markdown reports to `runtime/reports/backtests`.
+- The backtest dashboard now tracks live message progress and total elapsed runtime for each run.
+- Stored reports now include richer comparison analytics such as period PnL buckets, per-signal rows, trade-outcome summaries, and strategy/risk metadata.
 - The simulator supports conservative and optimistic fill policy comparisons.
 - Fees are modeled via `BACKTEST_FEE_RATE_PCT`.
 - Strategy loading comes from `config/strategies.yaml` with safe fallback defaults.

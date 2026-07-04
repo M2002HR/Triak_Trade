@@ -245,6 +245,22 @@
             ${detailMetric("Max Drawdown", report.max_drawdown_label)}
             ${detailMetric("Trades Filled", `${report.trades_filled}/${report.trades_simulated}`)}
             ${detailMetric("Balances", `${formatNumber(report.initial_balance)} → ${formatNumber(report.final_balance)}`)}
+            ${detailMetric("Runtime", report.runtime_duration_label || "00:00:00")}
+            ${detailMetric("Strategy", report.strategy_name || report.strategy_key || "n/a")}
+            ${detailMetric("Risk / Trade", report.risk_per_trade_pct || "0")}
+          </div>
+        </section>
+
+        <section class="report-chart-grid">
+          <div class="report-chart-card">
+            <span>Strategy Profile</span>
+            <h3>Execution Context</h3>
+            ${renderKeyValueRows(report.strategy_parameters)}
+          </div>
+          <div class="report-chart-card">
+            <span>Comparison Profile</span>
+            <h3>Channel Evaluation Metrics</h3>
+            ${renderKeyValueRows(report.comparison_profile)}
           </div>
         </section>
 
@@ -282,6 +298,31 @@
           </div>
           <div class="report-symbol-list">
             ${renderSymbolSummary(report.symbol_summary)}
+          </div>
+        </section>
+
+        <section class="report-chart-grid">
+          <div class="report-chart-card">
+            <span>Period PnL</span>
+            <h3>Daily</h3>
+            ${renderPeriodRows(report.period_pnl?.daily)}
+          </div>
+          <div class="report-chart-card">
+            <span>Period PnL</span>
+            <h3>Weekly / Monthly</h3>
+            ${renderPeriodRows([...(report.period_pnl?.weekly || []).slice(0, 4), ...(report.period_pnl?.monthly || []).slice(0, 4)])}
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Outcomes</p>
+              <h3>Trade Outcome Summary</h3>
+            </div>
+          </div>
+          <div class="report-breakdown-grid">
+            ${renderOutcomeSummary(report.trade_outcome_summary)}
           </div>
         </section>
 
@@ -456,6 +497,62 @@
       .join("");
   }
 
+  function renderKeyValueRows(payload) {
+    if (!payload || typeof payload !== "object" || !Object.keys(payload).length) {
+      return '<div class="report-chart-empty">No structured data is available.</div>';
+    }
+    return `
+      <div class="report-symbol-list">
+        ${Object.entries(payload)
+          .map(([key, value]) => `
+            <div class="report-symbol-row">
+              <div><strong>${escapeHtml(humanizeKey(key))}</strong></div>
+              <div><strong>${escapeHtml(Array.isArray(value) ? value.join(", ") : String(value ?? "n/a"))}</strong></div>
+            </div>
+          `)
+          .join("")}
+      </div>
+    `;
+  }
+
+  function renderPeriodRows(rows) {
+    if (!Array.isArray(rows) || !rows.length) {
+      return '<div class="report-chart-empty">No period buckets are available yet.</div>';
+    }
+    return `
+      <div class="report-symbol-list">
+        ${rows.map((row) => `
+          <div class="report-symbol-row">
+            <div>
+              <strong>${escapeHtml(row.period || "n/a")}</strong>
+              <div class="subtle">${escapeHtml(String(row.trades || 0))} trades • ${escapeHtml(String(row.wins || 0))} wins • ${escapeHtml(String(row.losses || 0))} losses</div>
+            </div>
+            <div class="${row.pnl_value >= 0 ? "pnl-positive" : "pnl-negative"}"><strong>${escapeHtml(row.pnl_label || "0")}</strong></div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  function renderOutcomeSummary(payload) {
+    if (!payload || typeof payload !== "object" || !Object.keys(payload).length) {
+      return '<div class="empty-state-box">No outcome summary is available.</div>';
+    }
+    const keys = [
+      "avg_trade_pnl",
+      "avg_filled_pnl",
+      "median_filled_pnl",
+      "best_trade_pnl",
+      "worst_trade_pnl",
+      "avg_holding_seconds",
+      "median_holding_seconds",
+    ];
+    return keys
+      .filter((key) => Object.prototype.hasOwnProperty.call(payload, key))
+      .map((key) => detailMetric(humanizeKey(key), payload[key]))
+      .join("");
+  }
+
   function renderNoteBlock(title, items) {
     if (!Array.isArray(items) || !items.length) {
       return "";
@@ -505,6 +602,12 @@
     return value.includes(".")
       ? value.replace(/\.?0+$/, "")
       : value;
+  }
+
+  function humanizeKey(value) {
+    return String(value)
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase());
   }
 
   function escapeHtml(value) {

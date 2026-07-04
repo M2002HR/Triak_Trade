@@ -43,6 +43,17 @@ JSON reports also include:
 - trade status counts
 - per-symbol summary
 - equity curve
+- daily / weekly / monthly realized-PnL buckets
+- trade outcome summary fields such as best trade, worst trade, average filled PnL, and holding-time aggregates
+- per-signal trade rows for direct signal-by-signal comparison
+- comparison-profile fields such as fill rate, PnL per valid signal, and PnL per filled trade
+
+Run-level report payloads also persist:
+- `strategy_key`
+- serialized strategy parameters
+- `risk_per_trade_pct`
+- `runtime_duration_ms`
+- generated JSON and Markdown report paths
 
 ## Report Persistence
 

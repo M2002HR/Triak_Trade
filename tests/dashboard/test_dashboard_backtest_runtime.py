@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -334,6 +335,7 @@ def test_dashboard_backtest_store_writes_lightweight_summary_files(tmp_path: Pat
     summary = summaries[0]
     assert isinstance(summary, DashboardBacktestRunSummary)
     assert summary.run_id == run.run_id
+    assert summary.runtime_duration_ms is None
     assert "messages" not in summary.model_dump(mode="json")
     assert "events" not in summary.model_dump(mode="json")
     assert "signals" not in summary.model_dump(mode="json")
@@ -430,6 +432,9 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     assert loaded.status == "completed"
     assert loaded.strategy_key == "tp_trailing_risk_managed"
     assert loaded.processed_messages == 1
+    assert loaded.runtime_duration_ms is not None
+    assert loaded.runtime_duration_ms >= 0
+    assert loaded.worker_pid is None
     assert loaded.total_messages == 1
     assert loaded.valid_signals == 1
     assert loaded.current_phase in {"complete", "classify_messages", "report"}
@@ -1055,6 +1060,104 @@ def test_dashboard_backtest_coordinator_recovers_incomplete_runs_on_startup(tmp_
     assert recovered.current_phase == "failed"
     assert "interrupted" in recovered.current_phase_summary.lower()
     assert any("interrupted" in error.lower() for error in recovered.errors)
+
+
+def test_dashboard_backtest_coordinator_does_not_recover_active_run_with_live_worker_pid(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    active = DashboardBacktestRun(
+        run_id="backtest_active_pid",
+        channel_input="@Tofan_Trade",
+        channel_resolved="https://t.me/Tofan_Trade",
+        from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        interval="1m",
+        max_messages=100,
+        use_ai=False,
+        send_log_channel=True,
+        log_per_message=True,
+        status="running",
+        created_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        started_at=datetime(2026, 6, 4, tzinfo=timezone.utc),
+        worker_pid=os.getpid(),
+        current_phase="classify_messages",
+        current_phase_label="Classifying Messages",
+        current_phase_summary="Reviewing message 5855.",
+    )
+    store.write(active)
+
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        store=store,
+        runner_factory=FakeRunner,
+    )
+    recovered = coordinator.get_run("backtest_active_pid")
+
+    assert recovered is not None
+    assert recovered.status == "running"
+    assert recovered.current_phase == "classify_messages"
+    assert recovered.finished_at is None
+    assert recovered.worker_pid == os.getpid()
+    assert not recovered.errors
+
+
+def test_dashboard_backtest_coordinator_revives_false_failed_run_on_progress(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = DashboardBacktestStore(settings)
+    coordinator = DashboardBacktestCoordinator(
+        settings=settings,
+        store=store,
+        runner_factory=FakeRunner,
+    )
+    now = datetime(2026, 6, 4, tzinfo=timezone.utc)
+    run = store.create(
+        DashboardBacktestRun(
+            run_id="run_false_failed",
+            channel_input="https://t.me/Tofan_Trade",
+            channel_resolved="https://t.me/Tofan_Trade",
+            from_date=now,
+            to_date=now,
+            interval="1m",
+            max_messages=100,
+            initial_balance=Decimal("100"),
+            risk_per_trade_pct=Decimal("3"),
+            use_ai=False,
+            send_log_channel=False,
+            log_per_message=False,
+            status="failed",
+            created_at=now,
+            started_at=now,
+            finished_at=now,
+            current_phase="failed",
+            current_phase_label="Failed",
+            current_phase_summary="Backtest worker was interrupted before completion.",
+            errors=["Background backtest worker was interrupted."],
+        )
+    )
+
+    coordinator._handle_progress(
+        run.run_id,
+        RealBacktestProgressEvent(
+            event_type="run",
+            timestamp=now,
+            phase="fetch_market_data",
+            status="running",
+            summary="Fetching market candles for 1 symbols.",
+            counts={"total_messages": 1, "classified_messages": 1},
+        ),
+    )
+
+    revived = coordinator.get_run(run.run_id)
+    assert revived is not None
+    assert revived.status == "running"
+    assert revived.current_phase == "fetch_market_data"
+    assert revived.finished_at is None
+    assert revived.worker_pid == os.getpid()
+    assert "Background backtest worker was interrupted." not in revived.errors
 
 
 def test_dashboard_backtest_coordinator_persists_start_message_metadata(tmp_path: Path) -> None:

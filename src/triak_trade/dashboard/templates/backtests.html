@@ -85,7 +85,10 @@
       <div class="backtest-progress-panel" aria-live="polite">
         <div class="backtest-progress-head">
           <span class="phase-card-label">Message Progress</span>
-          <strong id="backtest-progress-label">0%</strong>
+          <div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap">
+            <span class="subtle">Elapsed <strong id="backtest-runtime-label">00:00:00</strong></span>
+            <strong id="backtest-progress-label">0%</strong>
+          </div>
         </div>
         <div
           id="backtest-progress-track"

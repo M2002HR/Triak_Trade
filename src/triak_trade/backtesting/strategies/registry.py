@@ -161,6 +161,22 @@ def list_available_strategies(
     return items
 
 
+def describe_strategy_by_key(
+    strategy_key: str,
+    config_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Return a dashboard/report-safe strategy descriptor."""
+
+    strategy = build_strategy_from_key(strategy_key, config_path=config_path)
+    return {
+        "key": strategy_key,
+        "name": strategy.name,
+        "class_name": type(strategy).__name__,
+        "description": _STRATEGY_DESCRIPTIONS.get(strategy_key, strategy_key),
+        "parameters": _serialize_strategy_parameters(strategy),
+    }
+
+
 def build_strategy_from_key(
     strategy_key: str,
     config_path: Path | str | None = None,

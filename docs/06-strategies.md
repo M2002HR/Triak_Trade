@@ -34,6 +34,9 @@ In practice:
 - TP2 can move stop to TP1
 - TP3 can move stop to TP2
 
+That matches the current code path used by both backtests and live/demo session management.
+This is the current source of truth for target-handling behavior in Triak_Trade.
+
 ## Registry And Config
 
 The strategy registry:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import traceback
@@ -57,6 +58,8 @@ class DashboardBacktestRun(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    runtime_duration_ms: int | None = None
+    worker_pid: int | None = None
     current_phase: str = "queued"
     current_phase_label: str = "Queued"
     current_phase_summary: str = "Waiting to start."
@@ -109,6 +112,8 @@ class DashboardBacktestRunSummary(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    runtime_duration_ms: int | None = None
+    worker_pid: int | None = None
     current_phase: str = "queued"
     current_phase_label: str = "Queued"
     current_phase_summary: str = "Waiting to start."
@@ -436,11 +441,14 @@ class DashboardBacktestCoordinator:
             return
         runner = self.runner_factory()
         runner.strategy = build_strategy_from_key(run.strategy_key)
+        runner.strategy_key = run.strategy_key
         if self._is_cancel_requested(run_id):
             self._mark_cancelled(run_id)
             return
         run.status = "running"
         run.started_at = datetime.now(timezone.utc)
+        run.runtime_duration_ms = 0
+        run.worker_pid = os.getpid()
         run.current_phase = "starting"
         run.current_phase_label = _phase_label("starting")
         run.current_phase_summary = "Backtest worker started."
@@ -468,6 +476,8 @@ class DashboardBacktestCoordinator:
                 return
             failed.status = "failed"
             failed.finished_at = datetime.now(timezone.utc)
+            failed.runtime_duration_ms = _runtime_duration_ms(failed)
+            failed.worker_pid = None
             failed.current_phase = "failed"
             failed.current_phase_label = _phase_label("failed")
             exc_summary = f"{type(exc).__name__}: {exc}"
@@ -507,6 +517,10 @@ class DashboardBacktestCoordinator:
         self._clear_cancel_request(run_id)
         completed.status = "completed" if result.success else "failed"
         completed.finished_at = datetime.now(timezone.utc)
+        completed.runtime_duration_ms = (
+            result.runtime_duration_ms or _runtime_duration_ms(completed)
+        )
+        completed.worker_pid = None
         completed.current_phase = "complete" if result.success else "failed"
         completed.current_phase_label = _phase_label(completed.current_phase)
         completed.current_phase_summary = (
@@ -556,6 +570,10 @@ class DashboardBacktestCoordinator:
         run = self.store.read(run_id)
         if run is None:
             return
+        if run.status not in {"running", "cancelling"}:
+            self._revive_interrupted_run(run)
+        run.worker_pid = os.getpid()
+        run.runtime_duration_ms = event.runtime_duration_ms or _runtime_duration_ms(run)
         run.current_phase = event.phase
         run.current_phase_label = _phase_label(event.phase)
         run.current_phase_summary = event.summary
@@ -602,6 +620,16 @@ class DashboardBacktestCoordinator:
         self.store.write(run)
         self._append_run_progress_log(run, event)
         self._notify(run, latest_trace=event.trace)
+
+    @staticmethod
+    def _revive_interrupted_run(run: DashboardBacktestRun) -> None:
+        run.status = "running"
+        run.finished_at = None
+        run.errors = [
+            error
+            for error in run.errors
+            if error != "Background backtest worker was interrupted."
+        ]
 
     _MAX_STORED_TRACES = 500
 
@@ -807,6 +835,8 @@ class DashboardBacktestCoordinator:
             return
         run.status = "cancelled"
         run.finished_at = now
+        run.runtime_duration_ms = _runtime_duration_ms(run)
+        run.worker_pid = None
         run.current_phase = "cancelled"
         run.current_phase_label = _phase_label("cancelled")
         run.current_phase_summary = "Backtest run was stopped by the dashboard operator."
@@ -831,8 +861,12 @@ class DashboardBacktestCoordinator:
             run = self.store.read(summary.run_id)
             if run is None:
                 continue
+            if _pid_is_alive(run.worker_pid):
+                continue
             run.status = "failed"
             run.finished_at = now
+            run.runtime_duration_ms = _runtime_duration_ms(run)
+            run.worker_pid = None
             run.current_phase = "failed"
             run.current_phase_label = _phase_label("failed")
             run.current_phase_summary = (
@@ -911,6 +945,7 @@ class DashboardBacktestCoordinator:
             "valid_signals": run.valid_signals,
             "trades_simulated": run.trades_simulated,
             "trades_filled": run.trades_filled,
+            "runtime_duration_ms": run.runtime_duration_ms,
         }
         if extra:
             payload.update(extra)
@@ -938,3 +973,20 @@ def _phase_label(phase: str) -> str:
         "failed": "Failed",
     }
     return mapping.get(phase, phase.replace("_", " ").title())
+
+
+def _runtime_duration_ms(run: DashboardBacktestRun | DashboardBacktestRunSummary) -> int | None:
+    if run.started_at is None:
+        return None
+    end_at = run.finished_at or datetime.now(timezone.utc)
+    return max(0, int((end_at - run.started_at).total_seconds() * 1000))
+
+
+def _pid_is_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True

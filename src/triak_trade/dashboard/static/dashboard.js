@@ -71,6 +71,7 @@ document.documentElement.dataset.dashboardReady = "true";
     currentMessageLabel: document.getElementById("current-message-label"),
     currentMessageSummary: document.getElementById("current-message-summary"),
     progressLabel: document.getElementById("backtest-progress-label"),
+    runtimeLabel: document.getElementById("backtest-runtime-label"),
     progressTrack: document.getElementById("backtest-progress-track"),
     progressFill: document.getElementById("backtest-progress-fill"),
     progressMeta: document.getElementById("backtest-progress-meta"),
@@ -772,6 +773,9 @@ document.documentElement.dataset.dashboardReady = "true";
     if (!nodes.progressLabel || !nodes.progressTrack || !nodes.progressFill || !nodes.progressMeta) {
       return;
     }
+    if (nodes.runtimeLabel) {
+      nodes.runtimeLabel.textContent = formatElapsedMs(Number(run.runtime_duration_ms || 0));
+    }
     const totalMessages = Number(run.total_messages || 0);
     const fallbackProcessed = Array.isArray(run.messages) ? run.messages.length : 0;
     const processedMessages = Math.max(Number(run.processed_messages || 0), fallbackProcessed);
@@ -918,6 +922,9 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.runPhasePill.className = "phase-pill phase-queued";
     nodes.runActionBar.innerHTML = "";
     nodes.metrics.innerHTML = "";
+    if (nodes.runtimeLabel) {
+      nodes.runtimeLabel.textContent = "00:00:00";
+    }
     nodes.currentPhaseLabel.textContent = "Queued";
     nodes.currentPhaseSummary.textContent = "Waiting to start.";
     nodes.currentMessageLabel.textContent = "None";
@@ -1633,6 +1640,14 @@ document.documentElement.dataset.dashboardReady = "true";
       minute: "2-digit",
       second: "2-digit",
     }).format(date);
+  }
+
+  function formatElapsedMs(value) {
+    const totalSeconds = Math.max(0, Math.floor(Number(value || 0) / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
   }
 
   function formatTehranDate(value) {

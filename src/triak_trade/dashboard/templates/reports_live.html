@@ -1,4 +1,7 @@
 {% extends "base.html" %}
+{% block extra_head %}
+<link rel="stylesheet" href="/static/reports.css">
+{% endblock %}
 {% block content %}
 <section class="hero">
   <div class="backtest-hero">
@@ -20,13 +23,17 @@
         <span>Sessions</span>
         <strong>{{ summary.total_sessions }}</strong>
       </div>
-      <div class="hero-stat">
-        <span>Total Trades</span>
-        <strong>{{ summary.total_trades }}</strong>
-      </div>
-      <div class="hero-stat">
-        <span>Net PnL</span>
-        <strong class="{{ 'metric-pos' if summary.total_pnl > 0 else ('metric-neg' if summary.total_pnl < 0 else '') }}">
+    <div class="hero-stat">
+      <span>Total Trades</span>
+      <strong>{{ summary.total_trades }}</strong>
+    </div>
+    <div class="hero-stat">
+      <span>Win Rate</span>
+      <strong>{{ summary.overall_win_rate_label }}</strong>
+    </div>
+    <div class="hero-stat">
+      <span>Net PnL</span>
+      <strong class="{{ 'metric-pos' if summary.total_pnl > 0 else ('metric-neg' if summary.total_pnl < 0 else '') }}">
           {{ summary.total_pnl_label }}
         </strong>
       </div>
@@ -105,8 +112,82 @@
       <strong>{{ report.total_messages }}</strong>
     </div>
     <div class="metric-card">
-      <span>Signals</span>
-      <strong>{{ report.total_signals }}</strong>
+      <span>Signals Received</span>
+      <strong>{{ report.total_signals_received }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Signals Opened</span>
+      <strong>{{ report.total_signals_opened }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Open Rate</span>
+      <strong>{{ report.signal_open_rate_label }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Avg Trade PnL</span>
+      <strong class="{{ 'metric-pos' if report.total_pnl > 0 else ('metric-neg' if report.total_pnl < 0 else '') }}">
+        {{ report.avg_trade_pnl_label }}
+      </strong>
+    </div>
+    <div class="metric-card">
+      <span>Realized PnL</span>
+      <strong class="{{ 'metric-pos' if '+' in report.realized_pnl_label else ('metric-neg' if '-' in report.realized_pnl_label else '') }}">
+        {{ report.realized_pnl_label }}
+      </strong>
+    </div>
+    <div class="metric-card">
+      <span>Unrealized PnL</span>
+      <strong class="{{ 'metric-pos' if '+' in report.unrealized_pnl_label else ('metric-neg' if '-' in report.unrealized_pnl_label else '') }}">
+        {{ report.unrealized_pnl_label }}
+      </strong>
+    </div>
+    <div class="metric-card">
+      <span>Fees</span>
+      <strong>{{ report.fees_label }}</strong>
+    </div>
+  </div>
+
+  <div class="report-detail-tags" style="margin:0 0 16px">
+    {% for strategy in report.strategies %}
+    <span class="report-badge">{{ strategy }}</span>
+    {% endfor %}
+    {% for mode in report.modes %}
+    <span class="report-status-pill {{ 'success' if mode == 'live' else 'failed' }}">{{ mode|upper }}</span>
+    {% endfor %}
+  </div>
+
+  <div class="report-chart-grid" style="margin-bottom:16px">
+    <div class="report-chart-card">
+      <span>Daily PnL</span>
+      <h3>Recent Days</h3>
+      <div class="report-symbol-list">
+        {% for item in report.daily_pnl[:6] %}
+        <div class="report-symbol-row">
+          <div><strong>{{ item.period }}</strong></div>
+          <div class="{{ 'metric-pos' if item.positive else ('metric-neg' if '-' in item.pnl_label else '') }}">{{ item.pnl_label }}</div>
+        </div>
+        {% else %}
+        <div class="report-chart-empty">No closed trades yet.</div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="report-chart-card">
+      <span>Weekly / Monthly PnL</span>
+      <h3>Recent Buckets</h3>
+      <div class="report-symbol-list">
+        {% for item in report.weekly_pnl[:3] %}
+        <div class="report-symbol-row">
+          <div><strong>{{ item.period }}</strong></div>
+          <div class="{{ 'metric-pos' if item.positive else ('metric-neg' if '-' in item.pnl_label else '') }}">{{ item.pnl_label }}</div>
+        </div>
+        {% endfor %}
+        {% for item in report.monthly_pnl[:3] %}
+        <div class="report-symbol-row">
+          <div><strong>{{ item.period }}</strong></div>
+          <div class="{{ 'metric-pos' if item.positive else ('metric-neg' if '-' in item.pnl_label else '') }}">{{ item.pnl_label }}</div>
+        </div>
+        {% endfor %}
+      </div>
     </div>
   </div>
 
@@ -123,15 +204,17 @@
             <th>Mode</th>
             <th>Status</th>
             <th>Started</th>
+            <th>Runtime</th>
+            <th>Strategy</th>
             <th>Trades</th>
             <th>Open</th>
             <th>Messages</th>
+            <th>Signals</th>
             <th>PnL</th>
           </tr>
         </thead>
         <tbody>
           {% for s in report.sessions %}
-          {% set m = s.get("metrics") or {} %}
           <tr>
             <td class="mono" style="font-size:0.78rem">{{ (s.get("session_id") or "")[:12] }}…</td>
             <td>
@@ -143,11 +226,14 @@
               <span class="phase-pill phase-{{ s.get('status') or 'idle' }}">{{ s.get("status") or "idle" }}</span>
             </td>
             <td class="mono" style="font-size:0.78rem">{{ (s.get("started_at") or s.get("created_at") or "")[:16] | replace("T"," ") }}</td>
-            <td>{{ m.get("total_trades") or 0 }}</td>
-            <td>{{ m.get("open_positions") or 0 }}</td>
-            <td>{{ m.get("messages_processed") or 0 }}</td>
-            <td class="{{ 'metric-pos' if (m.get('total_pnl') or 0)|float > 0 else ('metric-neg' if (m.get('total_pnl') or 0)|float < 0 else '') }}">
-              {{ "%+.2f"|format((m.get("total_pnl") or 0)|float) }}
+            <td class="mono" style="font-size:0.78rem">{{ s.get("runtime_label") or "00:00:00" }}</td>
+            <td>{{ s.get("strategy_key") or "-" }}</td>
+            <td>{{ s.get("total_trades") or 0 }}</td>
+            <td>{{ s.get("open_positions_count") or 0 }}</td>
+            <td>{{ s.get("total_messages_processed") or 0 }}</td>
+            <td>{{ s.get("total_signals_received") or 0 }}</td>
+            <td class="{{ 'metric-pos' if (s.get('total_pnl') or 0)|float > 0 else ('metric-neg' if (s.get('total_pnl') or 0)|float < 0 else '') }}">
+              {{ "%+.2f"|format((s.get("total_pnl") or 0)|float) }}
             </td>
           </tr>
           {% endfor %}

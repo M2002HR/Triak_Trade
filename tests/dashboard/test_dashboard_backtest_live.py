@@ -220,6 +220,7 @@ def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> No
     assert 'id="backtest-progress-track"' in response.text
     assert 'id="backtest-progress-fill"' in response.text
     assert 'id="backtest-progress-meta"' in response.text
+    assert 'id="backtest-runtime-label"' in response.text
     assert 'data-message-filter="signals"' in response.text
     assert 'id="message-modal" class="modal-shell" hidden' in response.text
     assert 'id="panel-modal" class="modal-shell" hidden' in response.text

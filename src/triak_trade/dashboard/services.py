@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, ClassVar
+
+from sqlalchemy.orm import Session, sessionmaker
 
 from triak_trade.backtesting import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.engine import BacktestEngine
@@ -277,10 +280,12 @@ class DashboardService:
         settings: Settings,
         *,
         realtime_notifier: Callable[[dict[str, Any]], None] | None = None,
+        live_session_factory: sessionmaker[Session] | None = None,
     ) -> None:
         self.settings = settings
         self.state = DashboardStateService(settings)
         self.real_runner = RealBacktestRunner(settings=settings)
+        self.live_session_factory = live_session_factory
         self.backtests = DashboardBacktestCoordinator(
             settings=settings,
             runner_factory=lambda: RealBacktestRunner(settings=settings),
@@ -681,6 +686,7 @@ class DashboardService:
                     {"value": "fill_rate_pct", "label": "Fill Rate"},
                     {"value": "max_drawdown_value", "label": "Lowest Drawdown"},
                     {"value": "trades_filled", "label": "Filled Trades"},
+                    {"value": "runtime_duration_ms", "label": "Runtime"},
                 ],
             },
             "has_reports": bool(reports),
@@ -715,65 +721,158 @@ class DashboardService:
     def live_reports(self) -> dict[str, Any]:
         """Build a per-channel live trading performance report from stored session history."""
         from triak_trade.live_trading.store import LiveTradingStore  # lazy import
-        store = LiveTradingStore(self.settings.LIVE_TRADING_RUNTIME_DIR)
+
+        store = LiveTradingStore(
+            self.settings.LIVE_TRADING_RUNTIME_DIR,
+            session_factory=self.live_session_factory,
+        )
         sessions = store.list_sessions(limit=200)
 
         channel_map: dict[str, dict[str, Any]] = {}
         for session in sessions:
             session_data = session.model_dump(mode="json")
-            channels = session_data.get("channels") or []
-            if isinstance(channels, str):
-                channels = [channels]
-            for ch in channels:
-                if ch not in channel_map:
-                    channel_map[ch] = {
-                        "channel": ch,
-                        "channel_label": ch.rsplit("/", 1)[-1] if "/" in ch else ch,
+            trades = store.list_trades(session.session_id, limit=500)
+            total_trades = len(trades)
+            closed_trades = [trade for trade in trades if not trade.is_open]
+            open_trades = [trade for trade in trades if trade.is_open]
+            channel_labels = session.channel_labels or [
+                ch.rsplit("/", 1)[-1] if "/" in ch else ch
+                for ch in session.channels
+            ]
+            session_total_pnl = session.total_pnl
+            session_realized_pnl = session.total_realized_pnl
+            session_unrealized_pnl = session.total_unrealized_pnl
+            win_rate_pct = (
+                Decimal(session.wins) / Decimal(len(closed_trades)) * Decimal("100")
+                if closed_trades
+                else Decimal("0")
+            )
+            avg_trade_pnl = (
+                session_total_pnl / Decimal(total_trades)
+                if total_trades
+                else Decimal("0")
+            )
+            session_runtime_seconds = _duration_seconds(session.started_at, session.stopped_at)
+            session_row = {
+                **session_data,
+                "total_trades": total_trades,
+                "closed_trades_count": len(closed_trades),
+                "open_positions_count": len(open_trades),
+                "total_pnl": str(session_total_pnl),
+                "total_realized_pnl": str(session_realized_pnl),
+                "total_unrealized_pnl": str(session_unrealized_pnl),
+                "total_fees": str(session.total_fees),
+                "win_rate_pct": _decimal_to_str(win_rate_pct),
+                "avg_trade_pnl": _decimal_to_str(avg_trade_pnl),
+                "runtime_seconds": session_runtime_seconds,
+                "runtime_label": _format_elapsed_seconds(session_runtime_seconds),
+            }
+            for index, channel in enumerate(session.channels):
+                if channel not in channel_map:
+                    channel_map[channel] = {
+                        "channel": channel,
+                        "channel_label": (
+                            channel_labels[index]
+                            if index < len(channel_labels)
+                            else channel
+                        ),
                         "sessions": [],
+                        "session_count": 0,
                         "total_trades": 0,
+                        "closed_trades": 0,
+                        "open_trades": 0,
                         "wins": 0,
                         "losses": 0,
-                        "total_pnl": 0.0,
-                        "open_trades": 0,
+                        "total_pnl": Decimal("0"),
+                        "realized_pnl": Decimal("0"),
+                        "unrealized_pnl": Decimal("0"),
+                        "fees": Decimal("0"),
                         "total_messages": 0,
-                        "total_signals": 0,
+                        "total_signals_received": 0,
+                        "total_signals_opened": 0,
+                        "strategies": set(),
+                        "modes": set(),
                         "last_session_at": None,
+                        "daily_pnl": defaultdict(lambda: Decimal("0")),
+                        "weekly_pnl": defaultdict(lambda: Decimal("0")),
+                        "monthly_pnl": defaultdict(lambda: Decimal("0")),
                     }
-                entry = channel_map[ch]
-                entry["sessions"].append(session_data)
-
-                metrics = session_data.get("metrics") or {}
-                entry["total_trades"] += int(metrics.get("total_trades") or 0)
-                entry["wins"] += int(metrics.get("wins") or 0)
-                entry["losses"] += int(metrics.get("losses") or 0)
-                entry["open_trades"] += int(metrics.get("open_positions") or 0)
-                entry["total_messages"] += int(metrics.get("messages_processed") or 0)
-                entry["total_signals"] += int(metrics.get("signals_detected") or 0)
-                raw_pnl = metrics.get("total_pnl") or "0"
-                try:
-                    entry["total_pnl"] += float(Decimal(str(raw_pnl)))
-                except Exception:
-                    pass
-
-                started = session_data.get("started_at") or session_data.get("created_at")
-                if started and (
-                    entry["last_session_at"] is None or started > entry["last_session_at"]
-                ):
+                entry = channel_map[channel]
+                entry["sessions"].append(session_row)
+                entry["session_count"] += 1
+                entry["total_trades"] += total_trades
+                entry["closed_trades"] += len(closed_trades)
+                entry["open_trades"] += len(open_trades)
+                entry["wins"] += session.wins
+                entry["losses"] += session.losses
+                entry["total_pnl"] += session_total_pnl
+                entry["realized_pnl"] += session_realized_pnl
+                entry["unrealized_pnl"] += session_unrealized_pnl
+                entry["fees"] += session.total_fees
+                entry["total_messages"] += session.total_messages_processed
+                entry["total_signals_received"] += session.total_signals_received
+                entry["total_signals_opened"] += session.total_signals_opened
+                entry["strategies"].add(session.strategy_key)
+                entry["modes"].add(session.trading_mode)
+                started = session.started_at.isoformat()
+                if entry["last_session_at"] is None or started > entry["last_session_at"]:
                     entry["last_session_at"] = started
+                _add_live_trade_period_buckets(entry, closed_trades)
 
         channel_reports = []
         for ch_data in channel_map.values():
-            t = ch_data["total_trades"]
-            w = ch_data["wins"]
-            win_rate = (w / t * 100) if t > 0 else 0.0
-            pnl = ch_data["total_pnl"]
-            ch_data["win_rate_pct"] = round(win_rate, 1)
-            ch_data["win_rate_label"] = f"{win_rate:.1f}%"
-            ch_data["total_pnl_label"] = f"{pnl:+.2f}"
-            ch_data["pnl_positive"] = pnl > 0
-            ch_data["session_count"] = len(ch_data["sessions"])
-            ch_data["sessions"] = ch_data["sessions"][:10]
-            channel_reports.append(ch_data)
+            total_trades = ch_data["total_trades"]
+            closed_trades = ch_data["closed_trades"]
+            total_pnl = ch_data["total_pnl"]
+            win_rate_pct = (
+                Decimal(ch_data["wins"]) / Decimal(closed_trades) * Decimal("100")
+                if closed_trades
+                else Decimal("0")
+            )
+            pnl_per_trade = (
+                total_pnl / Decimal(total_trades)
+                if total_trades
+                else Decimal("0")
+            )
+            signal_open_rate = (
+                Decimal(ch_data["total_signals_opened"])
+                / Decimal(ch_data["total_signals_received"])
+                * Decimal("100")
+                if ch_data["total_signals_received"]
+                else Decimal("0")
+            )
+            channel_reports.append(
+                {
+                    "channel": ch_data["channel"],
+                    "channel_label": ch_data["channel_label"],
+                    "sessions": ch_data["sessions"][:10],
+                    "session_count": ch_data["session_count"],
+                    "total_trades": total_trades,
+                    "closed_trades": closed_trades,
+                    "open_trades": ch_data["open_trades"],
+                    "wins": ch_data["wins"],
+                    "losses": ch_data["losses"],
+                    "total_messages": ch_data["total_messages"],
+                    "total_signals_received": ch_data["total_signals_received"],
+                    "total_signals_opened": ch_data["total_signals_opened"],
+                    "signal_open_rate_label": f"{_decimal_to_float(signal_open_rate):.1f}%",
+                    "total_pnl": _decimal_to_float(total_pnl),
+                    "total_pnl_label": _signed_decimal_label(total_pnl),
+                    "realized_pnl_label": _signed_decimal_label(ch_data["realized_pnl"]),
+                    "unrealized_pnl_label": _signed_decimal_label(ch_data["unrealized_pnl"]),
+                    "fees_label": _signed_decimal_label(ch_data["fees"]),
+                    "pnl_positive": total_pnl > 0,
+                    "win_rate_pct": round(_decimal_to_float(win_rate_pct), 1),
+                    "win_rate_label": f"{_decimal_to_float(win_rate_pct):.1f}%",
+                    "avg_trade_pnl_label": _signed_decimal_label(pnl_per_trade),
+                    "strategies": sorted(ch_data["strategies"]),
+                    "modes": sorted(ch_data["modes"]),
+                    "last_session_at": ch_data["last_session_at"],
+                    "daily_pnl": _sorted_live_period_rows(ch_data["daily_pnl"]),
+                    "weekly_pnl": _sorted_live_period_rows(ch_data["weekly_pnl"]),
+                    "monthly_pnl": _sorted_live_period_rows(ch_data["monthly_pnl"]),
+                }
+            )
 
         channel_reports.sort(key=lambda x: x["last_session_at"] or "", reverse=True)
 
@@ -1009,6 +1108,18 @@ class DashboardService:
             else []
         )
         equity_curve_rows: list[Any] = equity_curve if isinstance(equity_curve, list) else []
+        period_pnl_raw = nested.get("period_pnl")
+        period_pnl: dict[str, Any] = period_pnl_raw if isinstance(period_pnl_raw, dict) else {}
+        trade_outcome_summary_raw = nested.get("trade_outcome_summary")
+        trade_outcome_summary: dict[str, Any] = (
+            trade_outcome_summary_raw if isinstance(trade_outcome_summary_raw, dict) else {}
+        )
+        comparison_profile_raw = nested.get("comparison_profile")
+        comparison_profile: dict[str, Any] = (
+            comparison_profile_raw if isinstance(comparison_profile_raw, dict) else {}
+        )
+        strategy_raw = payload.get("strategy")
+        strategy: dict[str, Any] = strategy_raw if isinstance(strategy_raw, dict) else {}
         report_id = str(path)
         channel = str(payload.get("channel") or nested.get("channel_id") or "unknown")
         score_value = self._decimal_to_float(
@@ -1037,6 +1148,7 @@ class DashboardService:
         from_date = str(payload.get("from_date") or nested.get("from_date") or "")
         to_date = str(payload.get("to_date") or nested.get("to_date") or "")
         pnl_positive = total_pnl > 0
+        runtime_duration_ms = int(payload.get("runtime_duration_ms") or 0)
         return {
             "report_id": report_id,
             "file_name": path.name,
@@ -1047,12 +1159,23 @@ class DashboardService:
             "generated_at": generated_at,
             "from_date": from_date,
             "to_date": to_date,
+            "runtime_duration_ms": runtime_duration_ms,
+            "runtime_duration_label": _format_elapsed_seconds(runtime_duration_ms // 1000),
             "success": bool(payload.get("success", False)),
             "success_label": "Complete" if payload.get("success", False) else "Failed",
             "ai_used": bool(payload.get("ai_used", False)),
             "real_telegram_used": bool(payload.get("real_telegram_used", False)),
             "real_market_data_used": bool(payload.get("real_market_data_used", False)),
             "regex_fallback_used": bool(payload.get("regex_fallback_used", False)),
+            "strategy_key": str(payload.get("strategy_key") or ""),
+            "strategy_name": str(strategy.get("name") or payload.get("strategy_key") or ""),
+            "strategy_description": str(strategy.get("description") or ""),
+            "strategy_parameters": (
+                strategy.get("parameters")
+                if isinstance(strategy.get("parameters"), dict)
+                else {}
+            ),
+            "risk_per_trade_pct": str(payload.get("risk_per_trade_pct") or "0"),
             "total_messages": int(payload.get("total_messages") or 0),
             "classified_messages": int(payload.get("classified_messages") or 0),
             "parsed_signals": int(
@@ -1096,6 +1219,13 @@ class DashboardService:
                 {"status": status, "count": count}
                 for status, count in trade_status_counts_dict.items()
             ],
+            "period_pnl": {
+                "daily": self._normalize_period_rows(period_pnl.get("daily")),
+                "weekly": self._normalize_period_rows(period_pnl.get("weekly")),
+                "monthly": self._normalize_period_rows(period_pnl.get("monthly")),
+            },
+            "trade_outcome_summary": self._normalize_metric_dict(trade_outcome_summary),
+            "comparison_profile": self._normalize_metric_dict(comparison_profile),
             "symbol_summary": [
                 {
                     "symbol": item.get("symbol"),
@@ -1225,3 +1355,88 @@ class DashboardService:
             return float(Decimal(str(value)))
         except Exception:
             return 0.0
+
+    @staticmethod
+    def _normalize_period_rows(rows: Any) -> list[dict[str, Any]]:
+        if not isinstance(rows, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            pnl_value = DashboardService._decimal_to_float(item.get("pnl") or "0")
+            normalized.append(
+                {
+                    "period": item.get("period"),
+                    "trades": int(item.get("trades") or 0),
+                    "wins": int(item.get("wins") or 0),
+                    "losses": int(item.get("losses") or 0),
+                    "pnl_value": pnl_value,
+                    "pnl_label": f"{pnl_value:.2f}",
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_metric_dict(payload: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, value in payload.items():
+            if isinstance(value, (int, float, bool)) or value is None:
+                normalized[key] = value
+                continue
+            if isinstance(value, str):
+                normalized[key] = value
+                continue
+            if isinstance(value, list):
+                normalized[key] = value
+                continue
+            normalized[key] = str(value)
+        return normalized
+
+
+def _decimal_to_float(value: Decimal) -> float:
+    return float(value)
+
+
+def _decimal_to_str(value: Decimal) -> str:
+    return f"{value:.4f}".rstrip("0").rstrip(".") if value != value.to_integral() else str(value)
+
+
+def _signed_decimal_label(value: Decimal) -> str:
+    return f"{value:+.2f}"
+
+
+def _duration_seconds(started_at: datetime, stopped_at: datetime | None) -> int:
+    end_at = stopped_at or datetime.now(timezone.utc)
+    return max(0, int((end_at - started_at).total_seconds()))
+
+
+def _format_elapsed_seconds(seconds: int) -> str:
+    hours, remainder = divmod(max(0, seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _add_live_trade_period_buckets(entry: dict[str, Any], trades: list[Any]) -> None:
+    for trade in trades:
+        if trade.closed_at is None:
+            continue
+        pnl = Decimal(trade.total_pnl)
+        closed_at = trade.closed_at.astimezone(timezone.utc)
+        entry["daily_pnl"][closed_at.strftime("%Y-%m-%d")] += pnl
+        entry["weekly_pnl"][closed_at.strftime("%G-W%V")] += pnl
+        entry["monthly_pnl"][closed_at.strftime("%Y-%m")] += pnl
+
+
+def _sorted_live_period_rows(buckets: dict[str, Decimal]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for period, pnl in sorted(buckets.items(), key=lambda item: item[0], reverse=True):
+        rows.append(
+            {
+                "period": period,
+                "pnl": str(pnl),
+                "pnl_label": _signed_decimal_label(pnl),
+                "positive": pnl > 0,
+            }
+        )
+    return rows[:12]

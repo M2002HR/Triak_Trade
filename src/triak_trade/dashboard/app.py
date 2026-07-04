@@ -28,6 +28,7 @@ def create_dashboard_app(settings: Settings) -> FastAPI:
     service = DashboardService(
         settings,
         realtime_notifier=realtime_hub.broadcast_threadsafe,
+        live_session_factory=db_session_factory,
     )
     live_coordinator = DashboardLiveCoordinator(
         settings=settings,
