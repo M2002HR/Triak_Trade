@@ -90,9 +90,16 @@ _TP_LIST_MARKERS = (
     "take profit list",
     "target list",
     "targets",
-    "تارگت",
     "اهداف",
     "حد سود",
+)
+_BARE_TARGET_WORD_MARKERS = (
+    "تارگت",
+    "target",
+)
+_ORDINAL_TARGET_RE = re.compile(
+    r"(?:تارگت|target)\s*(?:اول|دوم|سوم|چهارم|پنجم|[1-9]\d*)",
+    re.IGNORECASE,
 )
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
@@ -109,7 +116,11 @@ def detect_tp_list_update(text: str | None) -> list[Decimal]:
     if not text:
         return []
     lowered = text.lower()
-    if not any(marker in lowered for marker in _TP_LIST_MARKERS):
+    has_explicit_list_marker = any(marker in lowered for marker in _TP_LIST_MARKERS)
+    has_bare_target_marker = any(marker in lowered for marker in _BARE_TARGET_WORD_MARKERS)
+    if not has_explicit_list_marker and not has_bare_target_marker:
+        return []
+    if not has_explicit_list_marker and _ORDINAL_TARGET_RE.search(lowered):
         return []
     values = [Decimal(match) for match in _NUMBER_RE.findall(text.replace(",", ""))]
     return values if len(values) >= 2 else []

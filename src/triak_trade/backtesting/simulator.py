@@ -844,19 +844,22 @@ class BacktestSimulator:
                         entry_price=position.entry_price,
                         stop_loss=position.stop_loss,
                     )
-                    position.take_profits = (
-                        position.take_profits[: position.targets_hit] + valid_update_tps
-                    )
-                    position.notes.append(
-                        "take_profits_updated="
-                        + ",".join(str(item) for item in valid_update_tps)
-                    )
-                    self._replace_take_profit_history(
-                        take_profit_history=take_profit_history,
-                        signal_id=event.related_signal_id,
-                        timestamp=event.timestamp,
-                        take_profits=position.take_profits,
-                    )
+                    if valid_update_tps:
+                        position.take_profits = (
+                            position.take_profits[: position.targets_hit] + valid_update_tps
+                        )
+                        position.notes.append(
+                            "take_profits_updated="
+                            + ",".join(str(item) for item in valid_update_tps)
+                        )
+                        self._replace_take_profit_history(
+                            take_profit_history=take_profit_history,
+                            signal_id=event.related_signal_id,
+                            timestamp=event.timestamp,
+                            take_profits=position.take_profits,
+                        )
+                    else:
+                        position.notes.append("take_profits_update_ignored_invalid")
             if capture_snapshots:
                 snapshots.append(
                     self._build_snapshot(
@@ -1841,18 +1844,21 @@ class BacktestSimulator:
                 entry_price=position.entry_price,
                 stop_loss=position.stop_loss,
             )
-            position.take_profits = (
-                position.take_profits[: position.targets_hit] + valid_update_tps
-            )
-            position.notes.append(
-                "take_profits_updated=" + ",".join(str(item) for item in valid_update_tps)
-            )
-            self._replace_take_profit_history(
-                take_profit_history=take_profit_history,
-                signal_id=event.related_signal_id,
-                timestamp=event.timestamp,
-                take_profits=position.take_profits,
-            )
+            if valid_update_tps:
+                position.take_profits = (
+                    position.take_profits[: position.targets_hit] + valid_update_tps
+                )
+                position.notes.append(
+                    "take_profits_updated=" + ",".join(str(item) for item in valid_update_tps)
+                )
+                self._replace_take_profit_history(
+                    take_profit_history=take_profit_history,
+                    signal_id=event.related_signal_id,
+                    timestamp=event.timestamp,
+                    take_profits=position.take_profits,
+                )
+            else:
+                position.notes.append("take_profits_update_ignored_invalid")
 
     def _build_live_preview_snapshot(
         self,

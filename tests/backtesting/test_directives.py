@@ -27,3 +27,8 @@ def test_detect_tp_list_update_requires_two_numbers() -> None:
 def test_detect_tp_list_update_empty() -> None:
     assert detect_tp_list_update(None) == []
     assert detect_tp_list_update("") == []
+
+
+def test_detect_tp_list_update_ignores_target_hit_report_numbers() -> None:
+    values = detect_tp_list_update("50 درصد سود با لوریج 20 تارگت 1 ازش کشیدیم بیرون")
+    assert values == []

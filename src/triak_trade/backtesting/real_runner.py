@@ -59,6 +59,7 @@ from triak_trade.backtesting.symbol_mapper import (
 from triak_trade.backtesting.telegram_source import BacktestTelegramSource
 from triak_trade.config.settings import Settings
 from triak_trade.core.formatting import decimal_to_plain_string, format_decimal
+from triak_trade.core.symbols import same_market_symbol
 from triak_trade.core.time import TEHRAN_TZ
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
 from triak_trade.domain.ids import make_signal_id
@@ -1612,6 +1613,7 @@ class RealBacktestRunner:
             if (
                 classified.is_potential_new_signal
                 and reply_owner is not None
+                and self._message_matches_signal_identity(parsed_for_event, reply_owner)
                 and self._is_signal_eligible_for_backtest_follow_up(
                     reply_owner,
                     "reply_to",
@@ -2089,6 +2091,28 @@ class RealBacktestRunner:
         if not candidates:
             return None
         return max(candidates, key=lambda signal: signal.updated_at)
+
+    @staticmethod
+    def _message_matches_signal_identity(
+        parsed: ParsedSignal,
+        signal: SignalState,
+    ) -> bool:
+        current = signal.current_signal
+        if current is None:
+            return True
+        if (
+            parsed.symbol is not None
+            and current.symbol is not None
+            and not same_market_symbol(current.symbol, parsed.symbol)
+        ):
+            return False
+        if (
+            parsed.side.value != "unknown"
+            and current.side.value != "unknown"
+            and parsed.side is not current.side
+        ):
+            return False
+        return True
 
     @staticmethod
     def _is_signal_pending_follow_up_completion(

@@ -907,6 +907,87 @@ def test_simulator_snapshot_risk_amount_zero_when_stop_locks_in_profit() -> None
     assert state.risk_amount == Decimal("0")
 
 
+def test_simulator_keeps_existing_take_profits_when_update_tps_are_invalid() -> None:
+    open_signal = _parsed(SignalAction.OPEN, TradeSide.SHORT)
+    open_signal.entry_low = Decimal("0.04770")
+    open_signal.entry_high = Decimal("0.04970")
+    open_signal.stop_loss = Decimal("0.05800")
+    open_signal.take_profits = [Decimal("0.04670"), Decimal("0.04550"), Decimal("0.04300")]
+    open_signal.symbol = "TNSRUSDT"
+    update_signal = _parsed(SignalAction.UPDATE_TP, TradeSide.SHORT)
+    update_signal.entry_low = None
+    update_signal.entry_high = None
+    update_signal.stop_loss = None
+    update_signal.take_profits = [Decimal("50"), Decimal("20"), Decimal("1")]
+    update_signal.symbol = "TNSRUSDT"
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 21, 14, 49, 4, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=open_signal,
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1552,
+        leverage=15,
+    )
+    update_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 21, 14, 56, 19, tzinfo=timezone.utc),
+        action=SignalAction.UPDATE_TP,
+        signal_id="s1",
+        parsed_signal=update_signal,
+        related_signal_id="s1",
+        debug_notes=[],
+        source_message_id=1554,
+    )
+    candles = [
+        Candle(
+            symbol="TNSRUSDT",
+            interval="1m",
+            open_time=datetime(2026, 6, 21, 14, 52, tzinfo=timezone.utc),
+            close_time=datetime(2026, 6, 21, 14, 53, tzinfo=timezone.utc),
+            open=Decimal("0.0472"),
+            high=Decimal("0.04985"),
+            low=Decimal("0.04715"),
+            close=Decimal("0.04781"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        ),
+        Candle(
+            symbol="TNSRUSDT",
+            interval="1m",
+            open_time=datetime(2026, 6, 21, 14, 56, tzinfo=timezone.utc),
+            close_time=datetime(2026, 6, 21, 14, 57, tzinfo=timezone.utc),
+            open=Decimal("0.04825"),
+            high=Decimal("0.04848"),
+            low=Decimal("0.04800"),
+            close=Decimal("0.04821"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        ),
+    ]
+
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event, update_event],
+        candles=candles,
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("10"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        max_effective_leverage=Decimal("15"),
+        close_open_positions_at_end=False,
+    )
+
+    state = snapshots[-1].signal_states["s1"]
+    assert state.status == "open"
+    assert state.take_profits == [Decimal("0.04670"), Decimal("0.04550"), Decimal("0.04300")]
+    assert "take_profits_update_ignored_invalid" in state.notes
+    assert state.take_profit_history is not None
+    assert [span.value for span in state.take_profit_history if span.ended_at is None] == [
+        Decimal("0.04670"),
+        Decimal("0.04550"),
+        Decimal("0.04300"),
+    ]
+
+
 def test_simulator_market_entry_matches_normalized_swap_symbol() -> None:
     signal = _parsed(SignalAction.OPEN)
     signal.entry_type = EntryType.MARKET

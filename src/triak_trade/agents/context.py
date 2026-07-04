@@ -154,11 +154,22 @@ class ChannelContext:
         if current is None:
             signal.current_signal = parsed
         else:
+            merged_symbol = current.symbol if current.symbol is not None else parsed.symbol
+            merged_side = (
+                current.side
+                if current.side.value != "unknown"
+                else parsed.side
+            )
+            merged_market = (
+                current.market
+                if current.market.value != "unknown"
+                else parsed.market
+            )
             signal.current_signal = ParsedSignal(
                 action=parsed.action if parsed.action.value != "unknown" else current.action,
-                market=parsed.market if parsed.market.value != "unknown" else current.market,
-                symbol=parsed.symbol or current.symbol,
-                side=parsed.side if parsed.side.value != "unknown" else current.side,
+                market=merged_market,
+                symbol=merged_symbol,
+                side=merged_side,
                 entry_type=(
                     parsed.entry_type
                     if parsed.entry_type.value != "unknown"

@@ -50,6 +50,25 @@ _FOLLOW_UP_ACTIONS = {
 }
 
 
+def _matches_signal_identity(signal: SignalState, parsed: ParsedSignal) -> bool:
+    current = signal.current_signal
+    if current is None:
+        return True
+    if (
+        parsed.symbol is not None
+        and current.symbol is not None
+        and not same_market_symbol(current.symbol, parsed.symbol)
+    ):
+        return False
+    if (
+        parsed.side.value != "unknown"
+        and current.side.value != "unknown"
+        and parsed.side is not current.side
+    ):
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class CorrelationResult:
     """Outcome of follow-up correlation.
@@ -119,7 +138,7 @@ def resolve_related_signal_id(
             signal,
             method="ai",
             signal_filter=signal_filter,
-        ):
+        ) and _matches_signal_identity(signal, parsed):
             return CorrelationResult(signal_id=raw_related_id, method="ai")
     ai_note = (
         None
@@ -133,7 +152,7 @@ def resolve_related_signal_id(
         by_reply,
         method="reply_to",
         signal_filter=signal_filter,
-    ):
+    ) and _matches_signal_identity(by_reply, parsed):
         return CorrelationResult(signal_id=by_reply.signal_id, method="reply_to", note=ai_note)
     for parent in context.get_reply_chain(message):
         owner = context.find_signal_by_message_reply(parent.message_id)
@@ -141,7 +160,7 @@ def resolve_related_signal_id(
             owner,
             method="reply_chain",
             signal_filter=signal_filter,
-        ):
+        ) and _matches_signal_identity(owner, parsed):
             return CorrelationResult(
                 signal_id=owner.signal_id, method="reply_chain", note=ai_note
             )
@@ -174,7 +193,7 @@ def resolve_related_signal_id(
     #    unmistakable directive ("سیو سود کنید" / "close" / "move SL") can only
     #    mean that one. High precision, so it is on by default (not gated behind
     #    the last-resort flag, which exists for the *ambiguous* multi-signal case).
-    if action in _FOLLOW_UP_ACTIONS:
+    if parsed.symbol is None and action in _FOLLOW_UP_ACTIONS:
         trackable = [
             s
             for s in context.active_signals.values()
@@ -191,7 +210,7 @@ def resolve_related_signal_id(
             )
 
     # 5) Last resort: ambiguous follow-up with several open signals; only if enabled.
-    if allow_last_resort and action in _FOLLOW_UP_ACTIONS:
+    if parsed.symbol is None and allow_last_resort and action in _FOLLOW_UP_ACTIONS:
         trackable = [
             s
             for s in context.active_signals.values()

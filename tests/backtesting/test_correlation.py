@@ -285,3 +285,34 @@ def test_resolve_ignores_terminal_signals_for_symbol_match() -> None:
         action=SignalAction.CLOSE,
     )
     assert result.signal_id is None
+
+
+def test_resolve_reply_to_rejects_symbol_mismatch() -> None:
+    sig = _signal("sig_btc", "BTCUSDT", 10, _NOW)
+    ctx = _ctx(sig)
+    result = resolve_related_signal_id(
+        context=ctx,
+        parsed=_parsed("ETHUSDT", SignalAction.UPDATE_SL),
+        raw_related_id=None,
+        message=_msg(11, reply_to=10),
+        action=SignalAction.UPDATE_SL,
+        allow_last_resort=True,
+    )
+    assert result.signal_id is None
+    assert result.method == "unattached"
+
+
+def test_resolve_last_resort_does_not_attach_symbolled_followup() -> None:
+    older = _signal("sig_btc", "BTCUSDT", 10, _NOW)
+    newer = _signal("sig_eth", "ETHUSDT", 20, _NOW + timedelta(hours=1))
+    ctx = _ctx(older, newer)
+    result = resolve_related_signal_id(
+        context=ctx,
+        parsed=_parsed("SYNUSDT", SignalAction.UPDATE_SL),
+        raw_related_id=None,
+        message=_msg(21),
+        action=SignalAction.UPDATE_SL,
+        allow_last_resort=True,
+    )
+    assert result.signal_id is None
+    assert result.method == "unattached"

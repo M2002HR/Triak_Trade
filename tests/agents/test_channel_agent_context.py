@@ -201,3 +201,35 @@ def test_merge_signal_normalizes_reversed_entry_range_from_partial_update() -> N
     assert state.current_signal is not None
     assert state.current_signal.entry_low == Decimal("101")
     assert state.current_signal.entry_high == Decimal("102")
+
+
+def test_merge_signal_preserves_core_identity_fields() -> None:
+    now = datetime.now(timezone.utc)
+    ctx = ChannelContext(channel_id="c1", max_message_limit=10, max_update_window_hours=48)
+    state = _signal("sig-1", "BTCUSDT", now)
+    ctx.add_signal(state, pending=True)
+    parsed = ParsedSignal(
+        action=SignalAction.UPDATE_SL,
+        market=MarketType.SPOT,
+        symbol="ETHUSDT",
+        side=TradeSide.SHORT,
+        entry_type=EntryType.UNKNOWN,
+        entry_low=None,
+        entry_high=None,
+        stop_loss=Decimal("96"),
+        take_profits=[],
+        leverage=None,
+        confidence=Decimal("0.9"),
+        invalid_reason=None,
+        source_channel_id="c1",
+        source_message_id=2,
+        parser_version="v2",
+    )
+
+    ctx.merge_signal("sig-1", parsed, now)
+
+    assert state.current_signal is not None
+    assert state.current_signal.symbol == "BTCUSDT"
+    assert state.current_signal.side is TradeSide.LONG
+    assert state.current_signal.market is MarketType.FUTURES
+    assert state.current_signal.stop_loss == Decimal("96")
