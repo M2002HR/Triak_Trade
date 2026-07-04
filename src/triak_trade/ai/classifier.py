@@ -19,6 +19,7 @@ from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeS
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal, RawTelegramMessage
 from triak_trade.parsing.normalizer import MessageNormalizer
 from triak_trade.parsing.regex_parser import RegexSignalParser
+from triak_trade.parsing.side_inference import infer_trade_side_from_price_geometry
 from triak_trade.parsing.validator import ParsedSignalValidator
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
@@ -314,15 +315,29 @@ class AIMessageClassifier(MessageClassifier):
         if parsed.action is not SignalAction.OPEN:
             return parsed
 
-        take_profits = self._sanitize_take_profits(parsed)
         update: dict[str, object] = {}
-        if take_profits != parsed.take_profits:
-            update["take_profits"] = take_profits
         if parsed.entry_low is not None and parsed.entry_high is not None:
             entry_low, entry_high = sorted((parsed.entry_low, parsed.entry_high))
             if entry_low != parsed.entry_low or entry_high != parsed.entry_high:
                 update["entry_low"] = entry_low
                 update["entry_high"] = entry_high
+        normalized = parsed.model_copy(update=update) if update else parsed
+
+        take_profits = self._sanitize_take_profits(normalized)
+        if take_profits != normalized.take_profits:
+            update["take_profits"] = take_profits
+            normalized = normalized.model_copy(update={"take_profits": take_profits})
+
+        if normalized.side is TradeSide.UNKNOWN:
+            side_inference = infer_trade_side_from_price_geometry(
+                entry_low=normalized.entry_low,
+                entry_high=normalized.entry_high,
+                stop_loss=normalized.stop_loss,
+                take_profits=normalized.take_profits,
+            )
+            if side_inference.side is not TradeSide.UNKNOWN:
+                update["side"] = side_inference.side
+
         if not update:
             return parsed
         return parsed.model_copy(update=update)

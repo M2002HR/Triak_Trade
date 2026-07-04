@@ -11,7 +11,7 @@ from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
 from triak_trade.config.settings import Settings
-from triak_trade.domain.enums import SignalAction
+from triak_trade.domain.enums import SignalAction, TradeSide
 from triak_trade.domain.models import RawTelegramMessage
 
 
@@ -461,3 +461,38 @@ def test_ai_classifier_prefers_more_specific_symbol_when_numeric_prefix_is_prese
     )
 
     assert result.parsed_signal.symbol == "1000SHIBUSDT"
+
+
+def test_ai_classifier_infers_missing_side_from_entry_and_targets() -> None:
+    payload = _result_payload("NEW_SIGNAL", "open")
+    payload["symbol"] = "REUSDT"
+    payload["symbol_raw"] = "RE/USDT"
+    payload["side"] = "unknown"
+    payload["entry_type"] = "range"
+    payload["entry_low"] = "0.6282"
+    payload["entry_high"] = "0.5895"
+    payload["stop_loss"] = None
+    payload["take_profits"] = ["0.6450", "0.6679", "0.6859", "0.7412"]
+    payload["leverage"] = None
+    classifier = AIMessageClassifier(
+        settings=Settings(_env_file=None),
+        gateway_client=_client(payload),
+    )
+
+    result = classifier.classify(
+        _raw(
+            """
+            New Trade for #RE/USDT (Chart: 4 Hour TF)
+            Entry: $0.6282 - $0.5895
+            Target 1 : 0.6450
+            Target 2 : 0.6679
+            Target 3 : 0.6859
+            Target 4 : 0.7412
+            """
+        ),
+        _context(),
+    )
+
+    assert result.parsed_signal.action is SignalAction.OPEN
+    assert result.parsed_signal.side is TradeSide.LONG
+    assert "validation_error=missing side" not in result.debug_notes

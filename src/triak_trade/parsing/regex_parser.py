@@ -9,6 +9,7 @@ from decimal import Decimal
 from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal
+from triak_trade.parsing.side_inference import infer_trade_side_from_price_geometry
 
 _NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
 _STOP_SECTION_RE = re.compile(
@@ -50,10 +51,28 @@ class RegexSignalParser:
 
         action = self._classify_action(lower)
         symbol = normalized.detected_symbols[0] if normalized.detected_symbols else None
-        side = self._extract_side(lower)
+        explicit_side = self._extract_side(lower)
         entry_type, entry_low, entry_high = self._extract_entry(lower)
         stop_loss = self._extract_stop_loss(lower)
         take_profits = self._extract_take_profits(text)
+        side_inference = infer_trade_side_from_price_geometry(
+            entry_low=entry_low,
+            entry_high=entry_high,
+            stop_loss=stop_loss,
+            take_profits=take_profits,
+        )
+        side = explicit_side if explicit_side is not TradeSide.UNKNOWN else side_inference.side
+        if (
+            action is SignalAction.UNKNOWN
+            and side is not TradeSide.UNKNOWN
+            and symbol is not None
+            and self._looks_like_open_signal(
+                entry_type=entry_type,
+                stop_loss=stop_loss,
+                take_profits=take_profits,
+            )
+        ):
+            action = SignalAction.OPEN
         leverage = self._extract_leverage(lower)
         market = self._extract_market(lower, side, leverage)
 
@@ -97,6 +116,9 @@ class RegexSignalParser:
             action=result.action.value,
             symbol=result.symbol,
             side=result.side.value,
+            side_source=(
+                "explicit" if explicit_side is not TradeSide.UNKNOWN else side_inference.reason
+            ),
             entry_type=result.entry_type.value,
             take_profit_count=len(result.take_profits),
             leverage=result.leverage,
@@ -150,6 +172,19 @@ class RegexSignalParser:
         return SignalAction.UNKNOWN
 
     @staticmethod
+    def _looks_like_open_signal(
+        *,
+        entry_type: EntryType,
+        stop_loss: Decimal | None,
+        take_profits: list[Decimal],
+    ) -> bool:
+        return (
+            entry_type is not EntryType.UNKNOWN
+            or stop_loss is not None
+            or bool(take_profits)
+        )
+
+    @staticmethod
     def _extract_side(lower: str) -> TradeSide:
         if "long" in lower or "\u0644\u0627\u0646\u06af" in lower:
             return TradeSide.LONG
@@ -168,7 +203,7 @@ class RegexSignalParser:
 
         range_match = re.search(
             r"(?:entry|entries|zone|buy zone|entry zone|\u0648\u0631\u0648\u062f)"
-            r"[^\d]{0,20}(\d+(?:\.\d+)?)\s*(?:-|to|/)\s*(\d+(?:\.\d+)?)",
+            r"[^\d]{0,20}(\d+(?:\.\d+)?)\s*(?:-|to|/)\s*[^\d]{0,10}(\d+(?:\.\d+)?)",
             lower,
         )
         if range_match:

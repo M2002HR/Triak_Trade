@@ -191,6 +191,29 @@ def _ignored_signal() -> ParsedSignal:
     )
 
 
+def test_normalize_open_geometry_infers_long_side_for_unknown_signal(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    parsed, error = engine._normalize_or_reject_open_geometry(
+        _open_signal().model_copy(
+            update={
+                "side": TradeSide.UNKNOWN,
+                "entry_low": Decimal("0.5895"),
+                "entry_high": Decimal("0.6282"),
+                "stop_loss": None,
+                "take_profits": [
+                    Decimal("0.6450"),
+                    Decimal("0.6679"),
+                    Decimal("0.6859"),
+                    Decimal("0.7412"),
+                ],
+            }
+        )
+    )
+
+    assert error is None
+    assert parsed.side is TradeSide.LONG
+
+
 @pytest.mark.asyncio
 async def test_try_open_signal_rejects_invalid_exchange_symbol(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
@@ -1848,7 +1871,7 @@ def test_ensure_exchange_quantity_supports_market_entry_promotes_open_quantity()
     )
 
 
-def test_market_entry_minimum_can_override_allocation_cap(
+def test_market_entry_minimum_never_overrides_allocation_cap(
 ) -> None:
     engine = _engine(Path("/tmp"))
     engine.session.account_info = LiveAccountInfo(
@@ -1891,19 +1914,16 @@ def test_market_entry_minimum_can_override_allocation_cap(
         }
     )
 
-    engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
+    with pytest.raises(
+        ValueError,
+        match="Position is too small for the exchange minimum entry size within allocation limits",
+    ):
+        engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
 
-    assert trade.quantity == Decimal("1.00000000")
-    assert trade.remaining_quantity == Decimal("1.00000000")
-    assert trade.margin == Decimal("4.08727500")
-    assert any(
-        note == "exchange_entry_quantity_promoted=0.03434287->1.00000000"
-        for note in trade.message_history[-1].notes
-    )
-    assert any(
-        note == "exchange_entry_allocation_cap_overridden=1.00000000->4.08727500"
-        for note in trade.message_history[-1].notes
-    )
+    assert trade.quantity == Decimal("0.03434287")
+    assert trade.remaining_quantity == Decimal("0.03434287")
+    assert trade.margin == Decimal("0.14036331")
+    assert trade.message_history[-1].notes == []
 
 
 def test_market_entry_minimum_still_requires_balance_coverage(

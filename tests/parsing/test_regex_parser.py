@@ -116,3 +116,28 @@ def test_extract_signal_with_numeric_token_prefix_symbol() -> None:
         Decimal("0.006128"),
         Decimal("0.006278"),
     ]
+
+
+def test_infers_long_side_when_structured_signal_has_no_explicit_side() -> None:
+    parsed = _parse(
+        """
+        New Trade for #RE/USDT (Chart: 4 Hour TF)
+        Entry: $0.6282 - $0.5895
+        Target 1 : 0.6450
+        Target 2 : 0.6679
+        Target 3 : 0.6859
+        Target 4 : 0.7412
+        """
+    )
+
+    assert parsed.action is SignalAction.OPEN
+    assert parsed.symbol == "REUSDT"
+    assert parsed.side is TradeSide.LONG
+    assert parsed.entry_low == Decimal("0.5895")
+    assert parsed.entry_high == Decimal("0.6282")
+    assert parsed.take_profits == [
+        Decimal("0.6450"),
+        Decimal("0.6679"),
+        Decimal("0.6859"),
+        Decimal("0.7412"),
+    ]

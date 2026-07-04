@@ -57,6 +57,7 @@ from triak_trade.live_trading.models import (
 )
 from triak_trade.live_trading.position_manager import LivePositionManager
 from triak_trade.live_trading.store import LiveTradingStore
+from triak_trade.parsing.side_inference import infer_trade_side_from_price_geometry
 from triak_trade.parsing.validator import ParsedSignalValidator
 from triak_trade.telegram.client import TelegramClientInterface
 from triak_trade.telegram.telethon_client import TelethonTelegramClient
@@ -1427,22 +1428,16 @@ class LiveTradingEngine:
         if reference is None or reference <= 0:
             return parsed, None
 
-        score_long = 0
-        score_short = 0
-        if parsed.stop_loss is not None:
-            if parsed.stop_loss < reference:
-                score_long += 1
-            elif parsed.stop_loss > reference:
-                score_short += 1
-        for tp in parsed.take_profits:
-            if tp > reference:
-                score_long += 1
-            elif tp < reference:
-                score_short += 1
-
         updates: dict[str, object] = {}
-        if parsed.side in {TradeSide.BUY, TradeSide.SELL} and score_long != score_short:
-            updates["side"] = TradeSide.LONG if score_long > score_short else TradeSide.SHORT
+        if parsed.side in {TradeSide.UNKNOWN, TradeSide.BUY, TradeSide.SELL}:
+            side_inference = infer_trade_side_from_price_geometry(
+                entry_low=parsed.entry_low,
+                entry_high=parsed.entry_high,
+                stop_loss=parsed.stop_loss,
+                take_profits=parsed.take_profits,
+            )
+            if side_inference.side is not TradeSide.UNKNOWN:
+                updates["side"] = side_inference.side
         normalized = parsed.model_copy(update=updates) if updates else parsed
 
         if normalized.stop_loss is None:
@@ -2309,30 +2304,15 @@ class LiveTradingEngine:
             "Position is too small for the exchange minimum entry size "
             "within allocation limits"
         )
-        try:
-            self._promote_exchange_open_quantity_if_needed(
-                trade=trade,
-                required_quantity=minimum_entry_quantity,
-                note_prefix="exchange_entry_quantity_promoted",
-                insufficient_balance_error=(
-                    "Insufficient balance to satisfy the exchange minimum entry size"
-                ),
-                allocation_limit_error=allocation_limit_error,
-            )
-        except ValueError as exc:
-            if str(exc) != allocation_limit_error:
-                raise
-            self._promote_exchange_open_quantity_if_needed(
-                trade=trade,
-                required_quantity=minimum_entry_quantity,
-                note_prefix="exchange_entry_quantity_promoted",
-                insufficient_balance_error=(
-                    "Insufficient balance to satisfy the exchange minimum entry size"
-                ),
-                allocation_limit_error=allocation_limit_error,
-                allow_allocation_cap_override=True,
-                override_note_prefix="exchange_entry_allocation_cap_overridden",
-            )
+        self._promote_exchange_open_quantity_if_needed(
+            trade=trade,
+            required_quantity=minimum_entry_quantity,
+            note_prefix="exchange_entry_quantity_promoted",
+            insufficient_balance_error=(
+                "Insufficient balance to satisfy the exchange minimum entry size"
+            ),
+            allocation_limit_error=allocation_limit_error,
+        )
 
     def _promote_exchange_open_quantity_if_needed(
         self,
@@ -2342,8 +2322,6 @@ class LiveTradingEngine:
         note_prefix: str,
         insufficient_balance_error: str,
         allocation_limit_error: str,
-        allow_allocation_cap_override: bool = False,
-        override_note_prefix: str | None = None,
     ) -> None:
         required_quantity = required_quantity.quantize(Decimal("0.00000001"))
         if required_quantity <= 0 or trade.quantity >= required_quantity:
@@ -2360,19 +2338,7 @@ class LiveTradingEngine:
         ).quantize(Decimal("0.00000001"))
         if required_margin > current_balance:
             raise ValueError(insufficient_balance_error)
-        allocation_cap_overridden = False
         if max_margin_budget > 0 and required_margin > max_margin_budget:
-            if not allow_allocation_cap_override:
-                raise ValueError(allocation_limit_error)
-            allocation_cap_overridden = True
-        elif max_margin_budget <= 0 and allow_allocation_cap_override:
-            allocation_cap_overridden = True
-
-        if (
-            max_margin_budget > 0
-            and required_margin > max_margin_budget
-            and not allocation_cap_overridden
-        ):
             raise ValueError(allocation_limit_error)
 
         previous_quantity = trade.quantity
@@ -2383,10 +2349,6 @@ class LiveTradingEngine:
             trade.message_history[-1].notes.append(
                 f"{note_prefix}={previous_quantity}->{required_quantity}"
             )
-            if allocation_cap_overridden and override_note_prefix:
-                trade.message_history[-1].notes.append(
-                    f"{override_note_prefix}={max_margin_budget}->{required_margin}"
-                )
 
     def _current_balance_for_exchange_trade_sizing(self) -> Decimal:
         if self.session.trading_mode == "demo":
