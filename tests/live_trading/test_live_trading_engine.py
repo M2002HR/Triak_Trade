@@ -1848,6 +1848,114 @@ def test_ensure_exchange_quantity_supports_market_entry_promotes_open_quantity()
     )
 
 
+def test_market_entry_minimum_can_override_allocation_cap(
+) -> None:
+    engine = _engine(Path("/tmp"))
+    engine.session.account_info = LiveAccountInfo(
+        wallet_balance=Decimal("5.00"),
+        available_balance=Decimal("5.00"),
+    )
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "SOLUSDT"
+    trade.side = "short"
+    trade.entry_price = Decimal("81.7455")
+    trade.leverage = 20
+    trade.quantity = Decimal("0.03434287")
+    trade.remaining_quantity = Decimal("0.03434287")
+    trade.margin = Decimal("0.14036331")
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="sol short",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    spec = FuturesContractSpec(
+        {
+            "symbol": "SOL-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.1",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "1",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
+                }
+            ],
+        }
+    )
+
+    engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
+
+    assert trade.quantity == Decimal("1.00000000")
+    assert trade.remaining_quantity == Decimal("1.00000000")
+    assert trade.margin == Decimal("4.08727500")
+    assert any(
+        note == "exchange_entry_quantity_promoted=0.03434287->1.00000000"
+        for note in trade.message_history[-1].notes
+    )
+    assert any(
+        note == "exchange_entry_allocation_cap_overridden=1.00000000->4.08727500"
+        for note in trade.message_history[-1].notes
+    )
+
+
+def test_market_entry_minimum_still_requires_balance_coverage(
+) -> None:
+    engine = _engine(Path("/tmp"))
+    engine.session.account_info = LiveAccountInfo(
+        wallet_balance=Decimal("4.00"),
+        available_balance=Decimal("4.00"),
+    )
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "SOLUSDT"
+    trade.side = "short"
+    trade.entry_price = Decimal("81.7455")
+    trade.leverage = 20
+    trade.quantity = Decimal("0.03434287")
+    trade.remaining_quantity = Decimal("0.03434287")
+    trade.margin = Decimal("0.14036331")
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="sol short",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    spec = FuturesContractSpec(
+        {
+            "symbol": "SOL-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.1",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "1",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Insufficient balance to satisfy the exchange minimum entry size",
+    ):
+        engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
+
+
 @pytest.mark.asyncio
 async def test_refresh_trade_protection_ids_ignores_legacy_stop_profit_orders_for_tp_tracking(
     tmp_path: Path,

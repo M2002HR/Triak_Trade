@@ -2186,18 +2186,7 @@ class LiveTradingEngine:
     def _take_profit_ladder_target_counts(original_count: int) -> list[int]:
         if original_count <= 0:
             return []
-        counts = [original_count]
-        current = original_count
-        while current > 1:
-            if current > 5:
-                current = max(1, current - 2)
-            elif current > 3:
-                current = 3
-            else:
-                current = 1
-            if current not in counts:
-                counts.append(current)
-        return counts
+        return list(range(original_count, 0, -1))
 
     @staticmethod
     def _rebalance_take_profit_ladder_prices(
@@ -2316,18 +2305,34 @@ class LiveTradingEngine:
         ).quantize(Decimal("0.00000001"))
         if minimum_entry_quantity <= 0:
             return
-        self._promote_exchange_open_quantity_if_needed(
-            trade=trade,
-            required_quantity=minimum_entry_quantity,
-            note_prefix="exchange_entry_quantity_promoted",
-            insufficient_balance_error=(
-                "Insufficient balance to satisfy the exchange minimum entry size"
-            ),
-            allocation_limit_error=(
-                "Position is too small for the exchange minimum entry size "
-                "within allocation limits"
-            ),
+        allocation_limit_error = (
+            "Position is too small for the exchange minimum entry size "
+            "within allocation limits"
         )
+        try:
+            self._promote_exchange_open_quantity_if_needed(
+                trade=trade,
+                required_quantity=minimum_entry_quantity,
+                note_prefix="exchange_entry_quantity_promoted",
+                insufficient_balance_error=(
+                    "Insufficient balance to satisfy the exchange minimum entry size"
+                ),
+                allocation_limit_error=allocation_limit_error,
+            )
+        except ValueError as exc:
+            if str(exc) != allocation_limit_error:
+                raise
+            self._promote_exchange_open_quantity_if_needed(
+                trade=trade,
+                required_quantity=minimum_entry_quantity,
+                note_prefix="exchange_entry_quantity_promoted",
+                insufficient_balance_error=(
+                    "Insufficient balance to satisfy the exchange minimum entry size"
+                ),
+                allocation_limit_error=allocation_limit_error,
+                allow_allocation_cap_override=True,
+                override_note_prefix="exchange_entry_allocation_cap_overridden",
+            )
 
     def _promote_exchange_open_quantity_if_needed(
         self,
@@ -2337,6 +2342,8 @@ class LiveTradingEngine:
         note_prefix: str,
         insufficient_balance_error: str,
         allocation_limit_error: str,
+        allow_allocation_cap_override: bool = False,
+        override_note_prefix: str | None = None,
     ) -> None:
         required_quantity = required_quantity.quantize(Decimal("0.00000001"))
         if required_quantity <= 0 or trade.quantity >= required_quantity:
@@ -2353,7 +2360,19 @@ class LiveTradingEngine:
         ).quantize(Decimal("0.00000001"))
         if required_margin > current_balance:
             raise ValueError(insufficient_balance_error)
+        allocation_cap_overridden = False
         if max_margin_budget > 0 and required_margin > max_margin_budget:
+            if not allow_allocation_cap_override:
+                raise ValueError(allocation_limit_error)
+            allocation_cap_overridden = True
+        elif max_margin_budget <= 0 and allow_allocation_cap_override:
+            allocation_cap_overridden = True
+
+        if (
+            max_margin_budget > 0
+            and required_margin > max_margin_budget
+            and not allocation_cap_overridden
+        ):
             raise ValueError(allocation_limit_error)
 
         previous_quantity = trade.quantity
@@ -2364,6 +2383,10 @@ class LiveTradingEngine:
             trade.message_history[-1].notes.append(
                 f"{note_prefix}={previous_quantity}->{required_quantity}"
             )
+            if allocation_cap_overridden and override_note_prefix:
+                trade.message_history[-1].notes.append(
+                    f"{override_note_prefix}={max_margin_budget}->{required_margin}"
+                )
 
     def _current_balance_for_exchange_trade_sizing(self) -> Decimal:
         if self.session.trading_mode == "demo":
