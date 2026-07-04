@@ -49,6 +49,7 @@ from triak_trade.live_trading.models import (
     LiveSession,
     LiveSessionConfig,
     LiveSignalSnapshot,
+    LiveTakeProfitOrderPlan,
     LiveTrade,
     LiveTradingSnapshot,
     MessageAttribution,
@@ -2924,6 +2925,7 @@ class LiveTradingEngine:
         trade.exchange_position = None
         trade.sl_order_id = None
         trade.tp_order_ids = []
+        trade.tp_order_plan = []
         self._clear_exchange_position_miss_state(trade)
         trade.last_exchange_sync_error = reason
         trade.add_attribution(
@@ -2997,6 +2999,7 @@ class LiveTradingEngine:
                 trade.sl_order_id = None
             if refresh_take_profits:
                 trade.tp_order_ids = []
+                trade.tp_order_plan = []
             self._persist_trade_runtime_state(trade)
             return
         close_side = "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
@@ -3009,17 +3012,28 @@ class LiveTradingEngine:
             )
         if refresh_take_profits:
             trade.tp_order_ids = []
+            trade.tp_order_plan = []
             for target_index, tp_price, tp_quantity in tp_orders:
+                client_order_id = self._make_tp_client_order_id(trade, target_index)
                 order = await self._futures_client.place_order(
                     symbol=trade.symbol,
                     side=close_side,
                     order_type="LIMIT",
                     quantity=tp_quantity,
                     price=tp_price,
-                    client_order_id=self._make_tp_client_order_id(trade, target_index),
+                    client_order_id=client_order_id,
                     use_demo_symbol=self._use_demo_exchange_symbol(),
                 )
                 trade.tp_order_ids.append(order.order_id)
+                trade.tp_order_plan.append(
+                    LiveTakeProfitOrderPlan(
+                        target_index=target_index,
+                        price=tp_price,
+                        quantity=tp_quantity,
+                        order_id=order.order_id,
+                        client_order_id=client_order_id,
+                    )
+                )
         await self._refresh_trade_protection_ids(trade)
         self._persist_trade_runtime_state(trade)
 
@@ -3074,6 +3088,21 @@ class LiveTradingEngine:
     def _make_tp_client_order_id(self, trade: LiveTrade, target_index: int) -> str:
         return f"triak_tp_{trade.trade_id}_{target_index + 1}_{uuid.uuid4().hex[:10]}"
 
+    @staticmethod
+    def _extract_tp_target_index(trade: LiveTrade, client_order_id: str | None) -> int | None:
+        if not client_order_id:
+            return None
+        prefix = f"triak_tp_{trade.trade_id}_"
+        if not client_order_id.startswith(prefix):
+            return None
+        suffix = client_order_id[len(prefix) :]
+        target_token = suffix.split("_", 1)[0]
+        try:
+            target_index = int(target_token) - 1
+        except ValueError:
+            return None
+        return target_index if target_index >= 0 else None
+
     async def _normalize_trade_protection_levels(
         self,
         trade: LiveTrade,
@@ -3111,6 +3140,9 @@ class LiveTradingEngine:
         target_close_side = "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
         if cancel_take_profits:
             tp_order_ids = set(trade.tp_order_ids)
+            tp_order_ids.update(
+                item.order_id for item in trade.tp_order_plan if item.order_id is not None
+            )
             try:
                 regular_orders = await self._futures_client.get_open_orders(
                     trade.symbol,
@@ -3146,6 +3178,7 @@ class LiveTradingEngine:
                         exc,
                     )
             trade.tp_order_ids = []
+            trade.tp_order_plan = []
         if cancel_stop_loss:
             orders = await self._futures_client.get_open_orders(
                 trade.symbol,
@@ -3193,6 +3226,46 @@ class LiveTradingEngine:
             and order.order_type.upper() == "LIMIT"
             and order.client_order_id.startswith(f"triak_tp_{trade.trade_id}_")
         ]
+        tracked_by_order_id = {
+            item.order_id: item for item in trade.tp_order_plan if item.order_id is not None
+        }
+        tracked_by_client_order_id = {
+            item.client_order_id: item
+            for item in trade.tp_order_plan
+            if item.client_order_id is not None
+        }
+        tp_order_plan: list[LiveTakeProfitOrderPlan] = []
+        for order in regular_open_orders:
+            if order.side.upper() != ("SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"):
+                continue
+            if order.order_type.upper() != "LIMIT":
+                continue
+            if not order.client_order_id.startswith(f"triak_tp_{trade.trade_id}_"):
+                continue
+            existing = tracked_by_order_id.get(order.order_id) or tracked_by_client_order_id.get(
+                order.client_order_id
+            )
+            target_index = (
+                existing.target_index
+                if existing is not None
+                else self._extract_tp_target_index(trade, order.client_order_id)
+            )
+            if target_index is None:
+                target_index = trade.targets_hit + len(tp_order_plan)
+            tp_order_plan.append(
+                LiveTakeProfitOrderPlan(
+                    target_index=target_index,
+                    price=(
+                        existing.price
+                        if existing is not None
+                        else getattr(order, "price", Decimal("0"))
+                    ),
+                    quantity=existing.quantity if existing is not None else Decimal("0"),
+                    order_id=order.order_id,
+                    client_order_id=order.client_order_id,
+                )
+            )
+        tp_order_plan.sort(key=lambda item: item.target_index)
         sl_order_id: str | None = None
         target_order_prefix = "STOP_LONG_" if trade.side == "long" else "STOP_SHORT_"
         target_close_side = "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
@@ -3206,17 +3279,28 @@ class LiveTradingEngine:
                 continue
             if "LOSS" in order_type:
                 sl_order_id = order.order_id
-        trade.tp_order_ids = tp_order_ids
+        if tp_order_plan:
+            trade.tp_order_ids = [
+                item.order_id for item in tp_order_plan if item.order_id is not None
+            ]
+            trade.tp_order_plan = tp_order_plan
+        elif not trade.tp_order_plan and not trade.tp_order_ids:
+            trade.tp_order_ids = tp_order_ids
+            trade.tp_order_plan = []
         trade.sl_order_id = sl_order_id
 
     def _trade_has_exchange_protection(self, trade: LiveTrade) -> bool:
-        return bool(trade.sl_order_id or trade.tp_order_ids)
+        return bool(trade.sl_order_id or trade.tp_order_ids or trade.tp_order_plan)
 
     def _detach_trade_protection_order(self, trade: LiveTrade, order_id: str) -> None:
         if trade.sl_order_id == order_id:
             trade.sl_order_id = None
         if trade.tp_order_ids:
             trade.tp_order_ids = [item for item in trade.tp_order_ids if item != order_id]
+        if trade.tp_order_plan:
+            trade.tp_order_plan = [
+                item for item in trade.tp_order_plan if item.order_id != order_id
+            ]
 
     async def _reconcile_exchange_trade_protection(
         self,
@@ -3230,7 +3314,20 @@ class LiveTradingEngine:
             return
         open_regular_ids = {order.order_id for order in open_regular_orders}
         open_stop_ids = {order.order_id for order in open_protection_orders}
-        for order_id in list(trade.tp_order_ids):
+        tracked_tp_orders = list(trade.tp_order_plan)
+        if not tracked_tp_orders:
+            tracked_tp_orders = [
+                LiveTakeProfitOrderPlan(
+                    target_index=trade.targets_hit + idx,
+                    order_id=order_id,
+                )
+                for idx, order_id in enumerate(trade.tp_order_ids)
+            ]
+        filled_tp_orders: list[tuple[int, Any]] = []
+        for tracked_order in tracked_tp_orders:
+            order_id = tracked_order.order_id
+            if order_id is None:
+                continue
             if order_id in open_regular_ids:
                 continue
             try:
@@ -3263,11 +3360,20 @@ class LiveTradingEngine:
                 continue
             if status not in {"ORDER_FILLED", "FILLED"}:
                 continue
-            await self._apply_exchange_protection_fill(
-                trade=trade,
-                protection_order=order,
-                symbol_user_trades=symbol_user_trades,
-            )
+            filled_tp_orders.append((tracked_order.target_index, order))
+
+        if filled_tp_orders:
+            for target_index, order in sorted(filled_tp_orders, key=lambda item: item[0]):
+                await self._apply_exchange_protection_fill(
+                    trade=trade,
+                    protection_order=order,
+                    symbol_user_trades=symbol_user_trades,
+                    target_index_override=target_index,
+                    sync_protection_after_fill=False,
+                )
+                if not trade.is_open:
+                    return
+            await self._sync_trade_protection(trade)
             return
 
         if trade.sl_order_id is None:
@@ -3489,6 +3595,8 @@ class LiveTradingEngine:
         trade: LiveTrade,
         protection_order: Any,
         symbol_user_trades: list[Any],
+        target_index_override: int | None = None,
+        sync_protection_after_fill: bool = True,
     ) -> None:
         assert self._futures_client is not None
         executed_order_id = protection_order.executed_order_id or protection_order.order_id
@@ -3522,7 +3630,9 @@ class LiveTradingEngine:
             protection_order.order_id in trade.tp_order_ids
             or "PROFIT" in protection_order.order_type.upper()
         )
-        current_target_index = trade.targets_hit
+        current_target_index = (
+            target_index_override if target_index_override is not None else trade.targets_hit
+        )
         reason = f"tp{current_target_index + 1}_hit" if is_tp else "sl_hit"
         attribution = MessageAttribution(
             message_id=0,
@@ -3560,18 +3670,21 @@ class LiveTradingEngine:
                 entry_price=trade.entry_price,
                 take_profits=trade.take_profits,
             )
-            trade.targets_hit += 1
             if action.new_stop_loss is not None and trade.stop_loss != action.new_stop_loss:
                 trade.stop_loss = action.new_stop_loss
                 attribution.notes.append(f"next_stop_loss={action.new_stop_loss}")
             elif action.move_sl_to_entry and trade.stop_loss != trade.entry_price:
                 trade.stop_loss = trade.entry_price
                 attribution.notes.append(f"next_stop_loss={trade.entry_price}")
+            trade.targets_hit = max(trade.targets_hit, current_target_index + 1)
         if trade.is_open:
+            if not sync_protection_after_fill:
+                return
             await self._sync_trade_protection(trade)
             return
         trade.sl_order_id = None
         trade.tp_order_ids = []
+        trade.tp_order_plan = []
         self._finalize_closed_trade(trade)
         context = self._contexts.get(trade.channel_id)
         if context is not None:

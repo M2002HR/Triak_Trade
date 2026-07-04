@@ -21,6 +21,7 @@ from triak_trade.live_trading.models import (
     LiveMessageTrace,
     LiveSession,
     LiveSignalSnapshot,
+    LiveTakeProfitOrderPlan,
     LiveTrade,
     MessageAttribution,
 )
@@ -1219,6 +1220,11 @@ async def test_sync_trade_protection_normalizes_trade_levels_before_exchange_sub
         for call in engine._futures_client.place_order.await_args_list
     ]
     assert submitted_prices == [Decimal("0.07209"), Decimal("0.07062")]
+    assert [item.target_index for item in trade.tp_order_plan] == [0, 1]
+    assert [item.quantity for item in trade.tp_order_plan] == [
+        Decimal("0.00350000"),
+        Decimal("0.00650000"),
+    ]
     engine._futures_client.set_trading_stop.assert_awaited_once_with(
         symbol="DOGEUSDT",
         side="LONG",
@@ -1515,6 +1521,103 @@ async def test_reconcile_exchange_trade_protection_applies_tp_fill_and_rearms_ne
     assert trade.stop_loss == Decimal("50000")
     assert trade.tp_order_ids == []
     assert trade.sl_order_id == "sl1"
+    engine._sync_trade_protection.assert_awaited_once_with(trade)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_exchange_trade_protection_applies_multiple_tp_fills_before_rearming(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.remaining_quantity = Decimal("1")
+    trade.tp_order_ids = ["tp1", "tp2", "tp3"]
+    trade.tp_order_plan = [
+        LiveTakeProfitOrderPlan(
+            target_index=0,
+            price=Decimal("51000"),
+            quantity=Decimal("0.35"),
+            order_id="tp1",
+            client_order_id="triak_tp_trade_test_1_a",
+        ),
+        LiveTakeProfitOrderPlan(
+            target_index=1,
+            price=Decimal("52000"),
+            quantity=Decimal("0.26"),
+            order_id="tp2",
+            client_order_id="triak_tp_trade_test_2_b",
+        ),
+        LiveTakeProfitOrderPlan(
+            target_index=2,
+            price=Decimal("53000"),
+            quantity=Decimal("0.39"),
+            order_id="tp3",
+            client_order_id="triak_tp_trade_test_3_c",
+        ),
+    ]
+    trade.sl_order_id = "sl1"
+    trade.take_profits = [Decimal("51000"), Decimal("52000"), Decimal("53000")]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_order.side_effect = [
+        SimpleNamespace(
+            order_id="tp2",
+            executed_order_id="close_tp2",
+            order_type="LIMIT",
+            status="ORDER_FILLED",
+        ),
+        SimpleNamespace(
+            order_id="tp1",
+            executed_order_id="close_tp1",
+            order_type="LIMIT",
+            status="ORDER_FILLED",
+        ),
+    ]
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1")
+    )
+    engine._strategy.get_target_hit_action.side_effect = [
+        SimpleNamespace(
+            close_fraction=Decimal("0.35"),
+            move_sl_to_entry=True,
+            new_stop_loss=None,
+        ),
+        SimpleNamespace(
+            close_fraction=Decimal("0.40"),
+            move_sl_to_entry=False,
+            new_stop_loss=Decimal("51000"),
+        ),
+    ]
+    engine._sync_trade_protection = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._reconcile_exchange_trade_protection(
+        trade=trade,
+        open_regular_orders=[SimpleNamespace(order_id="tp3")],
+        open_protection_orders=[],
+        symbol_user_trades=[
+            SimpleNamespace(
+                order_id="close_tp1",
+                qty=Decimal("0.35"),
+                realized_pnl=Decimal("1.25"),
+                commission=Decimal("0.01"),
+                price=Decimal("51000"),
+            ),
+            SimpleNamespace(
+                order_id="close_tp2",
+                qty=Decimal("0.26"),
+                realized_pnl=Decimal("1.75"),
+                commission=Decimal("0.02"),
+                price=Decimal("52000"),
+            ),
+        ],
+    )
+
+    assert trade.realized_pnl == Decimal("3.00")
+    assert trade.fees == Decimal("0.03")
+    assert trade.remaining_quantity == Decimal("0.39")
+    assert trade.targets_hit == 2
+    assert trade.stop_loss == Decimal("51000")
+    assert trade.tp_order_ids == ["tp3"]
+    assert [item.order_id for item in trade.tp_order_plan] == ["tp3"]
     engine._sync_trade_protection.assert_awaited_once_with(trade)
 
 

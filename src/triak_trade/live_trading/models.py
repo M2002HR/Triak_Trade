@@ -94,6 +94,16 @@ class LiveExchangeSnapshot(BaseModel):
     error: str | None = None
 
 
+class LiveTakeProfitOrderPlan(BaseModel):
+    """Tracked exchange TP order metadata for reconciliation."""
+
+    target_index: int
+    price: Decimal = Decimal("0")
+    quantity: Decimal = Decimal("0")
+    order_id: str | None = None
+    client_order_id: str | None = None
+
+
 class LiveTrade(BaseModel):
     """A single position opened by a live/demo trading session."""
 
@@ -122,6 +132,7 @@ class LiveTrade(BaseModel):
     entry_order_id: str | None = None
     sl_order_id: str | None = None
     tp_order_ids: list[str] = Field(default_factory=list)
+    tp_order_plan: list[LiveTakeProfitOrderPlan] = Field(default_factory=list)
     exchange_position: LiveExchangePositionSnapshot | None = None
     exchange_order_history: list[LiveExchangeOrderSnapshot] = Field(default_factory=list)
     last_exchange_sync_at: datetime | None = None
