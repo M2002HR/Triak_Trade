@@ -83,6 +83,13 @@ Selected live/demo defaults:
 - Real log-channel sending is off by default.
 - Live session unlock is separate from merely choosing `EXECUTION_MODE=live`.
 
+## Real Backtest Candle Budget
+
+`REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL=90000` currently means:
+- at `1m`, a single symbol can hold about 62.5 days of cached candles
+- windows are extended around the signals that actually need them
+- later signals in longer backtests are no longer silently starved because an early symbol window consumed the full cap from the global start date
+
 ## Current Config Drift To Watch
 
 Historically, `.env.example` has drifted away from `settings.py`.

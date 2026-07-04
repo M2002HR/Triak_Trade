@@ -48,7 +48,10 @@ from triak_trade.backtesting.simulator import (
     SimulationSnapshot,
 )
 from triak_trade.backtesting.strategies.base import TradeStrategy
-from triak_trade.backtesting.strategies.registry import load_strategy
+from triak_trade.backtesting.strategies.registry import (
+    describe_strategy_by_key,
+    load_strategy,
+)
 from triak_trade.backtesting.symbol_mapper import (
     market_symbol_candidates,
     normalize_market_symbol,
@@ -150,6 +153,7 @@ class RealBacktestProgressEvent(BaseModel):
     status: Literal["queued", "running", "completed", "failed"]
     summary: str
     current_message_id: int | None = None
+    runtime_duration_ms: int | None = None
     counts: dict[str, int] = Field(default_factory=dict)
     live_metrics: dict[str, str] | None = None
     live_signals: list[dict[str, Any]] | None = None
@@ -254,6 +258,7 @@ class RealBacktestResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     generated_at: datetime
+    runtime_duration_ms: int | None = None
     report_path: str | None = None
     markdown_report_path: str | None = None
 
@@ -271,6 +276,12 @@ class _LivePreviewCache:
     state: IncrementalPreviewState | None = None
     processed_event_count: int = 0
     last_trace_fingerprints: dict[str, tuple[Any, ...]] = field(default_factory=dict)
+
+
+@dataclass
+class _PrefetchedCandleRange:
+    start: datetime
+    end: datetime
 
 
 _SIGNAL_ACTIONS_THAT_REQUIRE_LIVE_REPLAY = {
@@ -308,6 +319,8 @@ class RealBacktestRunner:
         self._strategy_override = strategy
         # Load strategy from config file; caller may also inject one directly.
         self.strategy: TradeStrategy = strategy or load_strategy()
+        self.strategy_key: str | None = None
+        self._run_started_at: datetime | None = None
 
     def _active_strategy(self) -> TradeStrategy:
         if self._strategy_override is not None:
@@ -372,6 +385,7 @@ class RealBacktestRunner:
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None = None,
     ) -> RealBacktestResult:
         self._log_sending_disabled_for_run = False
+        self._run_started_at = datetime.now(timezone.utc)
         readiness = self.readiness()
         from_date, to_date = request.resolve_range()
         warnings: list[str] = []
@@ -501,6 +515,7 @@ class RealBacktestRunner:
             counts=counts,
         )
         prefetched_candles_by_symbol: dict[str, list[Any]] = {}
+        prefetched_candle_ranges_by_symbol: dict[str, _PrefetchedCandleRange] = {}
         (
             events,
             traces_by_message_id,
@@ -508,6 +523,7 @@ class RealBacktestRunner:
             symbol_trace_map,
             counts,
             prefetched_candles_by_symbol,
+            prefetched_candle_ranges_by_symbol,
         ) = await self._build_events_with_traces(
             request=request,
             classifier=selection.classifier,
@@ -516,6 +532,7 @@ class RealBacktestRunner:
             counts=counts,
             warnings=warnings,
             prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+            prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
         )
         open_events = [event for event in events if event.action is SignalAction.OPEN]
         valid_open_events = [
@@ -660,38 +677,7 @@ class RealBacktestRunner:
             counts=counts,
         )
         for symbol in symbols:
-            prefetched = prefetched_candles_by_symbol.get(symbol)
-            if prefetched is not None:
-                real_market_data_used = real_market_data_used or bool(prefetched)
-                candles.extend(prefetched)
-                for message_id in symbol_trace_map.get(symbol, []):
-                    message_trace = traces_by_message_id.get(message_id)
-                    if message_trace is None:
-                        continue
-                    if message_trace.current_stage == "simulated":
-                        self._set_trace_stage(
-                            message_trace,
-                            "simulated",
-                            status="active",
-                            detail=(
-                                "Simulation tracking remains active; waiting for final replay "
-                                "with future updates and candle resolution."
-                            ),
-                        )
-                    self._emit_message_progress(
-                        progress_callback,
-                        phase="fetch_market_data",
-                        summary=f"Reusing prefetched candles for message {message_id}.",
-                        counts=counts,
-                        trace=message_trace,
-                    )
-                continue
-
             candidate_symbols = symbol_candidates_by_primary.get(symbol, [symbol])
-            fetched: list[Any] = []
-            selected_symbol = symbol
-            last_error_type: str | None = None
-            no_data_candidates: list[str] = []
             for message_id in symbol_trace_map.get(symbol, []):
                 message_trace = traces_by_message_id.get(message_id)
                 if message_trace is None:
@@ -709,31 +695,26 @@ class RealBacktestRunner:
                     counts=counts,
                     trace=message_trace,
                 )
-            # Mirror the per-symbol fetch-range cap from _market_data_range_for_trace
-            # so that the secondary fetch also stays within the budget.
-            secondary_end = to_date
-            max_per_symbol = self.settings.REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL
-            if max_per_symbol > 0:
-                capped = from_date + timedelta(
-                    seconds=max_per_symbol * interval_to_seconds(request.interval)
-                )
-                if capped < to_date:
-                    secondary_end = capped
-            for candidate_symbol in candidate_symbols:
-                try:
-                    fetched = await self.market_data_provider.get_klines(
-                        candidate_symbol,
-                        request.interval,
-                        from_date,
-                        secondary_end,
-                    )
-                except Exception as exc:
-                    last_error_type = type(exc).__name__
-                    continue
-                if fetched:
-                    selected_symbol = candidate_symbol
-                    break
-                no_data_candidates.append(candidate_symbol)
+            range_start, range_end = self._market_data_range_for_symbol(
+                request=request,
+                message_ids=symbol_trace_map.get(symbol, []),
+                traces_by_message_id=traces_by_message_id,
+            )
+            (
+                fetched,
+                selected_symbol,
+                _from_cache,
+                last_error_type,
+                no_data_candidates,
+            ) = await self._ensure_prefetched_market_data(
+                request=request,
+                market_symbol=symbol,
+                candidate_symbols=candidate_symbols,
+                range_start=range_start,
+                range_end=range_end,
+                prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
+            )
 
             if last_error_type is not None and not fetched and not no_data_candidates:
                 skipped_reasons.append(f"{symbol}: candle fetch failed ({last_error_type})")
@@ -1034,6 +1015,7 @@ class RealBacktestRunner:
             skipped_reasons=skipped_reasons,
             warnings=warnings,
             generated_at=report.generated_at,
+            runtime_duration_ms=self._elapsed_runtime_ms(),
         )
         self._emit_run_progress(
             progress_callback,
@@ -1336,6 +1318,7 @@ class RealBacktestRunner:
             errors=errors or [],
             warnings=warnings or [],
             generated_at=datetime.now(timezone.utc),
+            runtime_duration_ms=self._elapsed_runtime_ms(),
         )
         stored = self.report_store.write(self._build_payload(result, None, Decimal("0")))
         result.report_path = stored.json_path
@@ -1350,10 +1333,21 @@ class RealBacktestRunner:
     ) -> dict[str, Any]:
         payload = result.model_dump(mode="json")
         payload["score_reason"] = "derived from simulator/scorer" if result.success else "failure"
+        payload["strategy_key"] = self.strategy_key or "default_risk_managed"
+        if self.strategy_key is not None:
+            payload["strategy"] = describe_strategy_by_key(self.strategy_key)
         if report is not None:
             payload["report"] = report_to_json(report, score)
             payload["telegram_summary"] = report_to_markdown_summary(report, score)
         return payload
+
+    def _elapsed_runtime_ms(self) -> int | None:
+        if self._run_started_at is None:
+            return None
+        return max(
+            0,
+            int((datetime.now(timezone.utc) - self._run_started_at).total_seconds() * 1000),
+        )
 
     async def _build_events_with_traces(
         self,
@@ -1365,6 +1359,7 @@ class RealBacktestRunner:
         counts: dict[str, int],
         warnings: list[str],
         prefetched_candles_by_symbol: dict[str, list[Any]],
+        prefetched_candle_ranges_by_symbol: dict[str, _PrefetchedCandleRange],
     ) -> tuple[
         list[BacktestEvent],
         dict[int, RealBacktestMessageTrace],
@@ -1372,6 +1367,7 @@ class RealBacktestRunner:
         dict[str, list[int]],
         dict[str, int],
         dict[str, list[Any]],
+        dict[str, _PrefetchedCandleRange],
     ]:
         context = ChannelContext(
             channel_id=request.channel,
@@ -1715,6 +1711,7 @@ class RealBacktestRunner:
                     counts=counts,
                     request=request,
                     prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                    prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
                     progress_callback=progress_callback,
                     warnings=warnings,
                 )
@@ -1806,6 +1803,7 @@ class RealBacktestRunner:
                     symbol_trace_map=symbol_trace_map,
                     events=events,
                     prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                    prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
                     progress_callback=progress_callback,
                     counts=counts,
                     warnings=warnings,
@@ -1863,9 +1861,11 @@ class RealBacktestRunner:
                             progress_callback=progress_callback,
                             counts=counts,
                             warnings=warnings,
+                            prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+                            prefetched_candle_ranges_by_symbol=(
+                                prefetched_candle_ranges_by_symbol
+                            ),
                         )
-                        if prefetched_candles is not None:
-                            prefetched_candles_by_symbol[selected_symbol] = prefetched_candles
 
                     if prefetched_candles is not None:
                         parsed_for_event = parsed_for_event.model_copy(
@@ -2060,6 +2060,7 @@ class RealBacktestRunner:
             symbol_trace_map,
             counts,
             prefetched_candles_by_symbol,
+            prefetched_candle_ranges_by_symbol,
         )
 
     def _find_reusable_open_signal_for_symbol(
@@ -2146,6 +2147,7 @@ class RealBacktestRunner:
         counts: dict[str, int],
         request: RealBacktestRunRequest,
         prefetched_candles_by_symbol: dict[str, list[Any]],
+        prefetched_candle_ranges_by_symbol: dict[str, _PrefetchedCandleRange],
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         warnings: list[str],
     ) -> str | None:
@@ -2222,6 +2224,7 @@ class RealBacktestRunner:
             symbol_trace_map=symbol_trace_map,
             events=events,
             prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+            prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
             progress_callback=progress_callback,
             counts=counts,
             warnings=warnings,
@@ -2248,6 +2251,7 @@ class RealBacktestRunner:
         symbol_trace_map: dict[str, list[int]],
         events: list[BacktestEvent],
         prefetched_candles_by_symbol: dict[str, list[Any]],
+        prefetched_candle_ranges_by_symbol: dict[str, _PrefetchedCandleRange],
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         warnings: list[str],
@@ -2290,22 +2294,19 @@ class RealBacktestRunner:
         if not valid_for_backtest or market_symbol is None:
             return
 
-        prefetched_candles = prefetched_candles_by_symbol.get(market_symbol)
-        selected_symbol = market_symbol
-        if prefetched_candles is None:
-            (
-                prefetched_candles,
-                selected_symbol,
-            ) = await self._prefetch_market_data_for_trace(
-                request=request,
-                trace=base_trace,
-                market_symbol=market_symbol,
-                progress_callback=progress_callback,
-                counts=counts,
-                warnings=warnings,
-            )
-            if prefetched_candles is not None:
-                prefetched_candles_by_symbol[selected_symbol] = prefetched_candles
+        (
+            prefetched_candles,
+            selected_symbol,
+        ) = await self._prefetch_market_data_for_trace(
+            request=request,
+            trace=base_trace,
+            market_symbol=market_symbol,
+            progress_callback=progress_callback,
+            counts=counts,
+            warnings=warnings,
+            prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+            prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
+        )
 
         if prefetched_candles is None:
             return
@@ -2383,6 +2384,8 @@ class RealBacktestRunner:
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
         warnings: list[str],
+        prefetched_candles_by_symbol: dict[str, list[Any]],
+        prefetched_candle_ranges_by_symbol: dict[str, _PrefetchedCandleRange],
     ) -> tuple[list[Any] | None, str]:
         candidate_symbols = market_symbol_candidates(market_symbol) or [market_symbol]
         self._set_trace_stage(
@@ -2398,7 +2401,6 @@ class RealBacktestRunner:
             counts=counts,
             trace=trace,
         )
-        last_error_type: str | None = None
         attempted: list[str] = []
         range_start, range_end = self._market_data_range_for_trace(request, trace)
         trace.debug_notes.append(f"market_data_start_utc={range_start.isoformat()}")
@@ -2406,22 +2408,29 @@ class RealBacktestRunner:
             f"market_data_start_tehran={range_start.astimezone(TEHRAN_TZ).isoformat()}"
         )
         trace.debug_notes.append(f"market_data_end_utc={range_end.isoformat()}")
-        for candidate_symbol in candidate_symbols:
-            attempted.append(candidate_symbol)
-            try:
-                fetched = await self.market_data_provider.get_klines(
-                    candidate_symbol,
-                    request.interval,
-                    range_start,
-                    range_end,
-                )
-            except Exception as exc:
-                last_error_type = type(exc).__name__
-                continue
-            if fetched:
-                if candidate_symbol != market_symbol:
-                    trace.debug_notes.append(f"market_symbol_selected={candidate_symbol}")
-                return fetched, candidate_symbol
+        attempted.extend(candidate_symbols)
+        (
+            fetched,
+            selected_symbol,
+            from_cache,
+            last_error_type,
+            _no_data_candidates,
+        ) = await self._ensure_prefetched_market_data(
+            request=request,
+            market_symbol=market_symbol,
+            candidate_symbols=candidate_symbols,
+            range_start=range_start,
+            range_end=range_end,
+            prefetched_candles_by_symbol=prefetched_candles_by_symbol,
+            prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
+        )
+        if fetched:
+            if selected_symbol != market_symbol:
+                trace.debug_notes.append(f"market_symbol_selected={selected_symbol}")
+            trace.debug_notes.append(
+                "market_data_cache_hit=true" if from_cache else "market_data_cache_extended=true"
+            )
+            return fetched, selected_symbol
 
         if last_error_type is not None:
             self._append_warning(
@@ -2459,15 +2468,10 @@ class RealBacktestRunner:
             hours=max(24, self.settings.SIGNAL_MAX_UPDATE_WINDOW_HOURS)
         )
         end = max(requested_end, minimum_end)
-        # Cap the fetch window to avoid pulling excessive candles for fine
-        # intervals over long date ranges (e.g. 1m over 6 months).  When the
-        # cap triggers, the window is anchored at `requested_start` (not the
-        # individual signal time) so that the per-symbol cache covers a
-        # consistent range regardless of which signal first triggered the
-        # fetch.  This prevents later signals for the same symbol from reusing
-        # an offset cache that does not cover their timestamp.
-        # The start_message_id anchor path is exempt: those runs always begin
-        # at the exact message time and the range is controlled by the caller.
+        # Cap only the preview/prefetch window and keep it aligned to the
+        # current signal's replay period. Anchoring the cap at requested_start
+        # truncates long runs and makes later signals reuse a candle cache that
+        # ends before their own timestamp.
         max_per_symbol = self.settings.REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL
         if (
             max_per_symbol > 0
@@ -2476,11 +2480,134 @@ class RealBacktestRunner:
         ):
             interval_seconds = interval_to_seconds(request.interval)
             cap_duration = timedelta(seconds=max_per_symbol * interval_seconds)
-            capped_end = requested_start + cap_duration
-            if capped_end < end:
-                start = requested_start
-                end = capped_end
+            if end - start > cap_duration:
+                late_window_start = max(requested_start, end - cap_duration)
+                if signal_time >= late_window_start:
+                    start = late_window_start
+                else:
+                    end = start + cap_duration
         return start, end
+
+    def _market_data_range_for_symbol(
+        self,
+        *,
+        request: RealBacktestRunRequest,
+        message_ids: list[int],
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+    ) -> tuple[datetime, datetime]:
+        requested_start, requested_end = request.resolve_range()
+        if not message_ids:
+            return requested_start, requested_end
+        signal_times = [
+            self._to_utc(trace.message_date)
+            for message_id in message_ids
+            for trace in [traces_by_message_id.get(message_id)]
+            if trace is not None
+        ]
+        if not signal_times:
+            return requested_start, requested_end
+        earliest_signal = min(signal_times)
+        start = earliest_signal if earliest_signal > requested_start else requested_start
+        return start, requested_end
+
+    async def _ensure_prefetched_market_data(
+        self,
+        *,
+        request: RealBacktestRunRequest,
+        market_symbol: str,
+        candidate_symbols: list[str],
+        range_start: datetime,
+        range_end: datetime,
+        prefetched_candles_by_symbol: dict[str, list[Any]],
+        prefetched_candle_ranges_by_symbol: dict[str, _PrefetchedCandleRange],
+    ) -> tuple[list[Any] | None, str, bool, str | None, list[str]]:
+        last_error_type: str | None = None
+        no_data_candidates: list[str] = []
+
+        for candidate_symbol in candidate_symbols:
+            cached = prefetched_candles_by_symbol.get(candidate_symbol)
+            cached_range = prefetched_candle_ranges_by_symbol.get(candidate_symbol)
+            if (
+                cached is not None
+                and cached_range is not None
+                and cached_range.start <= range_start
+                and cached_range.end >= range_end
+            ):
+                return cached, candidate_symbol, True, None, no_data_candidates
+
+        for candidate_symbol in candidate_symbols:
+            cached = prefetched_candles_by_symbol.get(candidate_symbol)
+            cached_range = prefetched_candle_ranges_by_symbol.get(candidate_symbol)
+            if cached is not None and cached_range is not None:
+                missing_ranges: list[tuple[datetime, datetime]] = []
+                if range_start < cached_range.start:
+                    missing_ranges.append((range_start, cached_range.start))
+                if range_end > cached_range.end:
+                    missing_ranges.append((cached_range.end, range_end))
+                if not missing_ranges:
+                    return cached, candidate_symbol, True, None, no_data_candidates
+                fetched_batches: list[list[Any]] = []
+                failed = False
+                for missing_start, missing_end in missing_ranges:
+                    try:
+                        fetched = await self.market_data_provider.get_klines(
+                            candidate_symbol,
+                            request.interval,
+                            missing_start,
+                            missing_end,
+                        )
+                    except Exception as exc:
+                        last_error_type = type(exc).__name__
+                        failed = True
+                        break
+                    if fetched:
+                        fetched_batches.append(fetched)
+                if failed:
+                    continue
+                merged = list(cached)
+                for batch in fetched_batches:
+                    merged = self._merge_candle_batches(merged, batch)
+                if merged:
+                    prefetched_candles_by_symbol[candidate_symbol] = merged
+                    prefetched_candle_ranges_by_symbol[candidate_symbol] = _PrefetchedCandleRange(
+                        start=min(range_start, cached_range.start),
+                        end=max(range_end, cached_range.end),
+                    )
+                    return merged, candidate_symbol, False, None, no_data_candidates
+                no_data_candidates.append(candidate_symbol)
+                continue
+            try:
+                fetched = await self.market_data_provider.get_klines(
+                    candidate_symbol,
+                    request.interval,
+                    range_start,
+                    range_end,
+                )
+            except Exception as exc:
+                last_error_type = type(exc).__name__
+                continue
+            if fetched:
+                prefetched_candles_by_symbol[candidate_symbol] = list(fetched)
+                prefetched_candle_ranges_by_symbol[candidate_symbol] = _PrefetchedCandleRange(
+                    start=range_start,
+                    end=range_end,
+                )
+                return list(fetched), candidate_symbol, False, None, no_data_candidates
+            no_data_candidates.append(candidate_symbol)
+
+        return None, market_symbol, False, last_error_type, no_data_candidates
+
+    @staticmethod
+    def _merge_candle_batches(existing: list[Any], incoming: list[Any]) -> list[Any]:
+        by_key: dict[tuple[str | None, datetime, datetime], Any] = {
+            (getattr(candle, "symbol", None), candle.open_time, candle.close_time): candle
+            for candle in existing
+        }
+        for candle in incoming:
+            by_key[(getattr(candle, "symbol", None), candle.open_time, candle.close_time)] = (
+                candle
+            )
+        return sorted(by_key.values(), key=lambda candle: candle.open_time)
 
     @staticmethod
     def _to_utc(value: datetime) -> datetime:
@@ -2558,6 +2685,15 @@ class RealBacktestRunner:
 
         active_strategy = self._active_strategy()
         simulator = BacktestEngine(classifier=RegexMessageClassifier()).simulator
+        if (
+            not force_full_rebuild
+            and preview_cache is not None
+            and self._preview_cache_requires_rebuild(
+                preview_cache=preview_cache,
+                available_candles=available_candles,
+            )
+        ):
+            force_full_rebuild = True
         prior_state = None if force_full_rebuild or preview_cache is None else preview_cache.state
         previous_trace_fingerprints = (
             {}
@@ -2635,6 +2771,26 @@ class RealBacktestRunner:
                 for signal_id, signal_state in snapshot.signal_states.items()
             }
         return metrics, live_signals
+
+    @staticmethod
+    def _preview_cache_requires_rebuild(
+        *,
+        preview_cache: _LivePreviewCache,
+        available_candles: list[Any],
+    ) -> bool:
+        state = preview_cache.state
+        if state is None or state.processed_until is None or not available_candles:
+            return False
+        latest_snapshot = state.latest_snapshot
+        if latest_snapshot is None:
+            return False
+        if not any(
+            signal_state.status == "not_filled"
+            for signal_state in latest_snapshot.signal_states.values()
+        ):
+            return False
+        latest_candle_close = max(candle.close_time for candle in available_candles)
+        return bool(latest_candle_close > state.processed_until)
 
     def _fallback_live_state_from_traces(
         self,
@@ -3408,6 +3564,7 @@ class RealBacktestRunner:
                 status=status,
                 summary=summary,
                 current_message_id=current_message_id,
+                runtime_duration_ms=self._elapsed_runtime_ms(),
                 counts=counts or {},
                 live_metrics=live_metrics,
                 live_signals=live_signals,
@@ -3435,6 +3592,7 @@ class RealBacktestRunner:
                 status="running",
                 summary=summary,
                 current_message_id=trace.message_id,
+                runtime_duration_ms=self._elapsed_runtime_ms(),
                 counts=counts,
                 live_metrics=live_metrics,
                 live_signals=live_signals,

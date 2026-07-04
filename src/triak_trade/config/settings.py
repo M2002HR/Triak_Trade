@@ -227,13 +227,12 @@ class Settings(BaseSettings):
     REAL_BACKTEST_DEFAULT_INTERVAL: str = "1m"
     REAL_BACKTEST_MAX_MESSAGES: int = 1000
     REAL_BACKTEST_MAX_CANDLES: int = 100000
-    # Per-symbol candle budget for market-data prefetch during classification.
-    # When the date range would produce more candles than this limit, the fetch
-    # window is anchored at the backtest start date and truncated forward by
-    # this many candles.  90 000 at 1-minute interval ≈ 62.5 days, so a
-    # standard two-month (60-day) backtest is fully covered without truncation.
-    # Longer ranges (e.g. 6-month) are capped to the first 62.5 days.
-    # Set to 0 to disable (risks OOM for backtests longer than ~2 months).
+    # Per-symbol candle budget for real-backtest prefetch windows.
+    # The runner now centers/extends candle windows around each signal's actual
+    # time instead of anchoring every fetch to the requested backtest start.
+    # That keeps long backtests from starving later signals while still putting
+    # a hard cap on per-symbol memory growth. 90 000 candles at 1m is about
+    # 62.5 days of data for a single symbol. Set to 0 to disable the cap.
     REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL: int = 90000
     REAL_BACKTEST_ACTIVE_SIGNAL_HOURS: int = 0
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"

@@ -69,8 +69,20 @@ This has already been improved:
 - full replay is throttled with `REAL_BACKTEST_LIVE_SIM_UPDATE_EVERY_N`
 - signal-bearing messages still force an update
 - interval snapshots are emitted incrementally instead of fully replayed each time
+- run-level elapsed runtime is emitted on progress events and persisted to the final report
+- dashboard runs persist `started_at`, `finished_at`, and `runtime_duration_ms`
 
 Even so, this remains one of the more performance-sensitive areas of the codebase.
+
+## Candle Window Guard
+
+`REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL` no longer truncates every symbol from the global
+backtest start date forward.
+
+Current behavior:
+- the fetch window is aligned around the actual signal time
+- cached candle ranges extend only when a later signal needs more history/future coverage
+- long backtests therefore keep later signals fillable without forcing unbounded symbol caches
 
 ## Outputs
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 from triak_trade.backtesting.real_runner import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.report_store import BacktestReportStore
@@ -39,6 +40,24 @@ class FakeMarketDataProvider:
 
     async def get_latest_price(self, symbol: str) -> Decimal:
         return Decimal("0")
+
+
+class RangeAwareFakeMarketDataProvider(FakeMarketDataProvider):
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[Candle]:
+        self.requests.append(symbol)
+        self.request_ranges.append((symbol, interval, start_time, end_time))
+        candles = self.candles_by_symbol.get(symbol, [])
+        return [
+            candle
+            for candle in candles
+            if candle.open_time >= start_time and candle.close_time <= end_time
+        ]
 
 
 class FakeLogClient:
@@ -663,6 +682,162 @@ def test_real_backtest_runner_falls_back_to_trace_state_when_live_preview_is_cap
     assert "live_total_pnl" not in latest.live_metrics
 
 
+def test_real_backtest_runner_keeps_late_signals_fillable_across_long_ranges(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
+    early = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=101,
+        text="EARLYUSDT LONG",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    late = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=102,
+        text="LATEUSDT LONG",
+        date=now + timedelta(days=8),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [early, late]}
+    )
+    early_candles = [
+        Candle(
+            symbol="EARLYUSDT",
+            interval="1d",
+            open_time=now + timedelta(days=index),
+            close_time=now + timedelta(days=index + 1),
+            open=Decimal("100"),
+            high=Decimal("102.5") if index == 1 else Decimal("100.6"),
+            low=Decimal("99.6"),
+            close=Decimal("100.2"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(10)
+    ]
+    late_candles = [
+        Candle(
+            symbol="LATEUSDT",
+            interval="1d",
+            open_time=now + timedelta(days=index),
+            close_time=now + timedelta(days=index + 1),
+            open=(
+                Decimal("71")
+                if index == 9
+                else (Decimal("70") if index == 8 else Decimal("60"))
+            ),
+            high=(
+                Decimal("72.5")
+                if index == 9
+                else (Decimal("71") if index == 8 else Decimal("61"))
+            ),
+            low=(
+                Decimal("70.8")
+                if index == 9
+                else (Decimal("69.5") if index == 8 else Decimal("59"))
+            ),
+            close=(
+                Decimal("72.2")
+                if index == 9
+                else (Decimal("70.8") if index == 8 else Decimal("60.5"))
+            ),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+        for index in range(10)
+    ]
+    provider = RangeAwareFakeMarketDataProvider(
+        candles_by_symbol={"EARLYUSDT": early_candles, "LATEUSDT": late_candles}
+    )
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path, REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL=5),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+
+    class _Classifier:
+        def classify(self, message, context):  # type: ignore[no-untyped-def]
+            from triak_trade.agents.classifier import ClassifiedMessage
+            from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
+            from triak_trade.domain.models import ParsedSignal
+
+            symbol = "EARLYUSDT" if message.message_id == 101 else "LATEUSDT"
+            entry = Decimal("100") if message.message_id == 101 else Decimal("70")
+            stop = Decimal("95") if message.message_id == 101 else Decimal("65")
+            target = Decimal("102") if message.message_id == 101 else Decimal("72")
+            parsed = ParsedSignal(
+                action=SignalAction.OPEN,
+                market=MarketType.FUTURES,
+                symbol=symbol,
+                side=TradeSide.LONG,
+                entry_type=EntryType.RANGE,
+                entry_low=entry,
+                entry_high=entry,
+                stop_loss=stop,
+                take_profits=[target],
+                leverage=5,
+                confidence=Decimal("0.90"),
+                invalid_reason=None,
+                source_channel_id=message.channel_id,
+                source_message_id=message.message_id,
+                parser_version="ai-v1",
+            )
+            return ClassifiedMessage(
+                raw_message=message,
+                normalized_message=None,
+                parsed_signal=parsed,
+                is_potential_new_signal=True,
+                is_related_to_existing_signal=False,
+                related_signal_id=None,
+                relation_reason=None,
+                confidence=parsed.confidence,
+                debug_notes=["classifier=test"],
+            )
+
+    monkeypatch.setattr(
+        runner,
+        "_select_classifier",
+        lambda use_ai: SimpleNamespace(
+            classifier=_Classifier(),
+            ai_requested=use_ai,
+            ai_configured=False,
+            warning=None,
+        ),
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now,
+            to_date=now + timedelta(days=10),
+            interval="1d",
+            max_messages=50,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        )
+    )
+
+    assert result.success is True
+    assert result.trades_simulated == 2
+    assert result.trades_filled == 2
+    assert any(
+        symbol == "LATEUSDT"
+        and start_time >= now + timedelta(days=5)
+        and end_time >= now + timedelta(days=10)
+        for symbol, _interval, start_time, end_time in provider.request_ranges
+    )
+
+
 def test_real_backtest_runner_scales_live_preview_cap_by_tracked_symbol_count(
     tmp_path: Path,
 ) -> None:
@@ -960,7 +1135,7 @@ def test_real_backtest_runner_reuses_incremental_live_preview_state(
         channel_id="https://t.me/Tofan_Trade",
         channel_username="Tofan_Trade",
         message_id=1,
-        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        text="BTCUSDT LONG Entry: 68010 - 68010 SL: 67400 TP: 69000 Leverage: 5x",
         date=now,
         edited_at=None,
         reply_to_msg_id=None,
@@ -1015,6 +1190,117 @@ def test_real_backtest_runner_reuses_incremental_live_preview_state(
     assert result.success is True
     assert incremental_calls
     assert incremental_calls == [(1, False), (2, True)]
+
+
+def test_real_backtest_runner_rebuilds_preview_after_temporary_not_filled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    first = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=1,
+        text="BTCUSDT LONG Entry: 100 - 100 SL: 98 TP: 104 Leverage: 5x",
+        date=now,
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    second = RawTelegramMessage(
+        channel_id="https://t.me/Tofan_Trade",
+        channel_username="Tofan_Trade",
+        message_id=2,
+        text="not related",
+        date=now + timedelta(minutes=1),
+        edited_at=None,
+        reply_to_msg_id=None,
+    )
+    telegram = FakeTelegramClient(
+        history_by_channel={"https://t.me/Tofan_Trade": [first, second]}
+    )
+    candles = [
+        Candle(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time=now,
+            close_time=now + timedelta(minutes=1),
+            open=Decimal("101"),
+            high=Decimal("102"),
+            low=Decimal("101"),
+            close=Decimal("101"),
+            volume=Decimal("10"),
+            source=CandleSource.TOOBIT,
+        ),
+        Candle(
+            symbol="BTCUSDT",
+            interval="1m",
+            open_time=now + timedelta(minutes=1),
+            close_time=now + timedelta(minutes=2),
+            open=Decimal("101"),
+            high=Decimal("105"),
+            low=Decimal("99"),
+            close=Decimal("104"),
+            volume=Decimal("10"),
+            source=CandleSource.TOOBIT,
+        ),
+    ]
+    runner = RealBacktestRunner(
+        settings=_settings(
+            tmp_path,
+            REAL_BACKTEST_LIVE_SIM_UPDATE_EVERY_N=1,
+        ),
+        telegram_client=telegram,
+        market_data_provider=FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": candles}),
+    )
+    progress_events = []
+    incremental_calls: list[tuple[int, bool]] = []
+
+    original = BacktestSimulator.simulate_live_preview_incremental
+
+    def _tracked_incremental(self, **kwargs):  # type: ignore[no-untyped-def]
+        incremental_calls.append(
+            (len(kwargs["events"]), kwargs.get("previous_state") is not None)
+        )
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(
+        BacktestSimulator,
+        "simulate_live_preview_incremental",
+        _tracked_incremental,
+    )
+
+    result = runner.run_sync(
+        RealBacktestRunRequest(
+            channel="https://t.me/Tofan_Trade",
+            from_date=now,
+            to_date=now + timedelta(minutes=2),
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            log_per_message=False,
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert result.success is True
+    assert result.trades_simulated == 1
+    assert result.trades_filled == 1
+    assert incremental_calls == [(1, False), (2, False)]
+    live_signal_snapshots = [
+        signal
+        for event in progress_events
+        for signal in (event.live_signals or [])
+        if signal.get("symbol") == "BTCUSDT"
+    ]
+    assert any(signal["status"] == "not_filled" for signal in live_signal_snapshots)
+    assert any(
+        signal["status"] != "not_filled"
+        and signal["status_group"] == "inactive"
+        and signal["entry_price"] == "100"
+        for signal in live_signal_snapshots
+    )
 
 
 def test_real_backtest_runner_emits_only_changed_signal_traces_in_live_preview(
@@ -2401,6 +2687,7 @@ def test_real_backtest_runner_promotes_unrecognized_reply_parent(tmp_path: Path)
         _symbol_trace_map,
         counts,
         _prefetched,
+        _prefetched_ranges,
     ) = asyncio.run(
         runner._build_events_with_traces(
             request=request,
@@ -2410,6 +2697,7 @@ def test_real_backtest_runner_promotes_unrecognized_reply_parent(tmp_path: Path)
             counts=counts,
             warnings=[],
             prefetched_candles_by_symbol={},
+            prefetched_candle_ranges_by_symbol={},
         )
     )
 
@@ -2565,7 +2853,7 @@ def test_followup_update_does_not_corrupt_base_open_event(tmp_path: Path) -> Non
         "trades_filled": 0,
     }
 
-    events, _traces, signal_trace_map, _sym, _counts, _pref = asyncio.run(
+    events, _traces, signal_trace_map, _sym, _counts, _pref, _pref_ranges = asyncio.run(
         runner._build_events_with_traces(
             request=request,
             classifier=_OpenThenStopUpdateClassifier(),
@@ -2574,6 +2862,7 @@ def test_followup_update_does_not_corrupt_base_open_event(tmp_path: Path) -> Non
             counts=counts,
             warnings=[],
             prefetched_candles_by_symbol={},
+            prefetched_candle_ranges_by_symbol={},
         )
     )
 
@@ -2720,7 +3009,7 @@ def test_second_open_for_same_symbol_is_rerouted_to_followup(tmp_path: Path) -> 
         "trades_filled": 0,
     }
 
-    events, traces, _signal_trace_map, _sym, _counts, _pref = asyncio.run(
+    events, traces, _signal_trace_map, _sym, _counts, _pref, _pref_ranges = asyncio.run(
         runner._build_events_with_traces(
             request=request,
             classifier=_DuplicateOpenSameSymbolClassifier(),
@@ -2729,6 +3018,7 @@ def test_second_open_for_same_symbol_is_rerouted_to_followup(tmp_path: Path) -> 
             counts=counts,
             warnings=[],
             prefetched_candles_by_symbol={},
+            prefetched_candle_ranges_by_symbol={},
         )
     )
 
@@ -2886,7 +3176,7 @@ def test_second_open_for_closed_symbol_stays_new_signal(tmp_path: Path) -> None:
         "trades_simulated": 0,
         "trades_filled": 0,
     }
-    events, traces, _signal_trace_map, _sym, _counts, _pref = asyncio.run(
+    events, traces, _signal_trace_map, _sym, _counts, _pref, _pref_ranges = asyncio.run(
         runner._build_events_with_traces(
             request=RealBacktestRunRequest(
                 channel="https://t.me/Crypto_Etehad",
@@ -2905,6 +3195,7 @@ def test_second_open_for_closed_symbol_stays_new_signal(tmp_path: Path) -> None:
             counts=counts,
             warnings=[],
             prefetched_candles_by_symbol={},
+            prefetched_candle_ranges_by_symbol={},
         )
     )
 
