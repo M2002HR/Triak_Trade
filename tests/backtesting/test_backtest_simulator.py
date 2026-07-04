@@ -179,6 +179,36 @@ def test_simulator_partial_take_profit_ladder_then_stop_loss() -> None:
     assert any("sl_hit" in note for note in trades[0].notes)
 
 
+def test_simulator_partial_take_profit_uses_weighted_average_exit_price() -> None:
+    parsed = _parsed(SignalAction.OPEN)
+    parsed.take_profits = [Decimal("102"), Decimal("104")]
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=parsed,
+        related_signal_id=None,
+        debug_notes=[],
+    )
+    candles = [
+        _candle(0, "102.5", "99", o="100", c="102"),
+        _candle(1, "101.5", "97.5", o="101", c="98"),
+    ]
+    trades, _ = BacktestSimulator().simulate(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+    trade = trades[0]
+    # First half closes at 102, second half at 98, so the trade-level
+    # exit_price should reflect the weighted average instead of the last fill.
+    assert trade.status == "partial_tp_then_sl"
+    assert trade.exit_price == Decimal("100")
+    assert trade.pnl == (trade.exit_price - trade.entry_price) * trade.quantity
+
+
 def test_simulator_message_close_has_priority_over_future_candle_outcome() -> None:
     open_event = BacktestEvent(
         timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
@@ -621,6 +651,57 @@ def test_simulator_records_not_filled_when_open_is_rejected_for_zero_stop_distan
     assert "rejected_zero_stop_distance" in snapshots[-1].signal_states["s1"].notes
 
 
+def test_simulator_rejects_market_open_with_stop_on_profit_side() -> None:
+    signal = _parsed(SignalAction.OPEN)
+    signal.entry_type = EntryType.MARKET
+    signal.entry_low = None
+    signal.entry_high = None
+    signal.stop_loss = Decimal("0.1788")
+    signal.take_profits = [Decimal("0.1960"), Decimal("0.2146"), Decimal("0.2659")]
+    signal.symbol = "PORTAL-SWAP-USDT"
+    event = BacktestEvent(
+        timestamp=datetime(2026, 6, 4, 18, 23, 14, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=signal,
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1378,
+        leverage=15,
+    )
+    candle_time = datetime(2026, 6, 4, 18, 24, tzinfo=timezone.utc)
+    candles = [
+        Candle(
+            symbol="PORTAL-SWAP-USDT",
+            interval="1m",
+            open_time=candle_time,
+            close_time=candle_time + timedelta(minutes=1),
+            open=Decimal("0.01925"),
+            high=Decimal("0.01933"),
+            low=Decimal("0.01915"),
+            close=Decimal("0.01926"),
+            volume=Decimal("10"),
+            source=CandleSource.FIXTURE,
+        )
+    ]
+
+    trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[event],
+        candles=candles,
+        initial_balance=Decimal("100"),
+        risk_per_trade_pct=Decimal("10"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        max_effective_leverage=Decimal("15"),
+        close_open_positions_at_end=False,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].status == "not_filled"
+    assert "rejected_invalid_stop_direction" in trades[0].notes
+    assert snapshots[-1].signal_states["s1"].status == "not_filled"
+    assert "rejected_invalid_stop_direction" in snapshots[-1].signal_states["s1"].notes
+
+
 def test_simulator_fills_limit_signal_when_message_arrives_mid_candle() -> None:
     open_event = BacktestEvent(
         timestamp=datetime(2026, 6, 1, 0, 0, 30, tzinfo=timezone.utc),
@@ -783,6 +864,47 @@ def test_simulator_snapshot_keeps_closed_signal_trade_metadata() -> None:
     assert state.declared_leverage == Decimal("10")
     assert state.effective_leverage == Decimal("10")
     assert state.margin > Decimal("0")
+
+
+def test_simulator_snapshot_risk_amount_zero_when_stop_locks_in_profit() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    update_signal = _parsed(SignalAction.UPDATE_SL)
+    update_signal.stop_loss = Decimal("101")
+    update_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 1, 30, tzinfo=timezone.utc),
+        action=SignalAction.UPDATE_SL,
+        signal_id="s1",
+        parsed_signal=update_signal,
+        related_signal_id="s1",
+        debug_notes=[],
+        source_message_id=2,
+    )
+    candles = [
+        _candle(0, "100.8", "99.5", o="100", c="100.5"),
+        _candle(1, "103", "101.5", o="102", c="102.5"),
+    ]
+
+    _trades, _balance, snapshots = BacktestSimulator().simulate_with_snapshots(
+        events=[open_event, update_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        close_open_positions_at_end=False,
+    )
+
+    state = snapshots[-1].signal_states["s1"]
+    assert state.status == "open"
+    assert state.stop_loss == Decimal("101")
+    assert state.risk_amount == Decimal("0")
 
 
 def test_simulator_market_entry_matches_normalized_swap_symbol() -> None:

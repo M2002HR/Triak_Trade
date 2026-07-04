@@ -62,6 +62,7 @@ class _OpenPosition:
     declared_leverage: Decimal | None = None
     effective_leverage: Decimal = Decimal("1")
     fee_rate_pct: Decimal = Decimal("0")
+    realized_exit_notional: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -640,6 +641,24 @@ class BacktestSimulator:
                         continue
                 else:
                     effective_stop = parsed.stop_loss
+                if parsed.stop_loss is not None and not self._is_initial_stop_loss_valid(
+                    side=parsed.side,
+                    entry_price=entry_price,
+                    stop_loss=effective_stop,
+                ):
+                    record_not_filled_open(
+                        event=event,
+                        parsed_symbol=parsed.symbol,
+                        parsed_side=parsed.side,
+                        channel_id=parsed.source_channel_id,
+                        stop_loss=effective_stop,
+                        take_profits=list(parsed.take_profits),
+                        balance_basis=balance,
+                        declared_leverage=declared_leverage,
+                        effective_leverage=effective_leverage,
+                        notes=[*notes, "rejected_invalid_stop_direction"],
+                    )
+                    continue
                 stop_distance = abs(entry_price - effective_stop)
                 if stop_distance <= Decimal("0") and parsed.stop_loss is not None:
                     record_not_filled_open(
@@ -1338,6 +1357,7 @@ class BacktestSimulator:
         )
         position.realized_pnl += pnl
         position.realized_fees += exit_fee
+        position.realized_exit_notional += exit_price * quantity
         position.remaining_quantity -= quantity
         position.exit_time = exit_time
         position.exit_price = exit_price
@@ -1384,6 +1404,13 @@ class BacktestSimulator:
         # realized_fees is 0, so this is a no-op for the default configuration.
         fees = max(position.realized_fees, Decimal("0"))
         net_pnl = position.realized_pnl - fees
+        closed_quantity = max(
+            position.original_quantity - position.remaining_quantity,
+            Decimal("0"),
+        )
+        average_exit_price = position.exit_price
+        if closed_quantity > Decimal("0"):
+            average_exit_price = position.realized_exit_notional / closed_quantity
         balance_basis = (
             position.balance_at_entry if position.balance_at_entry > Decimal("0") else exposure
         )
@@ -1401,7 +1428,7 @@ class BacktestSimulator:
             entry_time=position.entry_time,
             exit_time=position.exit_time,
             entry_price=position.entry_price,
-            exit_price=position.exit_price,
+            exit_price=average_exit_price,
             quantity=max(position.original_quantity, Decimal("0")),
             pnl=net_pnl,
             pnl_pct=pnl_pct,
@@ -1615,6 +1642,20 @@ class BacktestSimulator:
                     return
             else:
                 effective_stop = parsed.stop_loss
+            if parsed.stop_loss is not None and not self._is_initial_stop_loss_valid(
+                side=parsed.side,
+                entry_price=entry_price,
+                stop_loss=effective_stop,
+            ):
+                record_not_filled_open(
+                    stop_loss=effective_stop,
+                    take_profits=list(parsed.take_profits),
+                    balance_basis=balance,
+                    declared_leverage=declared_leverage,
+                    effective_leverage=effective_leverage,
+                    notes=[*notes, "rejected_invalid_stop_direction"],
+                )
+                return
             stop_distance = abs(entry_price - effective_stop)
             if stop_distance <= Decimal("0") and parsed.stop_loss is not None:
                 record_not_filled_open(
@@ -1951,9 +1992,11 @@ class BacktestSimulator:
                 stop_loss=position.stop_loss,
                 take_profits=list(position.take_profits),
                 notional_value=notional_value,
-                risk_amount=(
-                    abs(position.entry_price - position.stop_loss)
-                    * position.original_quantity
+                risk_amount=self._risk_amount_for_stop(
+                    side=position.side,
+                    entry_price=position.entry_price,
+                    stop_loss=position.stop_loss,
+                    quantity=position.original_quantity,
                 ),
                 realized_pnl=net_realized,
                 unrealized_pnl=unrealized,
@@ -2013,7 +2056,12 @@ class BacktestSimulator:
         return _ClosedSignalSnapshotMeta(
             stop_loss=position.stop_loss,
             take_profits=list(position.take_profits),
-            risk_amount=abs(position.entry_price - position.stop_loss) * position.original_quantity,
+            risk_amount=self._risk_amount_for_stop(
+                side=position.side,
+                entry_price=position.entry_price,
+                stop_loss=position.stop_loss,
+                quantity=position.original_quantity,
+            ),
             targets_hit=position.targets_hit,
             balance_basis=position.balance_at_entry,
             declared_leverage=position.declared_leverage,
@@ -2200,6 +2248,35 @@ class BacktestSimulator:
     ) -> Decimal:
         direction = Decimal("-1") if position.side.is_short else Decimal("1")
         return (exit_price - position.entry_price) * quantity * direction
+
+    def _is_initial_stop_loss_valid(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+    ) -> bool:
+        if stop_loss <= Decimal("0"):
+            return False
+        if side.is_short:
+            return stop_loss >= entry_price
+        return stop_loss <= entry_price
+
+    def _risk_amount_for_stop(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal | None,
+        quantity: Decimal,
+    ) -> Decimal:
+        if stop_loss is None or quantity <= Decimal("0"):
+            return Decimal("0")
+        if side.is_short:
+            distance = max(stop_loss - entry_price, Decimal("0"))
+        else:
+            distance = max(entry_price - stop_loss, Decimal("0"))
+        return distance * quantity
 
     def _allocation_pct_for_signal(
         self,
