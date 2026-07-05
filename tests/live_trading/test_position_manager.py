@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -165,19 +166,30 @@ class TestPnlCalculations:
 
 
 class TestPositionSizing:
-    def test_basic_long_sizing(self) -> None:
+    def test_basic_long_sizing(self, caplog) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
         session = _make_session(Decimal("1000"))
         signal = _make_long_signal(entry=Decimal("50000"), sl=Decimal("47500"), leverage=10)
         strategy = MagicMock()
-        result = pm.compute_position_sizing(
-            session=session, signal=signal, current_balance=Decimal("1000"), strategy=strategy
-        )
+        with caplog.at_level(logging.INFO):
+            result = pm.compute_position_sizing(
+                session=session,
+                signal=signal,
+                current_balance=Decimal("1000"),
+                strategy=strategy,
+            )
         assert result.leverage == 10
         assert result.quantity > 0
         assert result.entry_price == Decimal("50000")
         assert result.stop_loss == Decimal("47500")
+        record = next(
+            rec for rec in caplog.records if rec.msg == "live_trading.position_sized"
+        )
+        assert record.session_id == "sess1"
+        assert record.symbol == "BTCUSDT"
+        assert record.quantity == str(result.quantity)
+        assert record.margin == str(result.margin)
 
     def test_leverage_clamped(self) -> None:
         settings = _make_settings()
@@ -369,7 +381,7 @@ class TestPositionOperations:
         assert trade.remaining_quantity < trade.quantity
         assert trade.targets_hit == 1
 
-    def test_update_stop_loss(self) -> None:
+    def test_update_stop_loss(self, caplog) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
         trade = self._make_trade()
@@ -378,10 +390,16 @@ class TestPositionOperations:
             message_preview="move sl", message_date=datetime.now(timezone.utc),
             action="updated_sl",
         )
-        pm.update_stop_loss(trade=trade, new_sl=Decimal("49000"), message=attr)
+        with caplog.at_level(logging.INFO):
+            pm.update_stop_loss(trade=trade, new_sl=Decimal("49000"), message=attr)
         assert trade.stop_loss == Decimal("49000")
+        record = next(
+            rec for rec in caplog.records if rec.msg == "live_trading.trade_stop_loss_updated"
+        )
+        assert record.previous_stop_loss == "48000"
+        assert record.new_stop_loss == "49000"
 
-    def test_move_sl_to_entry(self) -> None:
+    def test_move_sl_to_entry(self, caplog) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
         trade = self._make_trade()
@@ -390,10 +408,15 @@ class TestPositionOperations:
             message_preview="risk free", message_date=datetime.now(timezone.utc),
             action="updated_sl",
         )
-        pm.update_stop_loss(trade=trade, new_sl=None, message=attr, move_to_entry=True)
+        with caplog.at_level(logging.INFO):
+            pm.update_stop_loss(trade=trade, new_sl=None, message=attr, move_to_entry=True)
         assert trade.stop_loss == trade.entry_price
+        record = next(
+            rec for rec in caplog.records if rec.msg == "live_trading.trade_stop_loss_updated"
+        )
+        assert record.move_to_entry is True
 
-    def test_update_leverage(self) -> None:
+    def test_update_leverage(self, caplog) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
         trade = self._make_trade()
@@ -405,6 +428,12 @@ class TestPositionOperations:
             message_date=datetime.now(timezone.utc),
             action="set_leverage",
         )
-        updated = pm.update_leverage(trade=trade, new_leverage=20, message=attr)
+        with caplog.at_level(logging.INFO):
+            updated = pm.update_leverage(trade=trade, new_leverage=20, message=attr)
         assert updated is True
         assert trade.leverage == 20
+        record = next(
+            rec for rec in caplog.records if rec.msg == "live_trading.trade_leverage_updated"
+        )
+        assert record.previous_leverage == 10
+        assert record.new_leverage == 20

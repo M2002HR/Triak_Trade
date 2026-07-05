@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 import httpx
 
+from triak_trade.core.logging import log_event
 from triak_trade.exchange.toobit.errors import (
     ToobitAPIError,
     ToobitConnectionError,
@@ -14,6 +16,8 @@ from triak_trade.exchange.toobit.errors import (
     ToobitTimeoutError,
 )
 from triak_trade.exchange.toobit.signer import ToobitSigner
+
+log = logging.getLogger(__name__)
 
 
 class ToobitClient:
@@ -39,6 +43,34 @@ class ToobitClient:
         self.transport = transport
         self.signer = ToobitSigner(api_secret)
         self._server_time_offset_ms = 0
+
+    def _request_fields(
+        self,
+        *,
+        method: str,
+        path: str,
+        params: dict[str, object] | None,
+        data: dict[str, object] | None,
+        signed: bool,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        safe_params: dict[str, object] = {}
+        for key, value in (params or {}).items():
+            if key in {"signature", "timestamp", "recvWindow"}:
+                continue
+            safe_params[key] = value if isinstance(value, (str, int, float, bool)) else str(value)
+        return {
+            "method": method.upper(),
+            "path": path,
+            "signed": signed,
+            "param_keys": sorted((params or {}).keys()),
+            "params": safe_params or None,
+            "data_keys": sorted((data or {}).keys()),
+            "has_data": bool(data),
+            "timeout_seconds": self.timeout_seconds,
+            "has_auth_header": bool(extra_headers and "X-BB-APIKEY" in extra_headers),
+            "server_time_offset_ms": self._server_time_offset_ms,
+        }
 
     async def get_server_time(self) -> dict[str, Any]:
         return await self.public_request("GET", self.time_path)
@@ -80,7 +112,41 @@ class ToobitClient:
                 )
             except ToobitAPIError as exc:
                 if exc.error_code != -1021 or attempt > 0:
+                    log_event(
+                        log,
+                        logging.ERROR,
+                        "toobit.signed_request_failed",
+                        attempt=attempt + 1,
+                        error_code=exc.error_code,
+                        status_code=exc.status_code,
+                        error_message=str(exc),
+                        **self._request_fields(
+                            method=method,
+                            path=path,
+                            params=signed_params,
+                            data=data,
+                            signed=True,
+                            extra_headers=headers,
+                        ),
+                    )
                     raise
+                log_event(
+                    log,
+                    logging.WARNING,
+                    "toobit.timestamp_resync_requested",
+                    attempt=attempt + 1,
+                    error_code=exc.error_code,
+                    status_code=exc.status_code,
+                    error_message=str(exc),
+                    **self._request_fields(
+                        method=method,
+                        path=path,
+                        params=signed_params,
+                        data=data,
+                        signed=True,
+                        extra_headers=headers,
+                    ),
+                )
                 await self._sync_server_time_offset()
         raise ToobitAPIError("Toobit signed request failed after timestamp resync")
 
@@ -88,9 +154,18 @@ class ToobitClient:
         return int(time.time() * 1000) + self._server_time_offset_ms
 
     async def _sync_server_time_offset(self) -> None:
+        previous_offset = self._server_time_offset_ms
         payload = await self.get_server_time()
         server_time = self._extract_server_time_ms(payload)
         self._server_time_offset_ms = server_time - int(time.time() * 1000)
+        log_event(
+            log,
+            logging.INFO,
+            "toobit.server_time_offset_synced",
+            previous_offset_ms=previous_offset,
+            new_offset_ms=self._server_time_offset_ms,
+            server_time_ms=server_time,
+        )
 
     @staticmethod
     def _extract_server_time_ms(payload: dict[str, Any]) -> int:
@@ -124,6 +199,16 @@ class ToobitClient:
                 )
                 for key, value in params.items()
             }
+        request_fields = self._request_fields(
+            method=method,
+            path=path,
+            params=params,
+            data=data,
+            signed=signed,
+            extra_headers=extra_headers,
+        )
+        started_at = time.perf_counter()
+        log_event(log, logging.DEBUG, "toobit.request_started", **request_fields)
         try:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
@@ -138,31 +223,85 @@ class ToobitClient:
                     headers=extra_headers,
                 )
         except httpx.TimeoutException as exc:
+            log_event(
+                log,
+                logging.WARNING,
+                "toobit.request_timeout",
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                error_message=str(exc),
+                **request_fields,
+            )
             raise ToobitTimeoutError("Toobit request timed out") from exc
         except httpx.ConnectError as exc:
+            log_event(
+                log,
+                logging.WARNING,
+                "toobit.request_connection_failed",
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                error_message=str(exc),
+                **request_fields,
+            )
             raise ToobitConnectionError("Toobit connection failed") from exc
 
         try:
             payload = response.json()
         except ValueError as exc:
             if response.status_code >= 400:
+                log_event(
+                    log,
+                    logging.ERROR,
+                    "toobit.request_http_error_non_json",
+                    elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                    status_code=response.status_code,
+                    response_preview=response.text[:200],
+                    **request_fields,
+                )
                 raise ToobitAPIError(
                     f"Toobit API HTTP error: {response.status_code}: {response.text}",
                     status_code=response.status_code,
                     payload=response.text,
                 ) from exc
+            log_event(
+                log,
+                logging.ERROR,
+                "toobit.request_parse_failed",
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                status_code=response.status_code,
+                response_preview=response.text[:200],
+                **request_fields,
+            )
             raise ToobitParseError("Toobit response is not valid JSON") from exc
 
         if response.status_code >= 400:
             if isinstance(payload, dict):
                 code = payload.get("code")
                 msg = payload.get("msg") or payload.get("message") or ""
+                log_event(
+                    log,
+                    logging.ERROR,
+                    "toobit.request_http_error",
+                    elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                    status_code=response.status_code,
+                    response_code=code,
+                    response_message=msg,
+                    payload_type=type(payload).__name__,
+                    **request_fields,
+                )
                 raise ToobitAPIError(
                     f"Toobit API HTTP error: {response.status_code}: {msg}".rstrip(),
                     status_code=response.status_code,
                     error_code=code,
                     payload=payload,
                 )
+            log_event(
+                log,
+                logging.ERROR,
+                "toobit.request_http_error",
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                status_code=response.status_code,
+                payload_type=type(payload).__name__,
+                **request_fields,
+            )
             raise ToobitAPIError(
                 f"Toobit API HTTP error: {response.status_code}",
                 status_code=response.status_code,
@@ -170,6 +309,16 @@ class ToobitClient:
             )
 
         if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0", 200):
+            log_event(
+                log,
+                logging.ERROR,
+                "toobit.request_api_error",
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                status_code=response.status_code,
+                response_code=payload.get("code"),
+                response_message=payload.get("msg", ""),
+                **request_fields,
+            )
             raise ToobitAPIError(
                 f"Toobit API error code {payload.get('code')}: {payload.get('msg', '')}",
                 status_code=response.status_code,
@@ -179,7 +328,27 @@ class ToobitClient:
 
         # Futures endpoints return lists directly (e.g. /api/v1/futures/balance)
         if isinstance(payload, (dict, list)):
+            log_event(
+                log,
+                logging.DEBUG,
+                "toobit.request_completed",
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                status_code=response.status_code,
+                payload_type=type(payload).__name__,
+                payload_size=(len(payload) if isinstance(payload, list) else len(payload.keys())),
+                response_code=payload.get("code") if isinstance(payload, dict) else None,
+                **request_fields,
+            )
             return payload  # type: ignore[return-value]
+        log_event(
+            log,
+            logging.ERROR,
+            "toobit.request_unexpected_payload_type",
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            status_code=response.status_code,
+            payload_type=type(payload).__name__,
+            **request_fields,
+        )
         raise ToobitParseError("Toobit response must be JSON object or array")
 
     def __repr__(self) -> str:

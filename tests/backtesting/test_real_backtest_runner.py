@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -263,6 +264,36 @@ def test_real_backtest_runner_blocks_when_disabled(tmp_path: Path) -> None:
     assert "REAL_BACKTEST_ENABLED=true is required" in "\n".join(result.errors)
 
 
+def test_real_backtest_runner_logs_blocked_run(tmp_path: Path, caplog) -> None:
+    settings = _settings(tmp_path, REAL_BACKTEST_ENABLED=False)
+    runner = RealBacktestRunner(
+        settings=settings,
+        telegram_client=FakeTelegramClient(),
+        market_data_provider=FakeMarketDataProvider(),
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = runner.run_sync(
+            RealBacktestRunRequest(
+                channel="https://t.me/Tofan_Trade",
+                hours=24,
+                interval="1m",
+                max_messages=100,
+                use_ai=False,
+                send_telegram_summary=False,
+                send_log_channel=False,
+            )
+        )
+
+    assert result.success is False
+    events = [rec.msg for rec in caplog.records]
+    assert "backtesting.real_run_sync_invoked" in events
+    assert "backtesting.real_run_started" in events
+    assert "backtesting.real_run_blocked" in events
+    blocked = next(rec for rec in caplog.records if rec.msg == "backtesting.real_run_blocked")
+    assert "REAL_BACKTEST_ENABLED=true is required" in blocked.issues
+
+
 def test_real_backtest_runner_uses_regex_fallback_and_fetches_candles(tmp_path: Path) -> None:
     now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
     message = _message(
@@ -459,6 +490,51 @@ def test_real_backtest_runner_emits_message_progress(tmp_path: Path) -> None:
     assert message_event.trace is not None
     assert message_event.trace.message_link == "https://t.me/Tofan_Trade/1"
     assert message_event.trace.classification in {"new_signal", None}
+
+
+def test_real_backtest_runner_logs_successful_flow(tmp_path: Path, caplog) -> None:
+    now = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
+    message = _message(
+        now,
+        "BTCUSDT LONG Entry: 68000 - 68200 SL: 67400 TP: 69000 / 70000 Leverage: 5x",
+    )
+    telegram = FakeTelegramClient(history_by_channel={"https://t.me/Tofan_Trade": [message]})
+    provider = FakeMarketDataProvider(candles_by_symbol={"BTCUSDT": _candles(now)})
+    runner = RealBacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=telegram,
+        market_data_provider=provider,
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = runner.run_sync(
+            RealBacktestRunRequest(
+                channel="https://t.me/Tofan_Trade",
+                from_date=now - timedelta(minutes=1),
+                to_date=now + timedelta(minutes=10),
+                interval="1m",
+                max_messages=100,
+                use_ai=False,
+                send_telegram_summary=False,
+                send_log_channel=False,
+                log_per_message=False,
+            )
+        )
+
+    assert result.success is True
+    events = [rec.msg for rec in caplog.records]
+    assert "backtesting.real_run_started" in events
+    assert "backtesting.real_history_fetched" in events
+    assert "backtesting.real_run_completed" in events
+    history_record = next(
+        rec for rec in caplog.records if rec.msg == "backtesting.real_history_fetched"
+    )
+    completed_record = next(
+        rec for rec in caplog.records if rec.msg == "backtesting.real_run_completed"
+    )
+    assert history_record.message_count == 1
+    assert completed_record.trades_simulated >= 1
+    assert completed_record.report_path is not None
 
 
 def test_real_backtest_runner_starts_simulation_tracking_immediately_for_valid_signal(

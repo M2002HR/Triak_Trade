@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ from triak_trade.backtesting.symbol_mapper import (
 from triak_trade.backtesting.telegram_source import BacktestTelegramSource
 from triak_trade.config.settings import Settings
 from triak_trade.core.formatting import decimal_to_plain_string, format_decimal
+from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.core.symbols import same_market_symbol
 from triak_trade.core.time import TEHRAN_TZ
 from triak_trade.domain.enums import BacktestFillPolicy, SignalAction, SignalStatus
@@ -72,6 +74,8 @@ from triak_trade.observability.telegram_log_channel import TelegramLogChannelCli
 from triak_trade.parsing.validator import ParsedSignalValidator
 from triak_trade.telegram.client import TelegramClientInterface
 from triak_trade.telegram.telethon_client import TelegramCredentialError, TelethonTelegramClient
+
+log = logging.getLogger(__name__)
 
 _RETRO_SIGNAL_TEXT_MARKERS = (
     "target",
@@ -323,6 +327,9 @@ class RealBacktestRunner:
         self.strategy_key: str | None = None
         self._run_started_at: datetime | None = None
 
+    def _log_event(self, level: int, event: str, /, **fields: Any) -> None:
+        log_event(log, level, event, **fields)
+
     def _active_strategy(self) -> TradeStrategy:
         if self._strategy_override is not None:
             return self._strategy_override
@@ -363,7 +370,7 @@ class RealBacktestRunner:
             issues.append("Binance public historical market-data settings are incomplete")
         Path(self.settings.REAL_BACKTEST_REPORT_DIR).mkdir(parents=True, exist_ok=True)
         Path(self.settings.BINANCE_PUBLIC_DATA_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-        return RealBacktestReadiness(
+        readiness = RealBacktestReadiness(
             ready=not issues,
             issues=issues,
             real_backtest_enabled=self.settings.REAL_BACKTEST_ENABLED,
@@ -378,6 +385,16 @@ class RealBacktestRunner:
                 and self.settings.PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL
             ),
         )
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_readiness_evaluated",
+            ready=readiness.ready,
+            issue_count=len(readiness.issues),
+            issues=readiness.issues,
+            ai_gateway_enabled=readiness.ai_gateway_enabled,
+            regex_fallback_enabled=readiness.regex_fallback_enabled,
+        )
+        return readiness
 
     async def run(
         self,
@@ -390,6 +407,18 @@ class RealBacktestRunner:
         readiness = self.readiness()
         from_date, to_date = request.resolve_range()
         warnings: list[str] = []
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_run_started",
+            channel=request.channel,
+            interval=request.interval,
+            from_date=from_date.isoformat(),
+            to_date=to_date.isoformat(),
+            max_messages=request.max_messages,
+            use_ai=request.use_ai,
+            send_log_channel=request.send_log_channel,
+            log_per_message=request.log_per_message,
+        )
         self._emit_run_progress(
             progress_callback,
             phase="starting",
@@ -397,6 +426,12 @@ class RealBacktestRunner:
             summary="Backtest run created and waiting for readiness checks.",
         )
         if not readiness.ready:
+            self._log_event(
+                logging.WARNING,
+                "backtesting.real_run_blocked",
+                channel=request.channel,
+                issues=readiness.issues,
+            )
             if request.send_log_channel:
                 await self._try_send_log(
                     "Real backtest blocked before start\n"
@@ -416,6 +451,15 @@ class RealBacktestRunner:
             )
 
         selection = self._select_classifier(request.use_ai)
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_classifier_selected",
+            channel=request.channel,
+            ai_requested=selection.ai_requested,
+            ai_configured=selection.ai_configured,
+            classifier_type=type(selection.classifier).__name__,
+            warning=selection.warning,
+        )
         if request.use_ai and not selection.ai_configured:
             if request.send_log_channel:
                 await self._try_send_log(
@@ -460,6 +504,13 @@ class RealBacktestRunner:
                 start_message_id=request.start_message_id,
             )
         except TelegramCredentialError as exc:
+            self._log_event(
+                logging.ERROR,
+                "backtesting.real_history_fetch_failed",
+                channel=request.channel,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return self._write_failure(
                 channel=request.channel,
                 from_date=from_date,
@@ -468,6 +519,13 @@ class RealBacktestRunner:
                 errors=[str(exc)],
             )
         except Exception as exc:
+            self._log_event(
+                logging.ERROR,
+                "backtesting.real_history_fetch_failed",
+                channel=request.channel,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return self._write_failure(
                 channel=request.channel,
                 from_date=from_date,
@@ -504,6 +562,14 @@ class RealBacktestRunner:
                 f"{counts['caption_media_candidates']}."
             ),
             counts=counts,
+        )
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_history_fetched",
+            channel=request.channel,
+            message_count=len(messages),
+            caption_media_candidates=counts["caption_media_candidates"],
+            used_real_telegram=fetch_result.used_real_telegram,
         )
 
         active_strategy = self._active_strategy()
@@ -568,6 +634,19 @@ class RealBacktestRunner:
                 warnings,
                 "AI gateway unavailable or failed during classification; regex fallback used."
             )
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_classification_completed",
+            channel=request.channel,
+            classified_messages=counts["classified_messages"],
+            valid_signals=counts["valid_signals"],
+            invalid_signals=counts["invalid_signals"],
+            ignored_messages=counts["ignored_messages"],
+            ambiguous_messages=counts["ambiguous_messages"],
+            ai_used=ai_used,
+            regex_fallback_used=regex_fallback_used,
+            symbol_count=len(symbols),
+        )
         self._emit_run_progress(
             progress_callback,
             phase="classify_messages",
@@ -593,6 +672,11 @@ class RealBacktestRunner:
             )
 
         if not messages:
+            self._log_event(
+                logging.WARNING,
+                "backtesting.real_run_failed_no_messages",
+                channel=request.channel,
+            )
             if request.send_log_channel:
                 await self._try_send_log(
                     "Real backtest finished with no messages\n"
@@ -630,6 +714,13 @@ class RealBacktestRunner:
                 warnings=warnings,
             )
         if not symbols:
+            self._log_event(
+                logging.WARNING,
+                "backtesting.real_run_failed_no_valid_signals",
+                channel=request.channel,
+                total_messages=len(messages),
+                valid_signals=len(valid_open_events),
+            )
             if request.send_log_channel:
                 await self._try_send_log(
                     "Real backtest finished without valid signals\n"
@@ -1046,6 +1137,16 @@ class RealBacktestRunner:
         stored = self.report_store.write(self._build_payload(result, report, score))
         result.report_path = stored.json_path
         result.markdown_report_path = stored.markdown_path
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_report_written",
+            channel=request.channel,
+            report_path=result.report_path,
+            markdown_report_path=result.markdown_report_path,
+            trades_simulated=result.trades_simulated,
+            trades_filled=result.trades_filled,
+            total_pnl=str(result.total_pnl),
+        )
         self._emit_run_progress(
             progress_callback,
             phase="report",
@@ -1081,6 +1182,17 @@ class RealBacktestRunner:
                     "continuing without Telegram run log delivery."
                 ),
             )
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_run_completed",
+            channel=request.channel,
+            total_messages=result.total_messages,
+            valid_signals=result.valid_signals,
+            trades_simulated=result.trades_simulated,
+            trades_filled=result.trades_filled,
+            total_pnl=str(result.total_pnl),
+            report_path=result.report_path,
+        )
         return result
 
     def run_sync(
@@ -1089,17 +1201,34 @@ class RealBacktestRunner:
         *,
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None = None,
     ) -> RealBacktestResult:
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_run_sync_invoked",
+            channel=request.channel,
+            interval=request.interval,
+        )
         return asyncio.run(self.run(request, progress_callback=progress_callback))
 
     def latest_report_summary(self) -> dict[str, Any] | None:
         latest = self.report_store.latest()
         if latest is None:
+            self._log_event(logging.DEBUG, "backtesting.real_latest_report_missing")
             return None
         try:
             payload = json.loads(latest.read_text(encoding="utf-8"))
         except ValueError:
+            self._log_event(
+                logging.WARNING,
+                "backtesting.real_latest_report_invalid_json",
+                report_path=str(latest),
+            )
             return {"report_path": str(latest), "error": "latest report is not valid JSON"}
         payload["report_path"] = str(latest)
+        self._log_event(
+            logging.DEBUG,
+            "backtesting.real_latest_report_loaded",
+            report_path=str(latest),
+        )
         return dict(payload)
 
     def _select_classifier(self, use_ai: bool) -> _ClassificationSelection:
@@ -1129,12 +1258,20 @@ class RealBacktestRunner:
                 gateway_client=client,
                 regex_fallback=None,
             )
-            return _ClassificationSelection(
+            selection = _ClassificationSelection(
                 classifier=classifier,
                 ai_requested=True,
                 ai_configured=True,
                 warning=None,
             )
+            self._log_event(
+                logging.INFO,
+                "backtesting.real_classifier_configured",
+                classifier_type=type(selection.classifier).__name__,
+                ai_requested=True,
+                ai_configured=True,
+            )
+            return selection
         if use_ai:
             client = AjilGatewayClient(
                 base_url=self.settings.AI_GATEWAY_BASE_URL,
@@ -1156,7 +1293,7 @@ class RealBacktestRunner:
                 retry_attempts=self.settings.AI_GATEWAY_RETRY_ATTEMPTS,
                 retry_backoff_seconds=self.settings.AI_GATEWAY_RETRY_BACKOFF_SECONDS,
             )
-            return _ClassificationSelection(
+            selection = _ClassificationSelection(
                 classifier=AIMessageClassifier(
                     settings=self.settings,
                     gateway_client=client,
@@ -1166,7 +1303,14 @@ class RealBacktestRunner:
                 ai_configured=False,
                 warning="AI gateway is required but not enabled.",
             )
-        return _ClassificationSelection(
+            self._log_event(
+                logging.WARNING,
+                "backtesting.real_classifier_requires_ai_gateway",
+                classifier_type=type(selection.classifier).__name__,
+                ai_requested=True,
+            )
+            return selection
+        selection = _ClassificationSelection(
             classifier=RegexMessageClassifier(),
             ai_requested=use_ai,
             ai_configured=False,
@@ -1176,6 +1320,15 @@ class RealBacktestRunner:
                 else None
             ),
         )
+        self._log_event(
+            logging.INFO,
+            "backtesting.real_classifier_configured",
+            classifier_type=type(selection.classifier).__name__,
+            ai_requested=use_ai,
+            ai_configured=False,
+            warning=selection.warning,
+        )
+        return selection
 
     async def _send_log(self, text: str) -> object | None:
         return await self.log_client.send_text(text, real=True)
@@ -1188,6 +1341,11 @@ class RealBacktestRunner:
         warning_message: str,
     ) -> bool:
         if getattr(self, "_log_sending_disabled_for_run", False):
+            self._log_event(
+                logging.DEBUG,
+                "backtesting.real_log_send_skipped",
+                reason="disabled_for_run",
+            )
             return False
         self._last_log_send_failure_reason = None
         attempts = max(1, self.settings.TELEGRAM_LOG_CHANNEL_SEND_RETRIES + 1)
@@ -1197,11 +1355,33 @@ class RealBacktestRunner:
                 result = await self._send_log(text)
             except Exception as exc:
                 self._last_log_send_failure_reason = type(exc).__name__
+                self._log_event(
+                    logging.WARNING,
+                    "backtesting.real_log_send_attempt_failed",
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    text_preview=safe_preview(text, max_chars=80),
+                )
             else:
                 if not self._send_result_skipped(result):
                     self._last_log_send_failure_reason = None
+                    self._log_event(
+                        logging.INFO,
+                        "backtesting.real_log_send_succeeded",
+                        attempt=attempt + 1,
+                        attempts=attempts,
+                    )
                     return True
                 self._last_log_send_failure_reason = self._send_result_skip_reason(result)
+                self._log_event(
+                    logging.WARNING,
+                    "backtesting.real_log_send_skipped",
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    reason=self._last_log_send_failure_reason,
+                )
             if attempt < attempts - 1 and delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
         reason = self._last_log_send_failure_reason or "unknown"
@@ -1209,6 +1389,11 @@ class RealBacktestRunner:
             self._append_warning(warnings, f"{warning_message} ({reason})")
         # If any log send fails, disable later log sends for this run to avoid delays
         self._log_sending_disabled_for_run = True
+        self._log_event(
+            logging.WARNING,
+            "backtesting.real_log_send_disabled_for_run",
+            reason=reason,
+        )
         return False
 
     @staticmethod
@@ -1285,6 +1470,21 @@ class RealBacktestRunner:
         errors: list[str] | None = None,
         warnings: list[str] | None = None,
     ) -> RealBacktestResult:
+        self._log_event(
+            logging.ERROR,
+            "backtesting.real_run_failed",
+            channel=channel,
+            interval=interval,
+            from_date=from_date.isoformat(),
+            to_date=to_date.isoformat(),
+            error_count=len(errors or []),
+            warning_count=len(warnings or []),
+            errors=errors or [],
+            warnings=warnings or [],
+            skipped_reason_count=len(skipped_reasons or []),
+            total_messages=total_messages,
+            valid_signals=valid_signals,
+        )
         result = RealBacktestResult(
             success=False,
             channel=channel,
@@ -3578,6 +3778,15 @@ class RealBacktestRunner:
         event_timestamp: datetime | None = None,
         current_message_id: int | None = None,
     ) -> None:
+        self._log_event(
+            logging.DEBUG,
+            "backtesting.real_progress_run_event",
+            phase=phase,
+            status=status,
+            summary=summary,
+            current_message_id=current_message_id,
+            count_keys=sorted((counts or {}).keys()),
+        )
         if progress_callback is None:
             return
         progress_callback(
@@ -3606,6 +3815,15 @@ class RealBacktestRunner:
         live_metrics: dict[str, str] | None = None,
         live_signals: list[dict[str, Any]] | None = None,
     ) -> None:
+        self._log_event(
+            logging.DEBUG,
+            "backtesting.real_progress_message_event",
+            phase=phase,
+            message_id=trace.message_id,
+            final_status=trace.final_status,
+            current_stage=trace.current_stage,
+            summary=summary,
+        )
         if progress_callback is None:
             return
         progress_callback(

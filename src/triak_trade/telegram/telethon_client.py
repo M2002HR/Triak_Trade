@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import re
 import socket
@@ -13,8 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from triak_trade.config.settings import Settings
+from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.domain.models import RawTelegramMessage
 from triak_trade.telegram.mapper import telethon_message_to_raw
+
+log = logging.getLogger(__name__)
 
 
 class TelegramCredentialError(ValueError):
@@ -27,16 +31,34 @@ class TelethonTelegramClient:
         self._client: Any | None = None
         self._message_cache: dict[tuple[str, int], Any] = {}
 
+    def _log_event(self, level: int, event: str, /, **fields: Any) -> None:
+        log_event(log, level, event, **fields)
+
     @property
     def session_path(self) -> Path:
         return Path(self.settings.TELEGRAM_SESSION_DIR) / self.settings.TELEGRAM_SESSION_NAME
 
     def _validate_credentials(self) -> None:
         if self.settings.TELEGRAM_API_ID <= 0:
+            self._log_event(
+                logging.WARNING,
+                "telegram.credentials_invalid",
+                reason="missing_api_id",
+            )
             raise TelegramCredentialError("TELEGRAM_API_ID is missing or invalid")
         api_hash = self.settings.TELEGRAM_API_HASH.get_secret_value()
         if not api_hash or api_hash == "replace_me":
+            self._log_event(
+                logging.WARNING,
+                "telegram.credentials_invalid",
+                reason="missing_api_hash",
+            )
             raise TelegramCredentialError("TELEGRAM_API_HASH is missing")
+        self._log_event(
+            logging.DEBUG,
+            "telegram.credentials_validated",
+            api_id_present=self.settings.TELEGRAM_API_ID > 0,
+        )
 
     def _build_client(self) -> Any:
         self._validate_credentials()
@@ -70,6 +92,13 @@ class TelethonTelegramClient:
         else:
             effective_proxy = proxy
 
+        self._log_event(
+            logging.INFO,
+            "telegram.client_built",
+            session_mode="string" if string_session else "file",
+            proxy_enabled=effective_proxy is not None,
+            proxy_type=proxy[0] if proxy is not None else None,
+        )
         return TelegramClient(
             session,
             self.settings.TELEGRAM_API_ID,
@@ -139,6 +168,7 @@ class TelethonTelegramClient:
     async def _ensure_client(self) -> Any:
         if self._client is None:
             self._client = self._build_client()
+            self._log_event(logging.INFO, "telegram.client_initialized")
         return self._client
 
     async def fetch_history(
@@ -151,6 +181,15 @@ class TelethonTelegramClient:
         min_message_id: int | None = None,
     ) -> list[RawTelegramMessage]:
         client = await self._ensure_client()
+        self._log_event(
+            logging.INFO,
+            "telegram.history_fetch_started",
+            channel=channel,
+            start=start.isoformat() if start is not None else None,
+            end=end.isoformat() if end is not None else None,
+            limit=limit,
+            min_message_id=min_message_id,
+        )
         result: list[RawTelegramMessage] = []
         effective_min_id = max((min_message_id or 0) - 1, 0)
         iter_kwargs: dict[str, int] = {}
@@ -172,6 +211,14 @@ class TelethonTelegramClient:
         result.sort(key=lambda item: item.date)
         if limit is not None:
             result = result[:limit]
+        self._log_event(
+            logging.INFO,
+            "telegram.history_fetch_completed",
+            channel=channel,
+            message_count=len(result),
+            first_message_id=result[0].message_id if result else None,
+            last_message_id=result[-1].message_id if result else None,
+        )
         return result
 
     async def forward_message_by_link(
@@ -181,9 +228,24 @@ class TelethonTelegramClient:
     ) -> RawTelegramMessage:
         client = await self._ensure_client()
         source_channel, message_id = self._parse_message_link(message_link)
+        self._log_event(
+            logging.INFO,
+            "telegram.forward_started",
+            source_channel=source_channel,
+            source_message_id=message_id,
+            destination_channel=destination_channel,
+        )
         async with client:
             source_message = await client.get_messages(source_channel, ids=message_id)
             if source_message is None:
+                self._log_event(
+                    logging.WARNING,
+                    "telegram.forward_failed",
+                    source_channel=source_channel,
+                    source_message_id=message_id,
+                    destination_channel=destination_channel,
+                    reason="source_message_not_found",
+                )
                 raise ValueError("source_message_not_found")
             forwarded = await client.forward_messages(destination_channel, source_message)
             if isinstance(forwarded, list):
@@ -192,6 +254,14 @@ class TelethonTelegramClient:
                 forwarded = forwarded[0]
             raw = telethon_message_to_raw(forwarded, channel=destination_channel)
             self._cache_message(raw, forwarded)
+            self._log_event(
+                logging.INFO,
+                "telegram.forward_completed",
+                source_channel=source_channel,
+                source_message_id=message_id,
+                destination_channel=destination_channel,
+                forwarded_message_id=raw.message_id,
+            )
             return raw
 
     async def listen_new_messages(
@@ -232,20 +302,23 @@ class TelethonTelegramClient:
 
                 raw = telethon_message_to_raw(msg, channel=channel_ref)
                 self._cache_message(raw, msg)
-                import logging
-                logging.getLogger(__name__).debug(
-                    "New message %s from channel=%s text=%s",
-                    raw.message_id, raw.channel_id,
-                    (raw.text or "")[:60],
+                self._log_event(
+                    logging.DEBUG,
+                    "telegram.live_message_received",
+                    channel_id=raw.channel_id,
+                    message_id=raw.message_id,
+                    message_preview=safe_preview(raw.text, max_chars=60),
                 )
                 await handler(raw)
-            except Exception:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Error handling Telegram message %s",
-                    getattr(getattr(event, "message", None), "id", "?"),
-                    exc_info=True,
+            except Exception as exc:
+                self._log_event(
+                    logging.WARNING,
+                    "telegram.live_message_handler_failed",
+                    message_id=getattr(getattr(event, "message", None), "id", "?"),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
                 )
+                log.exception("Error handling Telegram live message")
 
         client.add_event_handler(
             _on_message,
@@ -254,8 +327,12 @@ class TelethonTelegramClient:
 
         try:
             await client.start()
-            import logging
-            _log = logging.getLogger(__name__)
+            self._log_event(
+                logging.INFO,
+                "telegram.listener_started",
+                channel_count=len(channels),
+                channels=channels,
+            )
 
             # Join any channels we're not yet a member of (required to receive updates)
             for ch in channels:
@@ -263,27 +340,52 @@ class TelethonTelegramClient:
                     entity = await client.get_entity(ch)
                     left = getattr(entity, "left", False)
                     if left:
-                        _log.info("Joining channel %s to receive updates", ch)
+                        self._log_event(
+                            logging.INFO,
+                            "telegram.channel_join_started",
+                            channel=ch,
+                        )
                         await client(
                             __import__(
                                 "telethon.tl.functions.channels",
                                 fromlist=["JoinChannelRequest"],
                             ).JoinChannelRequest(entity)
                         )
-                        _log.info("Joined channel %s", ch)
+                        self._log_event(
+                            logging.INFO,
+                            "telegram.channel_join_completed",
+                            channel=ch,
+                        )
                 except Exception as exc:
-                    _log.warning("Could not join channel %s: %s", ch, exc)
+                    self._log_event(
+                        logging.WARNING,
+                        "telegram.channel_join_failed",
+                        channel=ch,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
 
-            _log.info("Telegram listener connected, watching %d channels", len(channels))
+            self._log_event(
+                logging.INFO,
+                "telegram.listener_connected",
+                channel_count=len(channels),
+            )
             await client.run_until_disconnected()
         except asyncio.CancelledError:
+            self._log_event(logging.INFO, "telegram.listener_cancelled")
             raise
         finally:
             try:
                 await client.disconnect()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_event(
+                    logging.WARNING,
+                    "telegram.listener_disconnect_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
             self._client = None
+            self._log_event(logging.INFO, "telegram.listener_stopped")
 
     async def stop(self) -> None:
         """Disconnect the active client (if any)."""
@@ -291,9 +393,15 @@ class TelethonTelegramClient:
         if client is not None:
             try:
                 await client.disconnect()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_event(
+                    logging.WARNING,
+                    "telegram.client_stop_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
             self._client = None
+            self._log_event(logging.INFO, "telegram.client_stopped")
 
     @staticmethod
     def _parse_message_link(message_link: str) -> tuple[str, int]:
@@ -313,17 +421,45 @@ class TelethonTelegramClient:
         if not self.settings.TELEGRAM_MEDIA_DOWNLOAD_ENABLED:
             return message
         if not bool(payload.get("has_media")):
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_hydration_skipped",
+                channel_id=message.channel_id,
+                message_id=message.message_id,
+                reason="no_media",
+            )
             return message
         if not bool(payload.get("caption_present")) and not allow_captionless:
             payload["media_download_skipped"] = "no_caption"
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_hydration_skipped",
+                channel_id=message.channel_id,
+                message_id=message.message_id,
+                reason="no_caption",
+            )
             return message.model_copy(update={"raw_payload": payload})
         if payload.get("image_data_urls"):
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_hydration_skipped",
+                channel_id=message.channel_id,
+                message_id=message.message_id,
+                reason="already_hydrated",
+            )
             return message
 
         key = (message.channel_id, message.message_id)
         source_message = self._message_cache.get(key)
         if source_message is None:
             payload["media_download_skipped"] = "source_not_cached"
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_hydration_skipped",
+                channel_id=message.channel_id,
+                message_id=message.message_id,
+                reason="source_not_cached",
+            )
             return message.model_copy(update={"raw_payload": payload})
 
         client = await self._ensure_client()
@@ -345,6 +481,12 @@ class TelethonTelegramClient:
 
     def _cache_message(self, raw: RawTelegramMessage, source_message: Any) -> None:
         self._message_cache[(raw.channel_id, raw.message_id)] = source_message
+        self._log_event(
+            logging.DEBUG,
+            "telegram.message_cached",
+            channel_id=raw.channel_id,
+            message_id=raw.message_id,
+        )
 
     async def _hydrate_media_payload(
         self,
@@ -361,25 +503,62 @@ class TelethonTelegramClient:
             return raw
         if not bool(payload.get("caption_present")) and not allow_captionless:
             payload["media_download_skipped"] = "no_caption"
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_download_skipped",
+                channel_id=raw.channel_id,
+                message_id=raw.message_id,
+                reason="no_caption",
+            )
             return raw.model_copy(update={"raw_payload": payload})
         has_photo = bool(payload.get("has_photo"))
         mime_type = payload.get("mime_type")
         is_image_document = isinstance(mime_type, str) and mime_type.startswith("image/")
         if not has_photo and not is_image_document:
             payload["media_download_skipped"] = "not_supported_image"
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_download_skipped",
+                channel_id=raw.channel_id,
+                message_id=raw.message_id,
+                reason="not_supported_image",
+            )
             return raw.model_copy(update={"raw_payload": payload})
         if payload.get("image_data_urls"):
             return raw
         try:
             media_bytes = await client.download_media(message, file=bytes)
-        except Exception:
+        except Exception as exc:
             payload["media_download_skipped"] = "download_failed"
+            self._log_event(
+                logging.WARNING,
+                "telegram.media_download_failed",
+                channel_id=raw.channel_id,
+                message_id=raw.message_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return raw.model_copy(update={"raw_payload": payload})
         if not isinstance(media_bytes, (bytes, bytearray)) or not media_bytes:
             payload["media_download_skipped"] = "empty"
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_download_skipped",
+                channel_id=raw.channel_id,
+                message_id=raw.message_id,
+                reason="empty",
+            )
             return raw.model_copy(update={"raw_payload": payload})
         if len(media_bytes) > self.settings.TELEGRAM_MEDIA_MAX_BYTES:
             payload["media_bytes_skipped"] = "too_large"
+            self._log_event(
+                logging.DEBUG,
+                "telegram.media_download_skipped",
+                channel_id=raw.channel_id,
+                message_id=raw.message_id,
+                reason="too_large",
+                byte_count=len(media_bytes),
+            )
             return raw.model_copy(update={"raw_payload": payload})
         effective_mime_type = "image/jpeg" if has_photo else str(mime_type or "image/jpeg")
         data_url = (
@@ -393,4 +572,13 @@ class TelethonTelegramClient:
             }
         ][: self.settings.TELEGRAM_MEDIA_MAX_IMAGES]
         payload["media_downloaded"] = True
+        self._log_event(
+            logging.INFO,
+            "telegram.media_download_completed",
+            channel_id=raw.channel_id,
+            message_id=raw.message_id,
+            byte_count=len(media_bytes),
+            mime_type=effective_mime_type,
+            image_count=len(payload["image_data_urls"]),
+        )
         return raw.model_copy(update={"raw_payload": payload})

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -237,6 +238,28 @@ async def test_try_open_signal_rejects_invalid_exchange_symbol(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_try_open_signal_invalid_symbol_emits_structured_log(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal(), status=SignalStatus.PENDING_CONSOLIDATION)
+    context.add_signal(state, pending=True)
+    engine._futures_client = AsyncMock()
+    engine._futures_client.validate_symbol_tradable.side_effect = ValueError("symbol not tradable")
+
+    with caplog.at_level(logging.INFO):
+        await engine._try_open_signal("sig_test", state, context)
+
+    record = next(rec for rec in caplog.records if rec.msg == "live_trading.signal_rejected")
+    assert record.session_id == "ls_test"
+    assert record.signal_id == "sig_test"
+    assert record.reason == "invalid_exchange_symbol"
+    assert record.symbol == "BTCUSDT"
+
+
+@pytest.mark.asyncio
 async def test_try_open_signal_opens_with_strategy_synthetic_protection_when_missing(
     tmp_path: Path,
 ) -> None:
@@ -301,6 +324,38 @@ async def test_poll_messages_once_replays_messages_from_session_start(tmp_path: 
     assert traces[0].message_id == 101
     assert engine.session.total_messages_processed == 1
     assert engine._last_seen_message_ids["https://t.me/testchan"] == 101
+
+
+@pytest.mark.asyncio
+async def test_process_message_ignore_emits_structured_logs(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_ignored_signal().model_copy(
+                update={"source_message_id": raw.message_id}
+            ),
+            classification="ignore",
+            related_signal_id=None,
+        )
+    )
+    message = _message(301, "noise")
+
+    with caplog.at_level(logging.INFO):
+        await engine._process_message(message)
+
+    events = [rec.msg for rec in caplog.records]
+    assert "live_trading.message_processing_started" in events
+    assert "live_trading.message_classified" in events
+    assert "live_trading.message_ignored" in events
+    assert "live_trading.message_processing_completed" in events
+    completed = next(
+        rec for rec in caplog.records if rec.msg == "live_trading.message_processing_completed"
+    )
+    assert completed.final_status == "ignored"
+    assert completed.message_id == 301
 
 
 @pytest.mark.asyncio

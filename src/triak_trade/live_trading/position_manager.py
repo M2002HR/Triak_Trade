@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.config.settings import Settings
+from triak_trade.core.logging import log_event
 from triak_trade.domain.enums import TradeSide
 from triak_trade.domain.models import ParsedSignal
 from triak_trade.live_trading.models import LiveSession, LiveTrade, MessageAttribution
+
+log = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -48,6 +52,22 @@ class LivePositionManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    @staticmethod
+    def _trade_fields(trade: LiveTrade) -> dict[str, object]:
+        return {
+            "trade_id": trade.trade_id,
+            "signal_id": trade.signal_id,
+            "symbol": trade.symbol,
+            "side": trade.side,
+            "status": trade.status,
+            "leverage": trade.leverage,
+            "entry_price": str(trade.entry_price),
+            "quantity": str(trade.quantity),
+            "remaining_quantity": str(trade.remaining_quantity),
+            "stop_loss": str(trade.stop_loss) if trade.stop_loss is not None else None,
+            "targets_hit": trade.targets_hit,
+        }
+
     def compute_position_sizing(
         self,
         *,
@@ -59,6 +79,16 @@ class LivePositionManager:
         notes: list[str] = []
         side = signal.side
         if current_balance <= Decimal("0"):
+            log_event(
+                log,
+                logging.WARNING,
+                "live_trading.position_sizing_rejected",
+                session_id=session.session_id,
+                symbol=signal.symbol,
+                side=signal.side.value,
+                current_balance=str(current_balance),
+                reason="non_positive_balance",
+            )
             raise ValueError("Current account balance is zero; cannot size position")
 
         leverage_raw = signal.leverage or self.settings.LIVE_TRADING_DEFAULT_SIGNAL_LEVERAGE
@@ -74,6 +104,16 @@ class LivePositionManager:
 
         entry_price = _resolve_entry_price(signal)
         if entry_price is None or entry_price <= 0:
+            log_event(
+                log,
+                logging.WARNING,
+                "live_trading.position_sizing_rejected",
+                session_id=session.session_id,
+                symbol=signal.symbol,
+                side=signal.side.value,
+                leverage=leverage,
+                reason="missing_entry_price",
+            )
             raise ValueError("Cannot determine entry price for position sizing")
 
         allocation_pct = _allocation_pct_for_signal(
@@ -88,6 +128,19 @@ class LivePositionManager:
             Decimal("0.00000001")
         )
         if quantity <= 0:
+            log_event(
+                log,
+                logging.WARNING,
+                "live_trading.position_sizing_rejected",
+                session_id=session.session_id,
+                symbol=signal.symbol,
+                side=signal.side.value,
+                leverage=leverage,
+                allocation_pct=str(allocation_pct),
+                current_balance=str(current_balance),
+                entry_price=str(entry_price),
+                reason="non_positive_quantity",
+            )
             raise ValueError("Computed quantity is zero or negative")
 
         stop_loss = signal.stop_loss
@@ -121,6 +174,17 @@ class LivePositionManager:
                 notes.extend(synthetic_stop_notes)
             is_synthetic_stop = True
         if quantity <= 0:
+            log_event(
+                log,
+                logging.WARNING,
+                "live_trading.position_sizing_rejected",
+                session_id=session.session_id,
+                symbol=signal.symbol,
+                side=signal.side.value,
+                leverage=leverage,
+                entry_price=str(entry_price),
+                reason="synthetic_stop_capped_to_zero_quantity",
+            )
             raise ValueError("Quantity became zero after synthetic stop risk capping")
 
         take_profits = _sanitize_take_profits(
@@ -151,6 +215,25 @@ class LivePositionManager:
                 )
 
         margin = (entry_price * quantity / Decimal(str(leverage))).quantize(Decimal("0.00000001"))
+
+        log_event(
+            log,
+            logging.INFO,
+            "live_trading.position_sized",
+            session_id=session.session_id,
+            symbol=signal.symbol,
+            side=signal.side.value,
+            leverage=leverage,
+            current_balance=str(current_balance),
+            allocation_pct=str(allocation_pct),
+            margin=str(margin),
+            quantity=str(quantity),
+            entry_price=str(entry_price),
+            stop_loss=str(stop_loss) if stop_loss is not None else None,
+            take_profit_count=len(take_profits),
+            is_synthetic_stop=is_synthetic_stop,
+            notes=notes,
+        )
 
         return PositionSizingResult(
             quantity=quantity,
@@ -213,6 +296,23 @@ class LivePositionManager:
             status="open",
             message_history=[attribution],
         )
+        log_event(
+            log,
+            logging.INFO,
+            "live_trading.trade_created",
+            session_id=session.session_id,
+            trade_id=trade.trade_id,
+            signal_id=signal_id,
+            symbol=trade.symbol,
+            side=trade.side,
+            leverage=trade.leverage,
+            quantity=str(trade.quantity),
+            margin=str(trade.margin),
+            stop_loss=str(trade.stop_loss) if trade.stop_loss is not None else None,
+            take_profit_count=len(trade.take_profits),
+            trigger_message_id=trigger_message_id,
+            channel_id=channel_id,
+        )
         return trade
 
     def update_stop_loss(
@@ -223,6 +323,7 @@ class LivePositionManager:
         message: MessageAttribution,
         move_to_entry: bool = False,
     ) -> None:
+        previous_stop_loss = trade.stop_loss
         if move_to_entry:
             trade.stop_loss = trade.entry_price
             message.notes.append(f"SL moved to entry (breakeven) {trade.entry_price}")
@@ -230,6 +331,18 @@ class LivePositionManager:
             trade.stop_loss = new_sl
             message.notes.append(f"SL updated to {new_sl}")
         trade.add_attribution(message)
+        log_event(
+            log,
+            logging.INFO,
+            "live_trading.trade_stop_loss_updated",
+            previous_stop_loss=(
+                str(previous_stop_loss) if previous_stop_loss is not None else None
+            ),
+            new_stop_loss=str(trade.stop_loss) if trade.stop_loss is not None else None,
+            move_to_entry=move_to_entry,
+            message_id=message.message_id,
+            **self._trade_fields(trade),
+        )
 
     def update_take_profits(
         self,
@@ -248,6 +361,16 @@ class LivePositionManager:
         trade.take_profits = trade.take_profits[: trade.targets_hit] + sanitized
         message.notes.append(f"TPs updated: {[str(t) for t in sanitized]}")
         trade.add_attribution(message)
+        log_event(
+            log,
+            logging.INFO,
+            "live_trading.trade_take_profits_updated",
+            take_profit_count=len(trade.take_profits),
+            pending_take_profit_count=max(0, len(trade.take_profits) - trade.targets_hit),
+            new_take_profits=[str(item) for item in sanitized],
+            message_id=message.message_id,
+            **self._trade_fields(trade),
+        )
 
     def update_leverage(
         self,
@@ -257,7 +380,16 @@ class LivePositionManager:
         message: MessageAttribution,
     ) -> bool:
         if new_leverage is None or new_leverage <= 0:
+            log_event(
+                log,
+                logging.INFO,
+                "live_trading.trade_leverage_update_ignored",
+                requested_leverage=new_leverage,
+                message_id=message.message_id,
+                **self._trade_fields(trade),
+            )
             return False
+        previous_leverage = trade.leverage
         clamped = min(new_leverage, self.settings.LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE)
         trade.leverage = clamped
         message.action = "set_leverage"
@@ -268,6 +400,17 @@ class LivePositionManager:
         else:
             message.notes.append(f"leverage updated to {clamped}x")
         trade.add_attribution(message)
+        log_event(
+            log,
+            logging.INFO,
+            "live_trading.trade_leverage_updated",
+            previous_leverage=previous_leverage,
+            requested_leverage=new_leverage,
+            new_leverage=clamped,
+            was_clamped=clamped != new_leverage,
+            message_id=message.message_id,
+            **self._trade_fields(trade),
+        )
         return True
 
     def apply_mark_price(
@@ -277,6 +420,8 @@ class LivePositionManager:
         mark_price: Decimal,
         fee_rate_pct: Decimal,
     ) -> None:
+        previous_mark_price = trade.mark_price
+        previous_unrealized_pnl = trade.unrealized_pnl
         trade.mark_price = mark_price
         pnl = _calculate_unrealized_pnl(
             side=trade.side,
@@ -286,6 +431,19 @@ class LivePositionManager:
             fee_rate_pct=fee_rate_pct,
         )
         trade.unrealized_pnl = pnl
+        log_event(
+            log,
+            logging.DEBUG,
+            "live_trading.trade_mark_price_applied",
+            previous_mark_price=(
+                str(previous_mark_price) if previous_mark_price is not None else None
+            ),
+            mark_price=str(mark_price),
+            previous_unrealized_pnl=str(previous_unrealized_pnl),
+            unrealized_pnl=str(trade.unrealized_pnl),
+            fee_rate_pct=str(fee_rate_pct),
+            **self._trade_fields(trade),
+        )
 
     def check_sl_tp_hit(
         self,
@@ -322,6 +480,16 @@ class LivePositionManager:
             ):
                 events.append("sl_hit")
 
+        log_event(
+            log,
+            logging.DEBUG,
+            "live_trading.trade_triggers_evaluated",
+            mark_price=str(mark_price),
+            trigger_stop_loss=str(trade.stop_loss) if trade.stop_loss is not None else None,
+            event_count=len(events),
+            events=events,
+            **self._trade_fields(trade),
+        )
         return events
 
     def apply_partial_close(
@@ -343,6 +511,15 @@ class LivePositionManager:
         """
         close_qty = (trade.remaining_quantity * close_fraction).quantize(Decimal("0.00000001"))
         if close_qty <= 0:
+            log_event(
+                log,
+                logging.INFO,
+                "live_trading.trade_partial_close_ignored",
+                close_fraction=str(close_fraction),
+                close_price=str(close_price),
+                reason=reason,
+                **self._trade_fields(trade),
+            )
             return Decimal("0")
 
         pnl = _calculate_realized_pnl(
@@ -376,6 +553,18 @@ class LivePositionManager:
                 f"partial close {close_fraction * 100:.1f}% @ {close_price}, pnl={pnl:.4f}"
             )
             trade.add_attribution(message)
+        log_event(
+            log,
+            logging.INFO,
+            "live_trading.trade_partial_closed",
+            close_fraction=str(close_fraction),
+            close_price=str(close_price),
+            close_quantity=str(close_qty),
+            realized_pnl=str(pnl),
+            reason=reason,
+            is_tp_hit=is_tp_hit,
+            **self._trade_fields(trade),
+        )
         return pnl
 
     def close_trade(
@@ -389,6 +578,14 @@ class LivePositionManager:
     ) -> Decimal:
         """Fully close a trade. Returns realized PnL."""
         if not trade.is_open:
+            log_event(
+                log,
+                logging.INFO,
+                "live_trading.trade_close_ignored",
+                close_price=str(close_price),
+                reason=reason,
+                **self._trade_fields(trade),
+            )
             return Decimal("0")
         pnl = _calculate_realized_pnl(
             side=trade.side,
@@ -415,6 +612,16 @@ class LivePositionManager:
             message.action = "closed"
             message.notes.append(f"closed @ {close_price}, pnl={pnl:.4f}")
             trade.add_attribution(message)
+        log_event(
+            log,
+            logging.INFO,
+            "live_trading.trade_closed",
+            close_price=str(close_price),
+            realized_pnl=str(pnl),
+            reason=reason,
+            fee_rate_pct=str(fee_rate_pct),
+            **self._trade_fields(trade),
+        )
         return pnl
 
 

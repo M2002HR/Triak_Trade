@@ -27,6 +27,7 @@ from triak_trade.backtesting.directives import (
 )
 from triak_trade.backtesting.strategies.registry import load_strategy
 from triak_trade.config.settings import Settings
+from triak_trade.core.logging import log_event, safe_preview
 from triak_trade.core.symbols import canonical_market_symbol
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, SignalStatus, TradeSide
 from triak_trade.domain.ids import make_signal_id
@@ -152,9 +153,79 @@ class LiveTradingEngine:
         self._strategy: Any = None
         self._validator = ParsedSignalValidator()
 
+    def _log_event(self, level: int, event: str, /, **fields: Any) -> None:
+        log_event(
+            log,
+            level,
+            event,
+            session_id=self.session.session_id,
+            trading_mode=self.session.trading_mode,
+            session_status=self.session.status,
+            **fields,
+        )
+
+    @staticmethod
+    def _decimal_text(value: Decimal | None) -> str | None:
+        return str(value) if value is not None else None
+
+    def _message_log_fields(self, message: RawTelegramMessage) -> dict[str, Any]:
+        return {
+            "channel_id": message.channel_id,
+            "channel_username": message.channel_username,
+            "message_id": message.message_id,
+            "reply_to_msg_id": message.reply_to_msg_id,
+            "message_date": message.date.isoformat(),
+            "message_preview": safe_preview(message.text),
+            "has_media": bool(message.raw_payload.get("has_media")),
+            "has_context_images": bool(message.raw_payload.get("context_image_message_ids")),
+        }
+
+    def _trade_log_fields(self, trade: LiveTrade) -> dict[str, Any]:
+        return {
+            "trade_id": trade.trade_id,
+            "trade_signal_id": trade.signal_id,
+            "symbol": trade.symbol,
+            "exchange_symbol": trade.exchange_symbol,
+            "side": trade.side,
+            "trade_status": trade.status,
+            "leverage": trade.leverage,
+            "entry_price": self._decimal_text(trade.entry_price),
+            "quantity": self._decimal_text(trade.quantity),
+            "remaining_quantity": self._decimal_text(trade.remaining_quantity),
+            "mark_price": self._decimal_text(trade.mark_price),
+            "stop_loss": self._decimal_text(trade.stop_loss),
+            "targets_hit": trade.targets_hit,
+            "take_profit_count": len(trade.take_profits),
+            "sl_order_id": trade.sl_order_id,
+            "tp_order_count": len(trade.tp_order_ids),
+        }
+
+    def _parsed_signal_log_fields(self, parsed: ParsedSignal) -> dict[str, Any]:
+        return {
+            "action": parsed.action.value,
+            "symbol": parsed.symbol,
+            "side": parsed.side.value,
+            "entry_type": parsed.entry_type.value,
+            "entry_low": self._decimal_text(parsed.entry_low),
+            "entry_high": self._decimal_text(parsed.entry_high),
+            "stop_loss": self._decimal_text(parsed.stop_loss),
+            "take_profit_count": len(parsed.take_profits),
+            "take_profits": [str(item) for item in parsed.take_profits],
+            "leverage": parsed.leverage,
+            "confidence": str(parsed.confidence),
+        }
+
     # ── Public API ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        self._log_event(
+            logging.INFO,
+            "live_trading.session_starting",
+            channel_count=len(self.session.channels),
+            channels=self.session.channels,
+            use_ai=self.session.use_ai,
+            strategy_key=self.session.strategy_key,
+        )
         self._running = True
         self._loop = asyncio.get_running_loop()
         self._setup_components()
@@ -167,11 +238,12 @@ class LiveTradingEngine:
         self.session.mark_running()
         self.store.save_session(self.session)
         self._emit_session_update()
-        log.info(
-            "LiveTradingEngine started session=%s channels=%s mode=%s",
-            self.session.session_id,
-            self.session.channels,
-            self.session.trading_mode,
+        self._log_event(
+            logging.INFO,
+            "live_trading.session_started",
+            channel_count=len(self.session.channels),
+            channels=self.session.channels,
+            open_trade_count=len(self._open_trades),
         )
 
         bg_tasks = [
@@ -188,10 +260,19 @@ class LiveTradingEngine:
             )
             await self._message_task
         except asyncio.CancelledError:
-            log.info("LiveTradingEngine: Telegram poller cancelled (stop requested)")
+            self._log_event(
+                logging.INFO,
+                "live_trading.telegram_poller_cancelled",
+            )
         except Exception as exc:
             error = f"Telegram poller failed: {type(exc).__name__}: {exc}"
-            log.error("LiveTradingEngine: %s", error, exc_info=True)
+            self._log_event(
+                logging.ERROR,
+                "live_trading.telegram_poller_failed",
+                error=error,
+                error_type=type(exc).__name__,
+            )
+            log.exception("Live trading telegram poller failed")
             self.session.mark_stopped(error=error)
             self.store.save_session(self.session)
             self._emit_session_update()
@@ -206,10 +287,18 @@ class LiveTradingEngine:
             self.session.mark_stopped()
             self.store.save_session(self.session)
             self._emit_session_update()
+        self._log_event(
+            logging.INFO,
+            "live_trading.session_stopped",
+            stopped_at=self.session.stopped_at.isoformat() if self.session.stopped_at else None,
+            open_trade_count=len(self._open_trades),
+            total_messages_processed=self.session.total_messages_processed,
+        )
 
     def stop(self) -> None:
         """Thread-safe stop — cancels the Telegram polling task."""
         self._running = False
+        self._log_event(logging.INFO, "live_trading.stop_requested")
         loop = self._loop
         if loop and not loop.is_closed():
             asyncio.run_coroutine_threadsafe(self._async_stop(), loop)
@@ -220,12 +309,13 @@ class LiveTradingEngine:
                 if self._owns_telegram_client:
                     await self._telegram_client.stop()
             except Exception:
-                pass
+                self._log_event(logging.WARNING, "live_trading.telegram_client_stop_failed")
         if self._message_task and not self._message_task.done():
             self._message_task.cancel()
         self.session.mark_stopped()
         self.store.save_session(self.session)
         self._emit_session_update()
+        self._log_event(logging.INFO, "live_trading.stop_completed")
 
     def get_snapshot(self) -> LiveTradingSnapshot:
         open_trades = list(self._open_trades.values())
@@ -246,6 +336,11 @@ class LiveTradingEngine:
         s = self.settings
         self._pm = LivePositionManager(s)
         self._strategy = load_strategy(self.session.strategy_key)
+        self._log_event(
+            logging.INFO,
+            "live_trading.components_initializing",
+            strategy_key=self.session.strategy_key,
+        )
 
         # Build AI or regex classifier
         use_ai = self.session.use_ai and s.AI_GATEWAY_ENABLED and s.AI_CLASSIFIER_ENABLED
@@ -265,19 +360,35 @@ class LiveTradingEngine:
                     gateway_client=gateway,
                     settings=s,
                 )
-                log.info("LiveTradingEngine: using AI classifier")
+                self._log_event(
+                    logging.INFO,
+                    "live_trading.classifier_selected",
+                    classifier="ai",
+                )
             except Exception as exc:
                 if self._must_fail_closed_without_ai():
                     raise RuntimeError(
                         "AI classifier init failed for exchange execution session"
                     ) from exc
-                log.warning("AI classifier init failed, falling back to regex", exc_info=True)
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.classifier_fallback",
+                    requested_classifier="ai",
+                    fallback_classifier="regex",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                log.exception("AI classifier init failed, falling back to regex")
                 self._classifier = RegexMessageClassifier()
         else:
             if self._must_fail_closed_without_ai():
                 raise RuntimeError("AI classifier is required for exchange execution session")
             self._classifier = RegexMessageClassifier()
-            log.info("LiveTradingEngine: using regex classifier")
+            self._log_event(
+                logging.INFO,
+                "live_trading.classifier_selected",
+                classifier="regex",
+            )
 
         if self._telegram_client is None:
             self._telegram_client = TelethonTelegramClient(settings=s)
@@ -285,8 +396,18 @@ class LiveTradingEngine:
         # Build futures client for both demo (mark prices) and live (orders)
         try:
             self._futures_client = build_futures_client_from_settings(s)
-        except Exception:
-            log.warning("Failed to build futures client", exc_info=True)
+            self._log_event(
+                logging.INFO,
+                "live_trading.futures_client_ready",
+            )
+        except Exception as exc:
+            self._log_event(
+                logging.WARNING,
+                "live_trading.futures_client_init_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            log.exception("Failed to build futures client")
 
     def _restore_runtime_state(self) -> None:
         self._open_trades = {
@@ -337,14 +458,22 @@ class LiveTradingEngine:
                 self._signal_state_from_snapshot(snapshot),
                 pending=snapshot.status == SignalStatus.PENDING_CONSOLIDATION.value,
             )
+        self._log_event(
+            logging.INFO,
+            "live_trading.runtime_state_restored",
+            open_trade_count=len(self._open_trades),
+            trace_count=len(self._message_traces),
+            context_count=len(self._contexts),
+            restored_last_seen_count=len(self._last_seen_message_ids),
+        )
 
     async def _poll_messages_loop(self) -> None:
         poll_seconds = max(1, int(self.settings.LIVE_TRADING_TELEGRAM_POLL_SECONDS))
-        log.info(
-            "LiveTradingEngine Telegram poller active session=%s channels=%s interval=%ss",
-            self.session.session_id,
-            self.session.channels,
-            poll_seconds,
+        self._log_event(
+            logging.INFO,
+            "live_trading.telegram_poller_started",
+            channels=self.session.channels,
+            poll_interval_seconds=poll_seconds,
         )
         while self._running:
             await self._poll_messages_once()
@@ -359,13 +488,15 @@ class LiveTradingEngine:
                 return
             try:
                 await self._poll_channel_messages(channel)
-            except Exception:
-                log.warning(
-                    "LiveTradingEngine poll failed session=%s channel=%s",
-                    self.session.session_id,
-                    channel,
-                    exc_info=True,
+            except Exception as exc:
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.channel_poll_failed",
+                    channel=channel,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
                 )
+                log.exception("Live trading channel poll failed")
         self._record_poll_heartbeat()
 
     async def _bootstrap_channel_cursors(self) -> None:
@@ -378,23 +509,30 @@ class LiveTradingEngine:
                     channel,
                     limit=1,
                 )
-            except Exception:
-                log.warning(
-                    "LiveTradingEngine cursor bootstrap failed session=%s channel=%s",
-                    self.session.session_id,
-                    channel,
-                    exc_info=True,
+            except Exception as exc:
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.cursor_bootstrap_failed",
+                    channel=channel,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
                 )
+                log.exception("Live trading cursor bootstrap failed")
                 continue
             if not latest_messages:
+                self._log_event(
+                    logging.DEBUG,
+                    "live_trading.cursor_bootstrap_empty",
+                    channel=channel,
+                )
                 continue
             latest_message_id = max(item.message_id for item in latest_messages)
             self._last_seen_message_ids[channel] = latest_message_id
-            log.info(
-                "LiveTradingEngine bootstrapped cursor session=%s channel=%s last_seen=%d",
-                self.session.session_id,
-                channel,
-                latest_message_id,
+            self._log_event(
+                logging.INFO,
+                "live_trading.cursor_bootstrapped",
+                channel=channel,
+                last_seen_message_id=latest_message_id,
             )
 
     async def _poll_channel_messages(self, channel: str) -> None:
@@ -413,14 +551,21 @@ class LiveTradingEngine:
             )
             self._channel_poll_anchor[channel] = _utc_now()
         if not messages:
+            self._log_event(
+                logging.DEBUG,
+                "live_trading.channel_poll_empty",
+                channel=channel,
+                last_seen_message_id=last_seen,
+            )
             return
-        log.info(
-            "LiveTradingEngine poll fetched session=%s channel=%s "
-            "message_count=%d last_seen_before=%d",
-            self.session.session_id,
-            channel,
-            len(messages),
-            last_seen,
+        self._log_event(
+            logging.INFO,
+            "live_trading.channel_poll_fetched",
+            channel=channel,
+            message_count=len(messages),
+            last_seen_before=last_seen,
+            first_message_id=messages[0].message_id,
+            last_message_id=messages[-1].message_id,
         )
         for message in messages:
             current_seen = self._last_seen_message_ids.get(channel, 0)
@@ -445,6 +590,12 @@ class LiveTradingEngine:
         self.session.last_update_at = now
         self.store.save_session(self.session)
         self._emit_session_update()
+        self._log_event(
+            logging.DEBUG,
+            "live_trading.poll_heartbeat_recorded",
+            open_trade_count=len(self._open_trades),
+            total_messages_processed=self.session.total_messages_processed,
+        )
 
     def _signal_state_from_snapshot(self, snapshot: LiveSignalSnapshot) -> SignalState:
         parsed_signal: ParsedSignal | None = None
@@ -516,18 +667,31 @@ class LiveTradingEngine:
         if not self._running:
             return
         try:
-            await self._process_message(message)
-        except Exception:
-            log.error(
-                "Error processing message %s from %s",
-                message.message_id,
-                message.channel_id,
-                exc_info=True,
+            self._log_event(
+                logging.INFO,
+                "live_trading.message_received",
+                **self._message_log_fields(message),
             )
+            await self._process_message(message)
+        except Exception as exc:
+            self._log_event(
+                logging.ERROR,
+                "live_trading.message_processing_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._message_log_fields(message),
+            )
+            log.exception("Error processing live trading message")
 
     async def _process_message(self, message: RawTelegramMessage) -> None:
         self.session.total_messages_processed += 1
         channel_label = self._channel_label(message.channel_id)
+        self._log_event(
+            logging.INFO,
+            "live_trading.message_processing_started",
+            total_messages_processed=self.session.total_messages_processed,
+            **self._message_log_fields(message),
+        )
 
         # Build message trace for dashboard feed
         trace = LiveMessageTrace(
@@ -554,6 +718,18 @@ class LiveTradingEngine:
         assert self._classifier is not None
         classified = self._classifier.classify(message, context)
         parsed = classified.parsed_signal
+        self._log_event(
+            logging.INFO,
+            "live_trading.message_classified",
+            classification=(
+                classified.classification
+                if hasattr(classified, "classification")
+                else None
+            ),
+            raw_related_signal_id=getattr(classified, "related_signal_id", None),
+            **self._message_log_fields(message),
+            **self._parsed_signal_log_fields(parsed),
+        )
 
         # ── Text-directive upgrades (matches backtest real_runner logic) ──────
         # 1. close_all overrides ANY AI action, even IGNORE/UNKNOWN
@@ -629,6 +805,16 @@ class LiveTradingEngine:
             trace.debug_notes = [
                 note for note in trace.debug_notes if note != "no_signal_for_followup"
             ]
+        self._log_event(
+            logging.INFO,
+            "live_trading.message_correlated",
+            related_signal_id=related_signal_id,
+            correlation_method=trace.correlation_method,
+            correlation_note=trace.correlation_note,
+            debug_notes=trace.debug_notes,
+            **self._message_log_fields(message),
+            **self._parsed_signal_log_fields(parsed),
+        )
 
         # ── Route by effective action ─────────────────────────────────────────
         if parsed.action in (SignalAction.IGNORE, SignalAction.UNKNOWN):
@@ -638,6 +824,23 @@ class LiveTradingEngine:
             self._push_trace(trace)
             self.store.save_session(self.session)
             self._emit_session_update()
+            self._log_event(
+                logging.INFO,
+                "live_trading.message_ignored",
+                final_status=trace.final_status,
+                effect_summary=trace.effect_summary,
+                **self._message_log_fields(message),
+            )
+            self._log_event(
+                logging.INFO,
+                "live_trading.message_processing_completed",
+                final_status=trace.final_status,
+                effect_summary=trace.effect_summary,
+                signal_id=trace.signal_id,
+                trade_id=trace.trade_id,
+                impact_notes=trace.impact_notes,
+                **self._message_log_fields(message),
+            )
             return
 
         # close_all closes EVERY open trade regardless of correlation (matches backtest simulator)
@@ -646,6 +849,23 @@ class LiveTradingEngine:
             self._push_trace(trace)
             self.store.save_session(self.session)
             self._emit_session_update()
+            self._log_event(
+                logging.INFO,
+                "live_trading.close_all_processed",
+                final_status=trace.final_status,
+                effect_summary=trace.effect_summary,
+                **self._message_log_fields(message),
+            )
+            self._log_event(
+                logging.INFO,
+                "live_trading.message_processing_completed",
+                final_status=trace.final_status,
+                effect_summary=trace.effect_summary,
+                signal_id=trace.signal_id,
+                trade_id=trace.trade_id,
+                impact_notes=trace.impact_notes,
+                **self._message_log_fields(message),
+            )
             return
 
         if parsed.action is SignalAction.OPEN and related_signal_id is None:
@@ -672,7 +892,14 @@ class LiveTradingEngine:
                 f"New {parsed.side.value.upper()} signal on {parsed.symbol} — "
                 f"waiting {self.settings.SIGNAL_CONSOLIDATION_SECONDS}s consolidation"
             )
-            log.info("Signal queued: %s %s %s", signal_id, parsed.symbol, parsed.side.value)
+            self._log_event(
+                logging.INFO,
+                "live_trading.signal_queued_for_consolidation",
+                signal_id=signal_id,
+                consolidation_seconds=self.settings.SIGNAL_CONSOLIDATION_SECONDS,
+                **self._message_log_fields(message),
+                **self._parsed_signal_log_fields(parsed),
+            )
 
         elif parsed.action is SignalAction.OPEN and related_signal_id is not None:
             # AI says OPEN but message is correlated with an existing signal.
@@ -780,10 +1007,28 @@ class LiveTradingEngine:
             else:
                 trace.final_status = "no_match"
                 trace.effect_summary = "Follow-up with no matching open signal"
+                self._log_event(
+                    logging.INFO,
+                    "live_trading.followup_unmatched",
+                    final_status=trace.final_status,
+                    effect_summary=trace.effect_summary,
+                    **self._message_log_fields(message),
+                    **self._parsed_signal_log_fields(parsed),
+                )
 
         self._push_trace(trace)
         self.store.save_session(self.session)
         self._emit_session_update()
+        self._log_event(
+            logging.INFO,
+            "live_trading.message_processing_completed",
+            final_status=trace.final_status,
+            effect_summary=trace.effect_summary,
+            signal_id=trace.signal_id,
+            trade_id=trace.trade_id,
+            impact_notes=trace.impact_notes,
+            **self._message_log_fields(message),
+        )
 
     async def _prepare_message_for_classification(
         self,
@@ -928,6 +1173,12 @@ class LiveTradingEngine:
         channel_label: str,
     ) -> None:
         """Close every open trade — matches BacktestSimulator close_all behavior."""
+        self._log_event(
+            logging.INFO,
+            "live_trading.close_all_started",
+            open_trade_count=len(self._open_trades),
+            **self._message_log_fields(message),
+        )
         if not self._open_trades:
             trace.final_status = "no_open_positions"
             trace.effect_summary = "Close-all detected but no open trades"
@@ -955,7 +1206,13 @@ class LiveTradingEngine:
                     )
                 except Exception as exc:
                     trade.last_exchange_sync_error = str(exc)
-                    log.warning("Close-all exchange close failed for %s: %s", trade.trade_id, exc)
+                    self._log_event(
+                        logging.WARNING,
+                        "live_trading.close_all_trade_failed",
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        **self._trade_log_fields(trade),
+                    )
                     continue
             else:
                 mark = await self._get_mark_price(trade.symbol)
@@ -980,6 +1237,12 @@ class LiveTradingEngine:
 
         trace.final_status = "closed_all_trades"
         trace.effect_summary = f"Close-all: closed {closed_count} trade(s)"
+        self._log_event(
+            logging.INFO,
+            "live_trading.close_all_completed",
+            closed_count=closed_count,
+            **self._message_log_fields(message),
+        )
 
     # ── Follow-up Handler ──────────────────────────────────────────────────
 
@@ -996,6 +1259,13 @@ class LiveTradingEngine:
         if trade is None:
             trace.final_status = "no_open_trade"
             trace.effect_summary = f"Signal {signal_id} has no open trade to update"
+            self._log_event(
+                logging.INFO,
+                "live_trading.followup_ignored_no_open_trade",
+                signal_id=signal_id,
+                **self._message_log_fields(message),
+                **self._parsed_signal_log_fields(parsed),
+            )
             return
         if self._uses_exchange_execution():
             trade_is_live = await self._ensure_trade_still_open_on_exchange(
@@ -1007,6 +1277,13 @@ class LiveTradingEngine:
                 trace.final_status = "no_open_trade"
                 trace.effect_summary = (
                     f"Signal {signal_id} has no live exchange position to update"
+                )
+                self._log_event(
+                    logging.INFO,
+                    "live_trading.followup_detached_missing_exchange_position",
+                    signal_id=signal_id,
+                    **self._trade_log_fields(trade),
+                    **self._message_log_fields(message),
                 )
                 return
 
@@ -1024,6 +1301,18 @@ class LiveTradingEngine:
         move_to_entry = detect_move_stop_to_entry(message.text)
         close_fraction_raw = extract_close_fraction(message.text)
         effective_action = apply_text_directive_action(parsed.action, message.text)
+        self._log_event(
+            logging.INFO,
+            "live_trading.followup_processing",
+            signal_id=signal_id,
+            requested_action=parsed.action.value,
+            effective_action=effective_action.value,
+            move_to_entry=move_to_entry,
+            close_all=close_all,
+            close_fraction=str(close_fraction_raw) if close_fraction_raw is not None else None,
+            **self._trade_log_fields(trade),
+            **self._message_log_fields(message),
+        )
 
         assert self._pm is not None
         fee_rate = self.settings.LIVE_TRADING_FEE_RATE_PCT
@@ -1312,6 +1601,15 @@ class LiveTradingEngine:
             self._sync_signal_snapshot(context=context, state=state, trade=trade)
         self.store.save_trade(trade)
         self._emit_trade_update(trade)
+        self._log_event(
+            logging.INFO,
+            "live_trading.followup_processed",
+            signal_id=signal_id,
+            final_status=trace.final_status,
+            effect_summary=trace.effect_summary,
+            impact_notes=trace.impact_notes,
+            **self._trade_log_fields(trade),
+        )
 
     # ── Consolidation Tick ─────────────────────────────────────────────────
 
@@ -1338,6 +1636,13 @@ class LiveTradingEngine:
             return
 
         parsed = state.current_signal
+        self._log_event(
+            logging.INFO,
+            "live_trading.signal_open_evaluation_started",
+            signal_id=signal_id,
+            signal_status=state.status.value,
+            **self._parsed_signal_log_fields(parsed),
+        )
         parsed = self._normalize_missing_entry_to_market(parsed)
         normalized_symbol = canonical_market_symbol(parsed.symbol)
         if normalized_symbol is not None and normalized_symbol != parsed.symbol:
@@ -1348,6 +1653,12 @@ class LiveTradingEngine:
             state.status = SignalStatus.INVALID
             context.add_signal(state, pending=False)
             self._sync_signal_snapshot(context=context, state=state, trade=None)
+            self._log_event(
+                logging.WARNING,
+                "live_trading.signal_rejected",
+                signal_id=signal_id,
+                reason="missing_symbol",
+            )
             return
 
         if self._futures_client is not None:
@@ -1365,6 +1676,14 @@ class LiveTradingEngine:
                     status="invalid_symbol",
                     note=str(exc),
                 )
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.signal_rejected",
+                    signal_id=signal_id,
+                    reason="invalid_exchange_symbol",
+                    error=str(exc),
+                    **self._parsed_signal_log_fields(parsed),
+                )
                 return
 
         # Get current mark price for MARKET entries
@@ -1379,7 +1698,14 @@ class LiveTradingEngine:
             )
         parsed, geometry_error = self._normalize_or_reject_open_geometry(parsed)
         if geometry_error is not None:
-            log.debug("Signal %s rejected by open geometry checks: %s", signal_id, geometry_error)
+            self._log_event(
+                logging.INFO,
+                "live_trading.signal_rejected",
+                signal_id=signal_id,
+                reason="invalid_geometry",
+                error=geometry_error,
+                **self._parsed_signal_log_fields(parsed),
+            )
             state.current_signal = parsed
             state.status = SignalStatus.INVALID
             context.add_signal(state, pending=False)
@@ -1392,7 +1718,14 @@ class LiveTradingEngine:
             return
         ok, errors = self._validator.validate_for_backtest_open(parsed)
         if not ok:
-            log.debug("Signal %s failed validation: %s", signal_id, errors)
+            self._log_event(
+                logging.INFO,
+                "live_trading.signal_rejected",
+                signal_id=signal_id,
+                reason="validator_rejected",
+                validation_errors=str(errors),
+                **self._parsed_signal_log_fields(parsed),
+            )
             state.current_signal = parsed
             state.status = SignalStatus.INVALID
             context.add_signal(state, pending=False)
@@ -1464,6 +1797,13 @@ class LiveTradingEngine:
         context: ChannelContext,
     ) -> None:
         assert self._pm is not None and self._strategy is not None
+        self._log_event(
+            logging.INFO,
+            "live_trading.position_open_started",
+            signal_id=signal_id,
+            open_trade_count=len(self._open_trades),
+            **self._parsed_signal_log_fields(parsed),
+        )
 
         if self.settings.KILL_SWITCH_ENABLED:
             state.status = SignalStatus.INVALID
@@ -1472,6 +1812,13 @@ class LiveTradingEngine:
             self._emit_trace_update(
                 signal_id=signal_id,
                 status="kill_switch_blocked",
+                note=self.settings.KILL_SWITCH_REASON or "Kill Switch is active",
+            )
+            self._log_event(
+                logging.WARNING,
+                "live_trading.position_open_blocked",
+                signal_id=signal_id,
+                reason="kill_switch",
                 note=self.settings.KILL_SWITCH_REASON or "Kill Switch is active",
             )
             return
@@ -1486,6 +1833,13 @@ class LiveTradingEngine:
                     "LIVE_TRADING_MAX_CONCURRENT_POSITIONS reached: "
                     f"{self.settings.LIVE_TRADING_MAX_CONCURRENT_POSITIONS}"
                 ),
+            )
+            self._log_event(
+                logging.WARNING,
+                "live_trading.position_open_blocked",
+                signal_id=signal_id,
+                reason="max_concurrent_positions",
+                max_positions=self.settings.LIVE_TRADING_MAX_CONCURRENT_POSITIONS,
             )
             return
 
@@ -1514,12 +1868,32 @@ class LiveTradingEngine:
                 strategy=self._strategy,
             )
         except ValueError as exc:
-            log.warning("Cannot size position %s: %s", signal_id, exc)
+            self._log_event(
+                logging.WARNING,
+                "live_trading.position_open_rejected",
+                signal_id=signal_id,
+                reason="position_sizing_failed",
+                error=str(exc),
+                current_balance=str(current_balance),
+                **self._parsed_signal_log_fields(parsed),
+            )
             state.status = SignalStatus.INVALID
             context.add_signal(state, pending=False)
             self._sync_signal_snapshot(context=context, state=state, trade=None)
             self._emit_trace_update(signal_id=signal_id, status="invalid_sizing", note=str(exc))
             return
+        self._log_event(
+            logging.INFO,
+            "live_trading.position_sizing_completed",
+            signal_id=signal_id,
+            current_balance=str(current_balance),
+            sized_quantity=str(sizing.quantity),
+            margin=str(sizing.margin),
+            leverage=sizing.leverage,
+            stop_loss=self._decimal_text(sizing.stop_loss),
+            take_profit_count=len(sizing.take_profits),
+            notes=sizing.notes,
+        )
 
         trade = self._pm.create_trade(
             session=self.session,
@@ -1539,7 +1913,14 @@ class LiveTradingEngine:
             try:
                 await self._real_open_position(trade)
             except Exception as exc:
-                log.error("Real order failed for trade %s: %s", trade.trade_id, exc)
+                self._log_event(
+                    logging.ERROR,
+                    "live_trading.real_order_failed",
+                    signal_id=signal_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    **self._trade_log_fields(trade),
+                )
                 trade.status = "closed"
                 trade.close_reason = f"order_failed: {exc}"
                 trade.closed_at = _utc_now()
@@ -1575,10 +1956,12 @@ class LiveTradingEngine:
             ),
             trade_id=trade.trade_id,
         )
-        log.info(
-            "Opened trade %s %s %s @ %s lev=%sx",
-            trade.trade_id, trade.symbol, trade.side,
-            trade.entry_price, trade.leverage,
+        self._log_event(
+            logging.INFO,
+            "live_trading.position_opened",
+            signal_id=signal_id,
+            channel_id=state.channel_id,
+            **self._trade_log_fields(trade),
         )
 
     # ── Price Refresh ──────────────────────────────────────────────────────
@@ -1604,6 +1987,13 @@ class LiveTradingEngine:
             p = await self._get_mark_price(sym)
             if p:
                 price_map[sym] = p
+        self._log_event(
+            logging.DEBUG,
+            "live_trading.price_refresh_prices_loaded",
+            symbol_count=len(symbols),
+            refreshed_symbol_count=len(price_map),
+            symbols=symbols,
+        )
 
         to_remove: list[str] = []
         for signal_id, trade in list(self._open_trades.items()):
@@ -1635,7 +2025,13 @@ class LiveTradingEngine:
                             )
                         except Exception as exc:
                             trade.last_exchange_sync_error = str(exc)
-                            log.warning("Exchange SL close failed for %s: %s", trade.trade_id, exc)
+                            self._log_event(
+                                logging.WARNING,
+                                "live_trading.exchange_stop_loss_close_failed",
+                                error_type=type(exc).__name__,
+                                error=str(exc),
+                                **self._trade_log_fields(trade),
+                            )
                             break
                     else:
                         self._pm.close_trade(
@@ -1673,6 +2069,13 @@ class LiveTradingEngine:
         self.session.last_update_at = _utc_now()
         self.store.save_session(self.session)
         self._emit_session_update()
+        self._log_event(
+            logging.DEBUG,
+            "live_trading.price_refresh_completed",
+            open_trade_count=len(self._open_trades),
+            removed_trade_count=len(to_remove),
+            total_unrealized_pnl=str(self.session.total_unrealized_pnl),
+        )
 
     async def _apply_tp_hit(self, trade: LiveTrade, mark: Decimal, event: str) -> None:
         assert self._pm is not None and self._strategy is not None
@@ -1770,12 +2173,26 @@ class LiveTradingEngine:
             # Store user_id once
             if info.user_id and not getattr(self.session, "_user_id", None):
                 self.session.label = self.session.label or f"User {info.user_id}"
+            self._log_event(
+                logging.INFO,
+                "live_trading.account_refreshed",
+                use_demo_account=use_demo_account,
+                wallet_balance=str(self.session.account_info.wallet_balance),
+                available_balance=str(self.session.account_info.available_balance),
+                unrealized_pnl=str(self.session.account_info.unrealized_pnl),
+            )
         except Exception as exc:
             self.session.account_info = LiveAccountInfo(
                 error=f"account fetch failed: {exc}"
             )
             self.session.exchange_snapshot = None
             self.store.save_session(self.session)
+            self._log_event(
+                logging.WARNING,
+                "live_trading.account_refresh_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return
         try:
             await self._sync_exchange_state()
@@ -1783,6 +2200,12 @@ class LiveTradingEngine:
             self.session.exchange_snapshot = self.session.exchange_snapshot or None
             if self.session.exchange_snapshot is not None:
                 self.session.exchange_snapshot.error = f"exchange sync failed: {exc}"
+            self._log_event(
+                logging.WARNING,
+                "live_trading.exchange_state_sync_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         self.store.save_session(self.session)
 
     def _live_balance_for_sizing(self) -> Decimal:
@@ -1811,6 +2234,12 @@ class LiveTradingEngine:
     async def _real_open_position(self, trade: LiveTrade) -> None:
         assert self._futures_client is not None
         use_demo_symbol = self._use_demo_exchange_symbol()
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_open_started",
+            use_demo_symbol=use_demo_symbol,
+            **self._trade_log_fields(trade),
+        )
         trade.exchange_symbol = to_exchange_futures_symbol(
             trade.symbol,
             use_demo_symbol=use_demo_symbol,
@@ -1830,7 +2259,13 @@ class LiveTradingEngine:
         except Exception as exc:
             if self.settings.LIVE_TRADING_FAIL_CLOSED_ON_LEVERAGE_SYNC_ERROR:
                 raise ValueError(f"set_leverage failed for {trade.symbol}: {exc}") from exc
-            log.warning("set_leverage failed for %s: %s", trade.symbol, exc)
+            self._log_event(
+                logging.WARNING,
+                "live_trading.exchange_leverage_sync_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._trade_log_fields(trade),
+            )
             trade.last_exchange_sync_error = str(exc)
 
         if trade.side == "long":
@@ -1887,8 +2322,14 @@ class LiveTradingEngine:
         trade.last_exchange_sync_error = None
         try:
             await self._refresh_account()
-        except Exception:
-            log.debug("Account refresh after open failed", exc_info=True)
+        except Exception as exc:
+            self._log_event(
+                logging.DEBUG,
+                "live_trading.account_refresh_after_open_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._trade_log_fields(trade),
+            )
         try:
             await self._ensure_trade_protection_after_open(trade)
         except Exception as exc:
@@ -1909,13 +2350,20 @@ class LiveTradingEngine:
                     "Failed to set trading protection; position was flattened automatically: "
                     f"{exc}"
                 ) from exc
-            log.warning("Failed to set trading stop for %s: %s", trade.trade_id, exc)
-        log.info(
-            "Real order placed: %s side=%s qty=%s avg_price=%s",
-            confirmed_order.order_id,
-            trade.side,
-            confirmed_order.executed_qty,
-            trade.entry_price,
+            self._log_event(
+                logging.WARNING,
+                "live_trading.exchange_protection_sync_failed_after_open",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._trade_log_fields(trade),
+            )
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_open_completed",
+            order_id=confirmed_order.order_id,
+            executed_contract_quantity=str(confirmed_order.executed_qty),
+            fill_count=len(fills),
+            **self._trade_log_fields(trade),
         )
 
     async def _ensure_trade_protection_after_open(self, trade: LiveTrade) -> None:
@@ -1948,6 +2396,15 @@ class LiveTradingEngine:
                 trade.protection_sync_failures += 1
                 trade.last_protection_sync_error_at = _utc_now()
                 trade.last_exchange_sync_error = str(exc)
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.exchange_protection_sync_attempt_failed",
+                    attempt=attempt,
+                    attempts=attempts,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    **self._trade_log_fields(trade),
+                )
                 if await self._exchange_trade_has_minimum_protection(trade):
                     if trade.message_history:
                         trade.message_history[-1].notes.append(
@@ -1962,6 +2419,12 @@ class LiveTradingEngine:
                 trade.protection_sync_failures = 0
                 trade.last_protection_sync_error_at = None
                 trade.last_exchange_sync_error = None
+                self._log_event(
+                    logging.INFO,
+                    "live_trading.exchange_protection_sync_completed",
+                    attempts_used=attempt,
+                    **self._trade_log_fields(trade),
+                )
                 return
         assert last_exc is not None
         raise last_exc
@@ -2412,6 +2875,14 @@ class LiveTradingEngine:
                     trade.margin = original_margin
                     raise
                 last_exc = exc
+                self._log_event(
+                    logging.INFO,
+                    "live_trading.exchange_leverage_candidate_rejected",
+                    requested_leverage=original_leverage,
+                    candidate_leverage=candidate,
+                    error=str(exc),
+                    **self._trade_log_fields(trade),
+                )
                 continue
             if candidate != original_leverage and trade.message_history:
                 trade.message_history[-1].notes.append(
@@ -2419,6 +2890,15 @@ class LiveTradingEngine:
                     f"{original_leverage}x->{trade.leverage}x "
                     f"qty={original_quantity}->{trade.quantity}"
                 )
+            self._log_event(
+                logging.INFO,
+                "live_trading.exchange_leverage_selected",
+                requested_leverage=original_leverage,
+                selected_leverage=trade.leverage,
+                original_quantity=str(original_quantity),
+                selected_quantity=str(trade.quantity),
+                **self._trade_log_fields(trade),
+            )
             return
         trade.leverage = original_leverage
         trade.quantity = original_quantity
@@ -2519,6 +2999,13 @@ class LiveTradingEngine:
         message: MessageAttribution | None = None,
     ) -> _ExchangeCloseResult:
         assert self._futures_client is not None
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_close_started",
+            close_fraction=str(fraction),
+            reason=reason,
+            **self._trade_log_fields(trade),
+        )
         await self._cancel_existing_trade_protection(trade)
         order, requested_quantity = await self._submit_exchange_close_order(trade, fraction)
         confirmed_order, fills = await self._futures_client.wait_for_order_fill(
@@ -2685,18 +3172,38 @@ class LiveTradingEngine:
         trade.exchange_position = exchange_position
         try:
             await self._refresh_account()
-        except Exception:
-            log.debug("Account refresh after close failed", exc_info=True)
+        except Exception as exc:
+            self._log_event(
+                logging.DEBUG,
+                "live_trading.account_refresh_after_close_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._trade_log_fields(trade),
+            )
         if trade.is_open:
             try:
                 await self._sync_trade_protection(trade)
             except Exception as exc:
                 trade.last_exchange_sync_error = str(exc)
-                log.warning(
-                    "Failed to refresh trading stop after close for %s: %s",
-                    trade.trade_id,
-                    exc,
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.exchange_protection_refresh_after_close_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    **self._trade_log_fields(trade),
                 )
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_close_completed",
+            reason=reason,
+            requested_quantity=str(requested_quantity),
+            executed_quantity=str(executed_quantity),
+            realized_pnl=str(realized_pnl),
+            fees=str(fees),
+            average_price=str(avg_price),
+            order_id=",".join(close_order_ids),
+            **self._trade_log_fields(trade),
+        )
         return _ExchangeCloseResult(
             order_id=",".join(close_order_ids),
             status=confirmed_order.status,
@@ -2951,6 +3458,12 @@ class LiveTradingEngine:
                 status=SignalStatus.CLOSED,
                 trade=trade,
             )
+        self._log_event(
+            logging.WARNING,
+            "live_trading.trade_marked_closed_from_exchange_sync",
+            reason=reason,
+            **self._trade_log_fields(trade),
+        )
 
     async def _sync_trade_protection(
         self,
@@ -2961,6 +3474,13 @@ class LiveTradingEngine:
     ) -> None:
         if self._futures_client is None or not trade.is_open:
             return
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_protection_sync_started",
+            refresh_take_profits=refresh_take_profits,
+            refresh_stop_loss=refresh_stop_loss,
+            **self._trade_log_fields(trade),
+        )
         stop_loss, normalized_take_profits = await self._normalize_trade_protection_levels(trade)
         trade.stop_loss = stop_loss
         trade.take_profits = normalized_take_profits
@@ -3036,6 +3556,14 @@ class LiveTradingEngine:
                 )
         await self._refresh_trade_protection_ids(trade)
         self._persist_trade_runtime_state(trade)
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_protection_sync_persisted",
+            normalized_stop_loss=self._decimal_text(stop_loss),
+            normalized_take_profit_count=len(normalized_take_profits),
+            synced_tp_order_count=len(trade.tp_order_ids),
+            **self._trade_log_fields(trade),
+        )
 
     async def _submit_exchange_stop_loss(
         self,
@@ -3056,14 +3584,14 @@ class LiveTradingEngine:
         except Exception as exc:
             if not self._should_retry_stop_loss_without_quantity(exc):
                 raise
-            log.warning(
-                "Retrying trading stop without quantity after sized stop rejection "
-                "trade=%s symbol=%s side=%s quantity=%s error=%s",
-                trade.trade_id,
-                trade.symbol,
-                side,
-                trade.remaining_quantity,
-                exc,
+            self._log_event(
+                logging.WARNING,
+                "live_trading.exchange_stop_loss_retry_without_quantity",
+                stop_order_side=side,
+                requested_stop_loss=str(stop_loss),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._trade_log_fields(trade),
             )
             if trade.message_history:
                 trade.message_history[-1].notes.append(
@@ -3136,6 +3664,13 @@ class LiveTradingEngine:
     ) -> None:
         if self._futures_client is None:
             return
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_protection_cancel_started",
+            cancel_take_profits=cancel_take_profits,
+            cancel_stop_loss=cancel_stop_loss,
+            **self._trade_log_fields(trade),
+        )
         tp_order_prefix = f"triak_tp_{trade.trade_id}_"
         target_close_side = "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
         if cancel_take_profits:
@@ -3150,10 +3685,12 @@ class LiveTradingEngine:
                 )
             except Exception as exc:
                 regular_orders = []
-                log.debug(
-                    "Failed to query existing TP orders for %s before cancel: %s",
-                    trade.trade_id,
-                    exc,
+                self._log_event(
+                    logging.DEBUG,
+                    "live_trading.exchange_tp_query_before_cancel_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    **self._trade_log_fields(trade),
                 )
             for order in regular_orders:
                 if order.side.upper() != target_close_side:
@@ -3171,11 +3708,13 @@ class LiveTradingEngine:
                         use_demo_symbol=self._use_demo_exchange_symbol(),
                     )
                 except Exception as exc:
-                    log.debug(
-                        "Failed to cancel existing TP order %s for %s: %s",
-                        order_id,
-                        trade.trade_id,
-                        exc,
+                    self._log_event(
+                        logging.DEBUG,
+                        "live_trading.exchange_tp_cancel_failed",
+                        order_id=order_id,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        **self._trade_log_fields(trade),
                     )
             trade.tp_order_ids = []
             trade.tp_order_plan = []
@@ -3199,13 +3738,20 @@ class LiveTradingEngine:
                         use_demo_symbol=self._use_demo_exchange_symbol(),
                     )
                 except Exception as exc:
-                    log.debug(
-                        "Failed to cancel existing trading stop %s for %s: %s",
-                        order.order_id,
-                        trade.trade_id,
-                        exc,
+                    self._log_event(
+                        logging.DEBUG,
+                        "live_trading.exchange_stop_cancel_failed",
+                        order_id=order.order_id,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        **self._trade_log_fields(trade),
                     )
             trade.sl_order_id = None
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_protection_cancel_completed",
+            **self._trade_log_fields(trade),
+        )
 
     async def _refresh_trade_protection_ids(self, trade: LiveTrade) -> None:
         if self._futures_client is None:

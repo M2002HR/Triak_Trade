@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -85,6 +86,22 @@ class TestDashboardLiveReadiness:
             assert not readiness.ready
             assert any("Toobit" in issue for issue in readiness.issues)
 
+    def test_readiness_emits_structured_log(self, caplog) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+
+            with caplog.at_level(logging.INFO):
+                readiness = coord.readiness()
+
+            record = next(
+                rec for rec in caplog.records if rec.msg == "dashboard.live_readiness_evaluated"
+            )
+            assert record.ready == readiness.ready
+            assert record.telegram_configured is True
+            assert record.toobit_configured is True
+
 
 class TestDashboardLiveCoordinatorState:
     def test_is_running_false_when_no_engine(self) -> None:
@@ -119,9 +136,14 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
-            with patch(
-                "triak_trade.dashboard.live_runtime.list_available_strategies",
-                return_value=[],
+            with (
+                patch(
+                    "triak_trade.dashboard.live_runtime.list_available_strategies",
+                    return_value=[],
+                ),
+                patch(
+                    "triak_trade.dashboard.live_runtime.log_event",
+                ) as log_event_mock,
             ):
                 coord = DashboardLiveCoordinator(settings=settings)
                 bootstrap = coord.bootstrap()
@@ -129,6 +151,10 @@ class TestDashboardLiveCoordinatorState:
             assert "is_running" in bootstrap
             assert "available_strategies" in bootstrap
             assert bootstrap["live_mode_enabled"] is False
+            assert any(
+                call.args[2] == "dashboard.live_bootstrap_built"
+                for call in log_event_mock.call_args_list
+            )
 
     def test_stop_nonexistent_session_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -137,6 +163,22 @@ class TestDashboardLiveCoordinatorState:
             coord = DashboardLiveCoordinator(settings=settings)
             result = coord.stop_session()
             assert result is None
+
+    def test_save_channel_emits_structured_log(self, caplog) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+
+            with caplog.at_level(logging.INFO):
+                channels = coord.save_channel("https://t.me/demo")
+
+            assert channels
+            record = next(
+                rec for rec in caplog.records if rec.msg == "dashboard.live_channel_saved"
+            )
+            assert record.channel_input == "https://t.me/demo"
+            assert record.total_saved_channels == 1
 
     def test_start_session_rejects_when_feature_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from triak_trade.backtesting.strategies.registry import (
     list_available_strategies,
 )
 from triak_trade.config.settings import Settings
+from triak_trade.core.logging import log_event
 from triak_trade.dashboard.backtest_runtime import normalize_channel_reference
 from triak_trade.dashboard.schemas import (
     SavedChannelEntry,
@@ -41,6 +43,8 @@ from triak_trade.live_trading.models import (
 )
 from triak_trade.live_trading.store import LiveTradingStore
 from triak_trade.telegram.shared_client import SharedTelethonTelegramClient
+
+log = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -91,6 +95,9 @@ class DashboardLiveCoordinator:
         self._threads: dict[str, threading.Thread] = {}
         self._recover_incomplete_sessions()
 
+    def _log_event(self, level: int, event: str, /, **fields: Any) -> None:
+        log_event(log, level, event, **fields)
+
     def live_mode_enabled(self) -> bool:
         return bool(getattr(self.settings, "LIVE_TRADING_LIVE_MODE_ENABLED", False))
 
@@ -121,7 +128,7 @@ class DashboardLiveCoordinator:
         if self.settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER and not ai_ready:
             issues.append("AI classifier is required before enabling live capital execution.")
 
-        return LiveTradingReadiness(
+        readiness = LiveTradingReadiness(
             ready=(
                 live_trading_enabled
                 and telegram_configured
@@ -134,6 +141,18 @@ class DashboardLiveCoordinator:
             ai_ready=ai_ready,
             issues=issues,
         )
+        self._log_event(
+            logging.INFO,
+            "dashboard.live_readiness_evaluated",
+            ready=readiness.ready,
+            issue_count=len(readiness.issues),
+            issues=readiness.issues,
+            live_trading_enabled=readiness.live_trading_enabled,
+            telegram_configured=readiness.telegram_configured,
+            toobit_configured=readiness.toobit_configured,
+            ai_ready=readiness.ai_ready,
+        )
+        return readiness
 
     def bootstrap(self) -> dict[str, Any]:
         strategies = [
@@ -149,7 +168,10 @@ class DashboardLiveCoordinator:
         default_trading_mode = self.settings.LIVE_TRADING_MODE
         if default_trading_mode == "live" and not self.live_mode_enabled():
             default_trading_mode = "demo"
-        return {
+        saved_channels = [
+            item.model_dump(mode="json") for item in self._get_saved_channels_state().channels
+        ]
+        payload = {
             "readiness": self.readiness().model_dump(mode="json"),
             "is_running": self.is_running(),
             "current_session": current_session.model_dump(mode="json") if current_session else None,
@@ -166,13 +188,28 @@ class DashboardLiveCoordinator:
                 and self.settings.AI_CLASSIFIER_ENABLED
             ),
             "default_channels": list(self.settings.LIVE_TRADING_DEFAULT_CHANNELS),
-            "saved_channels": [
-                item.model_dump(mode="json") for item in self._get_saved_channels_state().channels
-            ],
+            "saved_channels": saved_channels,
             "available_strategies": strategies,
         }
+        self._log_event(
+            logging.INFO,
+            "dashboard.live_bootstrap_built",
+            strategy_count=len(strategies),
+            active_session_count=len(active_sessions),
+            saved_channel_count=len(saved_channels),
+        )
+        return payload
 
     def start_session(self, config: LiveSessionConfig) -> LiveSession:
+        self._log_event(
+            logging.INFO,
+            "dashboard.live_start_requested",
+            channels=config.channels,
+            trading_mode=config.trading_mode,
+            risk_per_trade_pct=str(config.risk_per_trade_pct),
+            strategy_key=config.strategy_key,
+            use_ai=config.use_ai,
+        )
         readiness = self.readiness()
         if not readiness.live_trading_enabled:
             raise ValueError("Live trading feature is disabled by configuration.")
@@ -223,26 +260,59 @@ class DashboardLiveCoordinator:
             self._engines[session.session_id] = engine
             self._threads[session.session_id] = worker
         worker.start()
+        self._log_event(
+            logging.INFO,
+            "dashboard.live_session_started",
+            session_id=session.session_id,
+            channels=session.channels,
+            trading_mode=session.trading_mode,
+        )
         return session
 
     def stop_session(self, session_id: str | None = None) -> LiveSession | None:
         target_session_id = session_id or self._current_session_id()
         if not target_session_id:
+            self._log_event(logging.INFO, "dashboard.live_stop_skipped", reason="no_target_session")
             return None
         engine: LiveTradingEngine | None = None
         with self._lock:
             engine = self._engines.get(target_session_id)
         if engine is not None:
             engine.stop()
+            self._log_event(
+                logging.INFO,
+                "dashboard.live_stop_requested",
+                session_id=target_session_id,
+                source="running_engine",
+            )
             return engine.session
         session = self.store.load_session(target_session_id)
         if session is None:
+            self._log_event(
+                logging.INFO,
+                "dashboard.live_stop_skipped",
+                session_id=target_session_id,
+                reason="session_not_found",
+            )
             return None
         if session.status not in {"running", "starting"}:
+            self._log_event(
+                logging.INFO,
+                "dashboard.live_stop_skipped",
+                session_id=target_session_id,
+                reason="session_not_running",
+                status=session.status,
+            )
             return session
         session.mark_stopped(error="Session worker was not running and has been stopped.")
         self.store.save_session(session)
         self._notify_session(session)
+        self._log_event(
+            logging.WARNING,
+            "dashboard.live_session_forced_stopped",
+            session_id=session.session_id,
+            status=session.status,
+        )
         return session
 
     def is_running(self) -> bool:
@@ -488,6 +558,13 @@ class DashboardLiveCoordinator:
         )
         updated = SavedChannelsState(channels=channels[:50])
         self._write_json(self.saved_channels_file, updated.model_dump(mode="json"))
+        self._log_event(
+            logging.INFO,
+            "dashboard.live_channel_saved",
+            channel_input=normalized_input,
+            channel_resolved=resolved,
+            total_saved_channels=len(updated.channels),
+        )
         return [item.model_dump(mode="json") for item in updated.channels]
 
     def remove_channel(self, channel_reference: str) -> list[dict[str, Any]]:
@@ -499,10 +576,22 @@ class DashboardLiveCoordinator:
             ]
         )
         self._write_json(self.saved_channels_file, updated.model_dump(mode="json"))
+        self._log_event(
+            logging.INFO,
+            "dashboard.live_channel_removed",
+            channel_reference=channel_reference,
+            channel_resolved=resolved,
+            total_saved_channels=len(updated.channels),
+        )
         return [item.model_dump(mode="json") for item in updated.channels]
 
     async def fetch_account_info_direct(self) -> dict[str, Any]:
         if not self.readiness().toobit_configured:
+            self._log_event(
+                logging.WARNING,
+                "dashboard.live_account_fetch_blocked",
+                reason="toobit_not_configured",
+            )
             return {
                 "success": False,
                 "error": "Toobit credentials are not configured.",
@@ -513,13 +602,28 @@ class DashboardLiveCoordinator:
             spot_task = asyncio.create_task(futures_client.get_spot_account())
             futures_info, spot_info = await asyncio.gather(futures_task, spot_task)
         except Exception as exc:
+            self._log_event(
+                logging.WARNING,
+                "dashboard.live_account_fetch_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return {
                 "success": False,
                 "error": f"account fetch failed: {type(exc).__name__}: {exc}",
             }
 
         usdt_balance = spot_info.usdt_balance()
-        return {
+        spot_balances = [
+            {
+                "asset": item.asset,
+                "total": str(item.total),
+                "free": str(item.free),
+                "locked": str(item.locked),
+            }
+            for item in spot_info.nonzero_balances()
+        ]
+        payload = {
             "success": True,
             "user_id": futures_info.user_id,
             "api_key_type": futures_info.api_key_type,
@@ -535,30 +639,46 @@ class DashboardLiveCoordinator:
                 "total": str(usdt_balance.total if usdt_balance else Decimal("0")),
                 "free": str(usdt_balance.free if usdt_balance else Decimal("0")),
                 "locked": str(usdt_balance.locked if usdt_balance else Decimal("0")),
-                "all_balances": [
-                    {
-                        "asset": item.asset,
-                        "total": str(item.total),
-                        "free": str(item.free),
-                        "locked": str(item.locked),
-                    }
-                    for item in spot_info.nonzero_balances()
-                ],
+                "all_balances": spot_balances,
             },
         }
+        self._log_event(
+            logging.INFO,
+            "dashboard.live_account_fetch_completed",
+            user_id=futures_info.user_id,
+            spot_balance_count=len(spot_balances),
+        )
+        return payload
 
     def _run_engine(self, session_id: str, engine: LiveTradingEngine) -> None:
         try:
+            self._log_event(
+                logging.INFO,
+                "dashboard.live_engine_thread_started",
+                session_id=session_id,
+            )
             asyncio.run(engine.start())
         except Exception as exc:
             session = self.store.load_session(session_id) or engine.session
             session.mark_stopped(error=f"engine crashed: {type(exc).__name__}: {exc}")
             self.store.save_session(session)
             self._notify_session(session)
+            self._log_event(
+                logging.ERROR,
+                "dashboard.live_engine_thread_failed",
+                session_id=session_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         finally:
             with self._lock:
                 self._engines.pop(session_id, None)
                 self._threads.pop(session_id, None)
+            self._log_event(
+                logging.INFO,
+                "dashboard.live_engine_thread_stopped",
+                session_id=session_id,
+            )
 
     def _current_session_id(self) -> str | None:
         session = self.get_current_session()
@@ -571,6 +691,11 @@ class DashboardLiveCoordinator:
                     error="Dashboard restart interrupted the in-memory worker for this session."
                 )
                 self.store.save_session(session)
+                self._log_event(
+                    logging.WARNING,
+                    "dashboard.live_session_marked_stopped_on_recovery",
+                    session_id=session.session_id,
+                )
                 continue
             recovered_session, engine = build_engine_from_session(
                 session=session,
@@ -589,6 +714,12 @@ class DashboardLiveCoordinator:
                 self._engines[recovered_session.session_id] = engine
                 self._threads[recovered_session.session_id] = worker
             worker.start()
+            self._log_event(
+                logging.INFO,
+                "dashboard.live_session_recovered",
+                session_id=recovered_session.session_id,
+                channels=recovered_session.channels,
+            )
 
     def _get_saved_channels_state(self) -> SavedChannelsState:
         if self.saved_channels_file.exists():

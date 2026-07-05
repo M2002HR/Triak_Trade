@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from tempfile import NamedTemporaryFile
@@ -92,6 +93,27 @@ async def test_cache_fetches_when_empty_and_stores_and_reuses() -> None:
     )
     assert len(result2) == 5
     assert provider.calls == calls_before
+
+
+@pytest.mark.asyncio
+async def test_cache_emits_structured_logs(caplog) -> None:
+    session = _session()
+    repo = CandleRepository(session)
+    candles = _candles()
+    provider = FakeProvider(candles)
+    cache = CandleCacheService(provider=provider, repository=repo)
+
+    with caplog.at_level(logging.INFO):
+        await cache.get_or_fetch_klines(
+            "BTCUSDT",
+            "1m",
+            candles[0].open_time,
+            candles[-1].open_time,
+        )
+
+    events = [rec.msg for rec in caplog.records]
+    assert "market_data.candle_cache_miss" in events
+    assert "market_data.candle_cache_populated" in events
 
 
 @pytest.mark.asyncio

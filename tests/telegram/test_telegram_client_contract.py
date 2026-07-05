@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -59,6 +60,18 @@ def test_telethon_client_instantiation_and_missing_credentials() -> None:
     assert str(client.session_path).endswith(".sessions/triak_trade")
     with pytest.raises(TelegramCredentialError):
         client._validate_credentials()
+
+
+def test_telethon_client_logs_invalid_credentials(caplog) -> None:
+    settings = Settings(TELEGRAM_API_ID=0, TELEGRAM_API_HASH="replace_me")
+    client = TelethonTelegramClient(settings)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(TelegramCredentialError):
+            client._validate_credentials()
+
+    record = next(rec for rec in caplog.records if rec.msg == "telegram.credentials_invalid")
+    assert record.reason == "missing_api_id"
 
 
 def test_telethon_client_falls_back_to_loopback_for_host_docker_internal(
@@ -177,6 +190,64 @@ async def test_telethon_client_ensure_media_payload_downloads_only_caption_media
     assert stub.calls == 1
     assert hydrated.raw_payload["media_downloaded"] is True
     assert hydrated.raw_payload["image_data_urls"]
+
+
+@pytest.mark.asyncio
+async def test_telethon_client_logs_media_download_completed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_API_ID=123,
+        TELEGRAM_API_HASH="hash",
+        TELEGRAM_MEDIA_DOWNLOAD_ENABLED=True,
+    )
+    client = TelethonTelegramClient(settings)
+
+    class SourceMessage:
+        pass
+
+    source = SourceMessage()
+    raw = RawTelegramMessage(
+        channel_id="c",
+        channel_username="u",
+        message_id=77,
+        text="caption",
+        date=datetime.now(timezone.utc),
+        edited_at=None,
+        reply_to_msg_id=None,
+        raw_payload={
+            "has_media": True,
+            "caption_present": True,
+            "has_photo": True,
+            "mime_type": "image/jpeg",
+            "image_data_urls": [],
+        },
+    )
+    client._cache_message(raw, source)
+
+    class StubDownloader:
+        def is_connected(self) -> bool:
+            return True
+
+        async def download_media(self, message: object, file: object = bytes) -> bytes:
+            assert message is source
+            return b"fake-image-bytes"
+
+    async def _return_stub() -> StubDownloader:
+        return StubDownloader()
+
+    monkeypatch.setattr(client, "_ensure_client", _return_stub)
+
+    with caplog.at_level(logging.INFO):
+        hydrated = await client.ensure_media_payload(raw)
+
+    assert hydrated.raw_payload["media_downloaded"] is True
+    record = next(rec for rec in caplog.records if rec.msg == "telegram.media_download_completed")
+    assert record.channel_id == "c"
+    assert record.message_id == 77
+    assert record.image_count == 1
 
 
 @pytest.mark.asyncio
