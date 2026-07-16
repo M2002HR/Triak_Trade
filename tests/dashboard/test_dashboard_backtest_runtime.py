@@ -251,6 +251,11 @@ def test_normalize_channel_reference_accepts_usernames() -> None:
     assert normalize_channel_reference("@Tofan_Trade") == "https://t.me/Tofan_Trade"
 
 
+def test_normalize_channel_reference_preserves_numeric_channel_ids() -> None:
+    assert normalize_channel_reference("2443184591") == "2443184591"
+    assert normalize_channel_reference("-1002443184591") == "-1002443184591"
+
+
 def test_parse_telegram_message_link_extracts_channel_and_message_id() -> None:
     channel, message_id = parse_telegram_message_link("https://t.me/Tofan_Trade/5880")
     assert channel == "https://t.me/Tofan_Trade"

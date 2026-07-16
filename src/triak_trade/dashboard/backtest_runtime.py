@@ -251,6 +251,8 @@ class DashboardBacktestStore:
 
 def normalize_channel_reference(channel_input: str) -> str:
     normalized = channel_input.strip()
+    if normalized.lstrip("-").isdigit():
+        return normalized
     if normalized.startswith("https://t.me/") or normalized.startswith("http://t.me/"):
         return normalized
     if normalized.startswith("@"):

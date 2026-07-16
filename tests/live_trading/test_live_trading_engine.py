@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -44,6 +45,7 @@ def _settings() -> SimpleNamespace:
         LIVE_TRADING_MAX_ALLOCATION_PCT=Decimal("20"),
         LIVE_TRADING_DEFAULT_STOP_PCT=Decimal("5"),
         LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT=Decimal("5"),
+        LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT=Decimal("1.5"),
         LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS=8,
         LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS=3,
         LIVE_TRADING_PROTECTION_SYNC_RETRY_ATTEMPTS=3,
@@ -57,6 +59,8 @@ def _settings() -> SimpleNamespace:
         LIVE_TRADING_PRICE_REFRESH_SECONDS=60,
         LIVE_TRADING_ACCOUNT_REFRESH_SECONDS=60,
         LIVE_TRADING_TELEGRAM_POLL_SECONDS=1,
+        LIVE_TRADING_STARTUP_REPLAY_SECONDS=180,
+        LIVE_TRADING_STARTUP_HISTORY_LIMIT=5,
         SIGNAL_CONSOLIDATION_SECONDS=1,
         AI_GATEWAY_ENABLED=False,
         AI_CLASSIFIER_ENABLED=False,
@@ -408,7 +412,7 @@ async def test_bootstrap_channel_cursor_uses_latest_message_id_for_live_followup
             limit: int | None = None,
             min_message_id: int | None = None,
         ) -> list[RawTelegramMessage]:
-            if limit == 1 and min_message_id is None:
+            if limit is not None and min_message_id is None:
                 return [latest_existing]
             if min_message_id == 14783:
                 return [forwarded_after_start]
@@ -432,6 +436,138 @@ async def test_bootstrap_channel_cursor_uses_latest_message_id_for_live_followup
     traces = engine.store.list_message_traces(engine.session.session_id, limit=10)
     assert len(traces) == 1
     assert traces[0].message_id == 14783
+    assert engine.session.total_messages_processed == 1
+
+
+@pytest.mark.asyncio
+async def test_start_replays_recent_startup_messages_without_waiting_for_next_poll(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._running = True
+    engine._setup_components = MagicMock()  # type: ignore[method-assign]
+    engine._refresh_account = AsyncMock()  # type: ignore[method-assign]
+    engine._price_refresh_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._account_refresh_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._consolidation_tick_loop = AsyncMock()  # type: ignore[method-assign]
+
+    recent_message = _message(222, "fresh startup message").model_copy(
+        update={
+            "channel_id": "https://t.me/testchan",
+            "channel_username": "testchan",
+            "date": engine.session.started_at - timedelta(seconds=30),
+        }
+    )
+
+    class StartupReplayTelegramClient(FakeTelegramClient):
+        async def fetch_history(
+            self,
+            channel: str,
+            *,
+            start: datetime | None = None,
+            end: datetime | None = None,
+            limit: int | None = None,
+            min_message_id: int | None = None,
+        ) -> list[RawTelegramMessage]:
+            if limit is not None and min_message_id is None:
+                return [recent_message]
+            return []
+
+    engine._telegram_client = StartupReplayTelegramClient()
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_ignored_signal().model_copy(
+                update={"source_message_id": raw.message_id}
+            ),
+            classification="ignore",
+            related_signal_id=None,
+        )
+    )
+
+    poll_started = asyncio.Event()
+
+    async def _blocking_poll_loop() -> None:
+        poll_started.set()
+        await asyncio.sleep(3600)
+
+    engine._poll_messages_loop = _blocking_poll_loop  # type: ignore[method-assign]
+
+    task = asyncio.create_task(engine.start())
+    await poll_started.wait()
+    await asyncio.sleep(0)
+    engine.stop()
+    await task
+
+    traces = engine.store.list_message_traces(engine.session.session_id, limit=10)
+    assert len(traces) == 1
+    assert traces[0].message_id == 222
+    assert engine.session.total_messages_processed == 1
+
+
+@pytest.mark.asyncio
+async def test_start_records_startup_backlog_messages_in_stream_without_trading(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._running = True
+    engine._setup_components = MagicMock()  # type: ignore[method-assign]
+    engine._refresh_account = AsyncMock()  # type: ignore[method-assign]
+    engine._price_refresh_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._account_refresh_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._consolidation_tick_loop = AsyncMock()  # type: ignore[method-assign]
+
+    old_message = _message(223, "older backlog message").model_copy(
+        update={
+            "channel_id": "https://t.me/testchan",
+            "channel_username": "testchan",
+            "date": engine.session.started_at - timedelta(hours=5),
+        }
+    )
+
+    class StartupBacklogTelegramClient(FakeTelegramClient):
+        async def fetch_history(
+            self,
+            channel: str,
+            *,
+            start: datetime | None = None,
+            end: datetime | None = None,
+            limit: int | None = None,
+            min_message_id: int | None = None,
+        ) -> list[RawTelegramMessage]:
+            if limit is not None and min_message_id is None:
+                return [old_message]
+            return []
+
+    engine._telegram_client = StartupBacklogTelegramClient()
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_ignored_signal().model_copy(
+                update={"source_message_id": raw.message_id}
+            ),
+            classification="ignore",
+            related_signal_id=None,
+        )
+    )
+
+    poll_started = asyncio.Event()
+
+    async def _blocking_poll_loop() -> None:
+        poll_started.set()
+        await asyncio.sleep(3600)
+
+    engine._poll_messages_loop = _blocking_poll_loop  # type: ignore[method-assign]
+
+    task = asyncio.create_task(engine.start())
+    await poll_started.wait()
+    await asyncio.sleep(0)
+    engine.stop()
+    await task
+
+    traces = engine.store.list_message_traces(engine.session.session_id, limit=10)
+    assert len(traces) == 1
+    assert traces[0].message_id == 223
+    assert traces[0].classification == "startup_backlog"
+    assert traces[0].final_status == "startup_backlog"
     assert engine.session.total_messages_processed == 1
 
 
@@ -553,6 +689,99 @@ async def test_prepare_message_for_classification_attaches_recent_captionless_me
     assert prepared.raw_payload["context_image_message_ids"] == [201]
     assert len(prepared.raw_payload["image_data_urls"]) == 1
     assert "retro_media_context_from=201" in trace.debug_notes
+
+
+@pytest.mark.asyncio
+async def test_process_message_promotes_unmatched_visual_followup_to_new_signal(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_open_signal(action=SignalAction.UPDATE_SL).model_copy(
+                update={
+                    "side": TradeSide.SHORT,
+                    "entry_type": EntryType.UNKNOWN,
+                    "entry_low": None,
+                    "entry_high": None,
+                    "stop_loss": Decimal("66200"),
+                    "take_profits": [],
+                    "source_message_id": raw.message_id,
+                }
+            ),
+            classification="follow_up",
+            related_signal_id=None,
+        )
+    )
+    message = _message(203, "استاپ 66200").model_copy(
+        update={
+            "raw_payload": {
+                "has_media": True,
+                "caption_present": True,
+                "image_data_urls": [
+                    {"mime_type": "image/jpeg", "data_url": "data:image/jpeg;base64,abc"}
+                ],
+            }
+        }
+    )
+
+    await engine._process_message(message)
+
+    signal_id = make_signal_id("@testchan", 203)
+    snapshot = engine.store.load_signal_snapshot(engine.session.session_id, signal_id)
+    traces = engine.store.list_message_traces(engine.session.session_id, limit=5)
+
+    assert snapshot is not None
+    assert snapshot.status == "pending_consolidation"
+    assert snapshot.stop_loss == Decimal("66200")
+    assert traces[0].signal_id == signal_id
+    assert traces[0].parsed_action == "open"
+    assert traces[0].correlation_method == "promoted_visual_signal"
+    assert traces[0].final_status == "pending_consolidation"
+    assert traces[0].correlation_note is not None
+    assert "caption_media" in traces[0].correlation_note
+    assert "stop_loss" in traces[0].correlation_note
+
+
+@pytest.mark.asyncio
+async def test_process_message_visual_followup_keeps_existing_signal_attachment(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    context.add_signal(state, pending=False)
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, context: SimpleNamespace(
+            parsed_signal=_open_signal(action=SignalAction.UPDATE_SL).model_copy(
+                update={
+                    "stop_loss": Decimal("48000"),
+                    "source_message_id": raw.message_id,
+                }
+            ),
+            classification="follow_up",
+            related_signal_id="sig_test",
+        )
+    )
+    message = _message(204, "استاپ 48000").model_copy(
+        update={
+            "raw_payload": {
+                "has_media": True,
+                "caption_present": True,
+                "image_data_urls": [
+                    {"mime_type": "image/jpeg", "data_url": "data:image/jpeg;base64,abc"}
+                ],
+            }
+        }
+    )
+
+    await engine._process_message(message)
+
+    traces = engine.store.list_message_traces(engine.session.session_id, limit=5)
+    assert traces[0].signal_id == "sig_test"
+    assert traces[0].parsed_action == "update_sl"
+    assert traces[0].correlation_method == "ai"
+    assert traces[0].final_status == "no_open_trade"
 
 
 @pytest.mark.asyncio
@@ -1103,14 +1332,14 @@ async def test_real_open_position_promotes_small_quantity_to_support_five_target
         order_id="ord_btc_5tp",
         exchange_symbol="TBV_BTC-SWAP-TBV_USDT",
         avg_price=Decimal("60118.3"),
-        executed_qty=Decimal("10"),
+        executed_qty=Decimal("0.6"),
     )
     engine._futures_client.wait_for_order_fill.return_value = (
         SimpleNamespace(
             order_id="ord_btc_5tp",
             exchange_symbol="TBV_BTC-SWAP-TBV_USDT",
             status="FILLED",
-            executed_qty=Decimal("10"),
+            executed_qty=Decimal("0.6"),
             avg_price=Decimal("60118.3"),
         ),
         [],
@@ -1209,11 +1438,11 @@ async def test_real_open_position_promotes_small_quantity_to_support_five_target
 
     engine._futures_client.open_short.assert_awaited_once_with(
         symbol="BTCUSDT",
-        quantity=Decimal("0.01000000"),
+        quantity=Decimal("0.00060000"),
         leverage=85,
         use_demo_symbol=True,
     )
-    assert trade.quantity == Decimal("0.01000000")
+    assert trade.quantity == Decimal("0.00060000")
     assert trade.tp_order_ids == [
         "tp_btc_1",
         "tp_btc_2",
@@ -1221,14 +1450,90 @@ async def test_real_open_position_promotes_small_quantity_to_support_five_target
         "tp_btc_4",
         "tp_btc_5",
     ]
-    assert any(
-        note == "exchange_entry_quantity_promoted=0.0001->0.00100000"
+    assert not any(
+        note.startswith("exchange_entry_quantity_promoted=")
         for note in trade.message_history[-1].notes
     )
     assert any(
-        note == "exchange_tp_ladder_quantity_promoted=0.00100000->0.01000000"
+        note == "exchange_tp_ladder_quantity_promoted=0.0001->0.00060000"
         for note in trade.message_history[-1].notes
     )
+
+
+@pytest.mark.asyncio
+async def test_real_open_position_defers_minimum_entry_balance_rejection_to_exchange(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    engine = _engine(tmp_path)
+    engine.session.account_info = LiveAccountInfo(
+        wallet_balance=Decimal("4.00"),
+        available_balance=Decimal("4.00"),
+    )
+    trade = _trade(engine.session.session_id)
+    trade.symbol = "SOLUSDT"
+    trade.side = "short"
+    trade.entry_price = Decimal("81.7455")
+    trade.quantity = Decimal("0.03434287")
+    trade.remaining_quantity = Decimal("0.03434287")
+    trade.leverage = 20
+    trade.margin = Decimal("0.14036331")
+    trade.stop_loss = Decimal("84.20")
+    trade.take_profits = [Decimal("79.80")]
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="sol short",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+            notes=[],
+        )
+    ]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = FuturesContractSpec(
+        {
+            "symbol": "SOL-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.1",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "1",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
+                }
+            ],
+        }
+    )
+    engine._futures_client.set_leverage.return_value = {"code": 200}
+    engine._futures_client.open_short.side_effect = ToobitAPIError(
+        "Toobit API HTTP error: 400: Insufficient available balance"
+    )
+
+    with caplog.at_level(logging.INFO), pytest.raises(ToobitAPIError) as excinfo:
+        await engine._real_open_position(trade)
+
+    assert "Insufficient available balance" in str(excinfo.value)
+    engine._futures_client.open_short.assert_awaited_once_with(
+        symbol="SOLUSDT",
+        quantity=Decimal("1.00000000"),
+        leverage=20,
+        use_demo_symbol=True,
+    )
+    warning = next(
+        rec
+        for rec in caplog.records
+        if rec.msg == "live_trading.exchange_quantity_promotion_local_limit_exceeded"
+    )
+    assert warning.reason == "insufficient_balance"
+    assert warning.exchange_will_decide is True
+    assert trade.message_history[-1].notes == [
+        "exchange_entry_quantity_promoted_local_limit=insufficient_balance",
+        "exchange_entry_quantity_promoted=0.03434287->1.00000000",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1967,11 +2272,11 @@ def test_ensure_exchange_quantity_supports_take_profit_ladder_promotes_open_quan
 
     engine._ensure_exchange_quantity_supports_take_profit_ladder(trade, spec)
 
-    assert trade.quantity == Decimal("0.01000000")
-    assert trade.remaining_quantity == Decimal("0.01000000")
-    assert trade.margin == Decimal("7.07274118")
+    assert trade.quantity == Decimal("0.00060000")
+    assert trade.remaining_quantity == Decimal("0.00060000")
+    assert trade.margin == Decimal("0.42436447")
     assert any(
-        note == "exchange_tp_ladder_quantity_promoted=0.0001->0.01000000"
+        note == "exchange_tp_ladder_quantity_promoted=0.0001->0.00060000"
         for note in trade.message_history[-1].notes
     )
 
@@ -2020,16 +2325,14 @@ def test_ensure_exchange_quantity_supports_market_entry_promotes_open_quantity()
 
     engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
 
-    assert trade.quantity == Decimal("0.00100000")
-    assert trade.remaining_quantity == Decimal("0.00100000")
-    assert trade.margin == Decimal("0.70727412")
-    assert any(
-        note == "exchange_entry_quantity_promoted=0.0001->0.00100000"
-        for note in trade.message_history[-1].notes
-    )
+    assert trade.quantity == Decimal("0.0001")
+    assert trade.remaining_quantity == Decimal("0.0001")
+    assert trade.margin == Decimal("0.07072741")
+    assert trade.message_history[-1].notes == []
 
 
-def test_market_entry_minimum_never_overrides_allocation_cap(
+def test_market_entry_minimum_promotes_and_defers_allocation_cap_rejection_to_exchange(
+    caplog,
 ) -> None:
     engine = _engine(Path("/tmp"))
     engine.session.account_info = LiveAccountInfo(
@@ -2072,19 +2375,35 @@ def test_market_entry_minimum_never_overrides_allocation_cap(
         }
     )
 
-    with pytest.raises(
-        ValueError,
-        match="Position is too small for the exchange minimum entry size within allocation limits",
-    ):
+    with caplog.at_level(logging.INFO):
         engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
 
-    assert trade.quantity == Decimal("0.03434287")
-    assert trade.remaining_quantity == Decimal("0.03434287")
-    assert trade.margin == Decimal("0.14036331")
-    assert trade.message_history[-1].notes == []
+    warning = next(
+        rec
+        for rec in caplog.records
+        if rec.msg == "live_trading.exchange_quantity_promotion_local_limit_exceeded"
+    )
+    promoted = next(
+        rec for rec in caplog.records if rec.msg == "live_trading.exchange_quantity_promoted"
+    )
+
+    assert warning.reason == "allocation_limit"
+    assert warning.symbol == "SOLUSDT"
+    assert warning.required_quantity == "1.00000000"
+    assert warning.max_margin_budget == "1.00000000"
+    assert warning.exchange_will_decide is True
+    assert promoted.reason == "allocation_limit"
+    assert trade.quantity == Decimal("1.00000000")
+    assert trade.remaining_quantity == Decimal("1.00000000")
+    assert trade.margin == Decimal("4.08727500")
+    assert trade.message_history[-1].notes == [
+        "exchange_entry_quantity_promoted_local_limit=allocation_limit",
+        "exchange_entry_quantity_promoted=0.03434287->1.00000000",
+    ]
 
 
-def test_market_entry_minimum_still_requires_balance_coverage(
+def test_market_entry_minimum_promotes_and_defers_balance_rejection_to_exchange(
+    caplog,
 ) -> None:
     engine = _engine(Path("/tmp"))
     engine.session.account_info = LiveAccountInfo(
@@ -2127,11 +2446,31 @@ def test_market_entry_minimum_still_requires_balance_coverage(
         }
     )
 
-    with pytest.raises(
-        ValueError,
-        match="Insufficient balance to satisfy the exchange minimum entry size",
-    ):
+    with caplog.at_level(logging.INFO):
         engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
+
+    warning = next(
+        rec
+        for rec in caplog.records
+        if rec.msg == "live_trading.exchange_quantity_promotion_local_limit_exceeded"
+    )
+    promoted = next(
+        rec for rec in caplog.records if rec.msg == "live_trading.exchange_quantity_promoted"
+    )
+
+    assert warning.reason == "insufficient_balance"
+    assert warning.symbol == "SOLUSDT"
+    assert warning.required_quantity == "1.00000000"
+    assert warning.current_balance == "4.00"
+    assert warning.exchange_will_decide is True
+    assert promoted.reason == "insufficient_balance"
+    assert trade.quantity == Decimal("1.00000000")
+    assert trade.remaining_quantity == Decimal("1.00000000")
+    assert trade.margin == Decimal("4.08727500")
+    assert trade.message_history[-1].notes == [
+        "exchange_entry_quantity_promoted_local_limit=insufficient_balance",
+        "exchange_entry_quantity_promoted=0.03434287->1.00000000",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2304,6 +2643,48 @@ async def test_handle_followup_updates_take_profits_and_signal_snapshot(
     assert trade.take_profits == [Decimal("51100"), Decimal("52200"), Decimal("53300")]
     assert signal is not None
     assert signal.take_profits == [Decimal("51100"), Decimal("52200"), Decimal("53300")]
+
+
+@pytest.mark.asyncio
+async def test_handle_followup_update_tp_enforces_min_first_profit_floor(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    trade.entry_price = Decimal("50000")
+    trade.stop_loss = Decimal("49000")
+    trade.take_profits = [Decimal("51000"), Decimal("52000")]
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+    engine._sync_signal_snapshot(context=context, state=state, trade=trade)
+    trace = LiveMessageTrace(
+        session_id=engine.session.session_id,
+        message_id=122,
+        channel_id="@testchan",
+        channel_label="@testchan",
+        message_date=datetime.now(timezone.utc),
+    )
+    parsed = _open_signal(action=SignalAction.UPDATE_TP).model_copy(
+        update={"take_profits": [Decimal("50100"), Decimal("50500")]}
+    )
+
+    await engine._handle_followup(
+        signal_id="sig_test",
+        parsed=parsed,
+        message=_message(122, "tp 50100 50500"),
+        context=context,
+        trace=trace,
+    )
+
+    signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert trace.final_status == "updated_tp"
+    assert trade.take_profits == [Decimal("50750.00000000")]
+    assert trace.effect_summary == "SL=49000 · TPs=['50750.00000000']"
+    assert signal is not None
+    assert signal.take_profits == [Decimal("50750.00000000")]
+    assert "tp1_min_profit_pct=1.5" in trade.message_history[-1].notes
 
 
 @pytest.mark.asyncio
@@ -2892,9 +3273,10 @@ async def test_sync_exchange_state_keeps_trade_open_on_first_missing_snapshot(
     assert trade_reloaded is not None
     assert trade_reloaded.status == "open"
     assert trade_reloaded.exchange_position_missing_confirmations == 1
-    assert "pending_confirmation" in (trade_reloaded.last_exchange_sync_error or "")
+    assert trade_reloaded.last_exchange_sync_error is None
     assert signal is not None
     assert signal.status == "open"
+    assert not any(note.startswith("exchange_error=") for note in signal.notes)
     assert "sig_test" in engine._open_trades
 
 
@@ -2938,8 +3320,32 @@ async def test_ensure_trade_still_open_on_exchange_requires_confirmed_miss(
     assert "sig_test" not in engine._open_trades
 
 
+def test_finalize_closed_trade_clears_pending_exchange_position_missing_state(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "closed"
+    trade.closed_at = datetime.now(timezone.utc)
+    trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=5)
+    trade.exchange_position_missing_confirmations = 1
+    trade.last_exchange_sync_error = (
+        "exchange_position_missing: pending_confirmation 1/2 elapsed=0s"
+    )
+    engine._open_trades["sig_test"] = trade
+
+    engine._finalize_closed_trade(trade)
+
+    trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
+    assert trade_reloaded is not None
+    assert trade_reloaded.exchange_position_missing_since is None
+    assert trade_reloaded.exchange_position_missing_confirmations == 0
+    assert trade_reloaded.last_exchange_sync_error is None
+    assert "sig_test" not in engine._open_trades
+
+
 @pytest.mark.asyncio
-async def test_ensure_trade_protection_after_open_keeps_trade_open_when_stop_exists(
+async def test_ensure_trade_protection_after_open_keeps_trade_open_when_required_targets_exist(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -2963,7 +3369,7 @@ async def test_ensure_trade_protection_after_open_keeps_trade_open_when_stop_exi
 
     async def _refresh_ids(item: LiveTrade) -> None:
         item.sl_order_id = "sl_live_1"
-        item.tp_order_ids = []
+        item.tp_order_ids = ["tp_live_1"]
 
     engine._refresh_trade_protection_ids = AsyncMock(  # type: ignore[method-assign]
         side_effect=_refresh_ids
@@ -2973,6 +3379,7 @@ async def test_ensure_trade_protection_after_open_keeps_trade_open_when_stop_exi
 
     assert trade.status == "open"
     assert trade.sl_order_id == "sl_live_1"
+    assert trade.tp_order_ids == ["tp_live_1"]
     assert trade.protection_sync_failures == 1
     assert trade.last_exchange_sync_error == "tp order rejected"
     assert any(
@@ -2982,7 +3389,7 @@ async def test_ensure_trade_protection_after_open_keeps_trade_open_when_stop_exi
 
 
 @pytest.mark.asyncio
-async def test_ensure_trade_protection_after_open_raises_when_stop_never_exists(
+async def test_ensure_trade_protection_after_open_raises_when_required_targets_never_exist(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -2992,14 +3399,97 @@ async def test_ensure_trade_protection_after_open_raises_when_stop_never_exists(
     engine._sync_trade_protection = AsyncMock(  # type: ignore[method-assign]
         side_effect=ValueError("stop rejected")
     )
-    engine._refresh_trade_protection_ids = AsyncMock()  # type: ignore[method-assign]
+    async def _refresh_ids(item: LiveTrade) -> None:
+        item.sl_order_id = "sl_live_1"
+        item.tp_order_ids = []
+
+    engine._refresh_trade_protection_ids = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_refresh_ids
+    )
 
     with pytest.raises(ValueError, match="stop rejected"):
         await engine._ensure_trade_protection_after_open(trade)
 
     assert engine._sync_trade_protection.await_count == 3
-    assert trade.sl_order_id is None
+    assert trade.sl_order_id == "sl_live_1"
+    assert trade.tp_order_ids == []
     assert trade.protection_sync_failures == 3
+
+
+@pytest.mark.asyncio
+async def test_handle_followup_update_tp_restores_previous_targets_when_exchange_sync_fails(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    trade.stop_loss = Decimal("48765")
+    trade.take_profits = [Decimal("51000"), Decimal("52000")]
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+    engine._sync_signal_snapshot(context=context, state=state, trade=trade)
+    engine._futures_client = AsyncMock()
+    engine._sync_trade_protection = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[ValueError("tp order rejected"), None]
+    )
+    trace = LiveMessageTrace(
+        session_id=engine.session.session_id,
+        message_id=22,
+        channel_id="@testchan",
+        channel_label="@testchan",
+        message_date=datetime.now(timezone.utc),
+    )
+    parsed = _open_signal(action=SignalAction.UPDATE_TP).model_copy(
+        update={"take_profits": [Decimal("51100"), Decimal("52200"), Decimal("53300")]}
+    )
+
+    await engine._handle_followup(
+        signal_id="sig_test",
+        parsed=parsed,
+        message=_message(22, "tp 51100 52200 53300"),
+        context=context,
+        trace=trace,
+    )
+
+    signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert trade.take_profits == [Decimal("51000"), Decimal("52000")]
+    assert signal is not None
+    assert signal.take_profits == [Decimal("51000"), Decimal("52000")]
+    assert engine._sync_trade_protection.await_count == 2
+    assert any(
+        note == "exchange_previous_protection_restored"
+        for note in trade.message_history[-1].notes
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_exchange_trade_protection_repairs_missing_targets(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.sl_order_id = "sl_live_1"
+    trade.tp_order_ids = []
+    engine._futures_client = SimpleNamespace()
+
+    async def _refresh_ids(item: LiveTrade) -> None:
+        item.sl_order_id = "sl_live_1"
+        item.tp_order_ids = []
+
+    engine._refresh_trade_protection_ids = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_refresh_ids
+    )
+    engine._sync_trade_protection = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._reconcile_exchange_trade_protection(
+        trade=trade,
+        open_regular_orders=[],
+        open_protection_orders=[],
+        symbol_user_trades=[],
+    )
+
+    engine._sync_trade_protection.assert_awaited_once_with(trade)
 
 
 def test_restore_runtime_state_rehydrates_contexts_and_open_trades(tmp_path: Path) -> None:

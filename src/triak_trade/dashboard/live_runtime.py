@@ -766,6 +766,8 @@ class DashboardLiveCoordinator:
 
     @staticmethod
     def _channel_label(channel_reference: str) -> str:
+        if channel_reference.lstrip("-").isdigit():
+            return channel_reference
         if channel_reference.startswith("https://t.me/"):
             return f"@{channel_reference.rsplit('/', 1)[-1]}"
         if channel_reference.startswith("@"):

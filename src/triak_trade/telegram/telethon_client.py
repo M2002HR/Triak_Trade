@@ -30,6 +30,7 @@ class TelethonTelegramClient:
         self.settings = settings
         self._client: Any | None = None
         self._message_cache: dict[tuple[str, int], Any] = {}
+        self._entity_cache: dict[str, Any] = {}
 
     def _log_event(self, level: int, event: str, /, **fields: Any) -> None:
         log_event(log, level, event, **fields)
@@ -198,7 +199,8 @@ class TelethonTelegramClient:
         if effective_min_id > 0:
             iter_kwargs["min_id"] = effective_min_id
         async with client:
-            async for msg in client.iter_messages(channel, **iter_kwargs):
+            resolved_channel = await self._resolve_channel_entity(client, channel)
+            async for msg in client.iter_messages(resolved_channel, **iter_kwargs):
                 raw = telethon_message_to_raw(msg, channel=channel)
                 self._cache_message(raw, msg)
                 if start is not None and raw.date < start:
@@ -220,6 +222,46 @@ class TelethonTelegramClient:
             last_message_id=result[-1].message_id if result else None,
         )
         return result
+
+    @staticmethod
+    def _channel_numeric_id(channel: str) -> int | None:
+        normalized = channel.strip()
+        if not normalized or not normalized.lstrip("-").isdigit():
+            return None
+        if normalized.startswith("-100") and normalized[4:].isdigit():
+            return int(normalized[4:])
+        return abs(int(normalized))
+
+    async def _resolve_channel_entity(self, client: Any, channel: str) -> Any:
+        cached = self._entity_cache.get(channel)
+        if cached is not None:
+            return cached
+
+        numeric_id = self._channel_numeric_id(channel)
+        if numeric_id is None:
+            return channel
+
+        async for dialog in client.iter_dialogs():
+            entity = getattr(dialog, "entity", None)
+            if getattr(entity, "id", None) != numeric_id:
+                continue
+            self._entity_cache[channel] = entity
+            self._log_event(
+                logging.INFO,
+                "telegram.channel_entity_resolved",
+                channel=channel,
+                resolved_from="dialog_cache",
+                entity_id=numeric_id,
+            )
+            return entity
+
+        self._log_event(
+            logging.WARNING,
+            "telegram.channel_entity_resolution_failed",
+            channel=channel,
+            entity_id=numeric_id,
+        )
+        raise ValueError(f'Cannot find any entity corresponding to "{channel}"')
 
     async def forward_message_by_link(
         self,
@@ -385,6 +427,7 @@ class TelethonTelegramClient:
                     error=str(exc),
                 )
             self._client = None
+            self._entity_cache.clear()
             self._log_event(logging.INFO, "telegram.listener_stopped")
 
     async def stop(self) -> None:
@@ -401,6 +444,7 @@ class TelethonTelegramClient:
                     error=str(exc),
                 )
             self._client = None
+            self._entity_cache.clear()
             self._log_event(logging.INFO, "telegram.client_stopped")
 
     @staticmethod

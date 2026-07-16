@@ -8,7 +8,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, Decimal, InvalidOperation
 from typing import Any
 
@@ -85,6 +85,13 @@ _RETRO_SIGNAL_TEXT_MARKERS = (
     "نقطه ورود",
 )
 
+_VISUAL_SIGNAL_PROMOTABLE_ACTIONS = {
+    SignalAction.UPDATE_SL,
+    SignalAction.UPDATE_TP,
+    SignalAction.UPDATE_ENTRY,
+    SignalAction.UPDATE_LEVERAGE,
+}
+
 
 @dataclass
 class _ExchangeCloseResult:
@@ -102,6 +109,12 @@ class _TakeProfitLadderPlan:
     required_quantity: Decimal | None
     original_count: int
     target_count: int
+
+
+@dataclass(frozen=True)
+class _StartupBootstrapResult:
+    replay_messages: list[RawTelegramMessage]
+    backlog_messages: list[RawTelegramMessage]
 
 
 class LiveTradingEngine:
@@ -169,6 +182,7 @@ class LiveTradingEngine:
         return str(value) if value is not None else None
 
     def _message_log_fields(self, message: RawTelegramMessage) -> dict[str, Any]:
+        payload = message.raw_payload
         return {
             "channel_id": message.channel_id,
             "channel_username": message.channel_username,
@@ -176,8 +190,11 @@ class LiveTradingEngine:
             "reply_to_msg_id": message.reply_to_msg_id,
             "message_date": message.date.isoformat(),
             "message_preview": safe_preview(message.text),
-            "has_media": bool(message.raw_payload.get("has_media")),
-            "has_context_images": bool(message.raw_payload.get("context_image_message_ids")),
+            "has_media": bool(payload.get("has_media")),
+            "caption_present": bool(payload.get("caption_present")),
+            "image_count": len(payload.get("image_data_urls") or []),
+            "has_context_images": bool(payload.get("context_image_message_ids")),
+            "context_image_message_ids": payload.get("context_image_message_ids") or [],
         }
 
     def _trade_log_fields(self, trade: LiveTrade) -> dict[str, Any]:
@@ -196,8 +213,18 @@ class LiveTradingEngine:
             "stop_loss": self._decimal_text(trade.stop_loss),
             "targets_hit": trade.targets_hit,
             "take_profit_count": len(trade.take_profits),
+            "pending_take_profit_count": len(trade.take_profits[trade.targets_hit :]),
             "sl_order_id": trade.sl_order_id,
             "tp_order_count": len(trade.tp_order_ids),
+        }
+
+    def _protection_log_fields(self, trade: LiveTrade) -> dict[str, Any]:
+        pending_take_profits = trade.take_profits[trade.targets_hit :]
+        return {
+            "required_stop_loss": trade.stop_loss is not None,
+            "required_take_profit_count": len(pending_take_profits),
+            "pending_take_profits": [str(item) for item in pending_take_profits],
+            "tracked_tp_order_ids": list(trade.tp_order_ids),
         }
 
     def _parsed_signal_log_fields(self, parsed: ParsedSignal) -> dict[str, Any]:
@@ -230,7 +257,7 @@ class LiveTradingEngine:
         self._loop = asyncio.get_running_loop()
         self._setup_components()
         self._restore_runtime_state()
-        await self._bootstrap_channel_cursors()
+        startup_bootstrap = await self._bootstrap_channel_cursors()
 
         # Fetch initial account info immediately
         await self._refresh_account()
@@ -245,6 +272,10 @@ class LiveTradingEngine:
             channels=self.session.channels,
             open_trade_count=len(self._open_trades),
         )
+        for message in startup_bootstrap.backlog_messages:
+            self._record_startup_backlog_message(message)
+        for message in startup_bootstrap.replay_messages:
+            await self._handle_message(message)
 
         bg_tasks = [
             asyncio.create_task(self._price_refresh_loop(), name="price_refresh"),
@@ -499,15 +530,26 @@ class LiveTradingEngine:
                 log.exception("Live trading channel poll failed")
         self._record_poll_heartbeat()
 
-    async def _bootstrap_channel_cursors(self) -> None:
+    async def _bootstrap_channel_cursors(self) -> _StartupBootstrapResult:
         assert self._telegram_client is not None
+        replay_messages: list[RawTelegramMessage] = []
+        backlog_messages: list[RawTelegramMessage] = []
+        startup_history_limit = max(
+            1,
+            int(getattr(self.settings, "LIVE_TRADING_STARTUP_HISTORY_LIMIT", 5)),
+        )
+        startup_replay_seconds = max(
+            0,
+            int(getattr(self.settings, "LIVE_TRADING_STARTUP_REPLAY_SECONDS", 180)),
+        )
+        startup_cutoff = self.session.started_at - timedelta(seconds=startup_replay_seconds)
         for channel in self.session.channels:
             if self._last_seen_message_ids.get(channel, 0) > 0:
                 continue
             try:
                 latest_messages = await self._telegram_client.fetch_history(
                     channel,
-                    limit=1,
+                    limit=startup_history_limit,
                 )
             except Exception as exc:
                 self._log_event(
@@ -526,14 +568,65 @@ class LiveTradingEngine:
                     channel=channel,
                 )
                 continue
+            latest_messages.sort(key=lambda item: (item.date, item.message_id))
             latest_message_id = max(item.message_id for item in latest_messages)
             self._last_seen_message_ids[channel] = latest_message_id
+            replayable_messages = [
+                item
+                for item in latest_messages
+                if item.date >= startup_cutoff
+            ]
+            backlog_only_messages = [
+                item
+                for item in latest_messages
+                if item.date < startup_cutoff
+            ]
+            replay_messages.extend(replayable_messages)
+            backlog_messages.extend(backlog_only_messages)
             self._log_event(
                 logging.INFO,
                 "live_trading.cursor_bootstrapped",
                 channel=channel,
                 last_seen_message_id=latest_message_id,
+                replay_candidate_count=len(replayable_messages),
+                backlog_candidate_count=len(backlog_only_messages),
+                startup_cutoff=startup_cutoff.isoformat(),
             )
+        replay_messages.sort(key=lambda item: (item.date, item.message_id))
+        backlog_messages.sort(key=lambda item: (item.date, item.message_id))
+        return _StartupBootstrapResult(
+            replay_messages=replay_messages,
+            backlog_messages=backlog_messages,
+        )
+
+    def _record_startup_backlog_message(self, message: RawTelegramMessage) -> None:
+        self.session.total_messages_processed += 1
+        trace = LiveMessageTrace(
+            session_id=self.session.session_id,
+            message_id=message.message_id,
+            channel_id=message.channel_id,
+            channel_username=message.channel_username,
+            channel_label=self._channel_label(message.channel_id),
+            reply_to_msg_id=message.reply_to_msg_id,
+            message_date=message.date,
+            preview_text=(message.text or "")[:200],
+            full_text=message.text,
+            classification="startup_backlog",
+            final_status="startup_backlog",
+            effect_summary="Loaded from recent channel history at session start.",
+            debug_notes=["startup_backlog"],
+        )
+        self._push_trace(trace)
+        self.store.save_session(self.session)
+        self._emit_session_update()
+        self._log_event(
+            logging.INFO,
+            "live_trading.startup_backlog_message_recorded",
+            final_status=trace.final_status,
+            effect_summary=trace.effect_summary,
+            total_messages_processed=self.session.total_messages_processed,
+            **self._message_log_fields(message),
+        )
 
     async def _poll_channel_messages(self, channel: str) -> None:
         assert self._telegram_client is not None
@@ -799,9 +892,37 @@ class LiveTradingEngine:
                         related_signal_id = None
                         trace.correlation_method = "exchange_position_missing"
                         trace.correlation_note = "stale_related_trade_detached"
+        promoted_reason = self._unmatched_visual_followup_promotion_reason(
+            message=message,
+            parsed=parsed,
+            related_signal_id=related_signal_id,
+        )
+        if promoted_reason is not None:
+            promoted_from_action = parsed.action
+            parsed = parsed.model_copy(update={"action": SignalAction.OPEN})
+            trace.parsed_action = parsed.action.value
+            trace.correlation_method = "promoted_visual_signal"
+            trace.correlation_note = promoted_reason
+            trace.debug_notes = [
+                note for note in trace.debug_notes if note != "no_signal_for_followup"
+            ]
+            trace.debug_notes.append(
+                "promoted_visual_signal_from="
+                f"{promoted_from_action.value}"
+            )
+            self._log_event(
+                logging.INFO,
+                "live_trading.unmatched_visual_followup_promoted",
+                promoted_from_action=promoted_from_action.value,
+                promoted_to_action=parsed.action.value,
+                promotion_reason=promoted_reason,
+                **self._message_log_fields(message),
+                **self._parsed_signal_log_fields(parsed),
+            )
         if parsed.action is SignalAction.OPEN and related_signal_id is None:
-            trace.correlation_method = "new_signal"
-            trace.correlation_note = None
+            trace.correlation_method = trace.correlation_method or "new_signal"
+            if trace.correlation_method == "new_signal":
+                trace.correlation_note = None
             trace.debug_notes = [
                 note for note in trace.debug_notes if note != "no_signal_for_followup"
             ]
@@ -1164,6 +1285,60 @@ class LiveTradingEngine:
         )
         return message.model_copy(update={"raw_payload": message_payload})
 
+    @staticmethod
+    def _message_has_visual_signal_context(message: RawTelegramMessage) -> bool:
+        payload = message.raw_payload
+        return bool(payload.get("image_data_urls")) or bool(
+            payload.get("context_image_message_ids")
+        )
+
+    @staticmethod
+    def _parsed_signal_has_openable_visual_details(parsed: ParsedSignal) -> bool:
+        return any(
+            (
+                parsed.stop_loss is not None,
+                bool(parsed.take_profits),
+                parsed.entry_low is not None,
+                parsed.entry_high is not None,
+                parsed.leverage is not None,
+            )
+        )
+
+    def _unmatched_visual_followup_promotion_reason(
+        self,
+        *,
+        message: RawTelegramMessage,
+        parsed: ParsedSignal,
+        related_signal_id: str | None,
+    ) -> str | None:
+        if related_signal_id is not None:
+            return None
+        if parsed.action not in _VISUAL_SIGNAL_PROMOTABLE_ACTIONS:
+            return None
+        if not self._message_has_visual_signal_context(message):
+            return None
+        if not parsed.symbol or parsed.side is TradeSide.UNKNOWN:
+            return None
+        if not self._parsed_signal_has_openable_visual_details(parsed):
+            return None
+        payload = message.raw_payload
+        evidence: list[str] = []
+        if bool(payload.get("caption_present")) and bool(payload.get("has_media")):
+            evidence.append("caption_media")
+        if payload.get("context_image_message_ids"):
+            evidence.append("retro_media_context")
+        if payload.get("image_data_urls"):
+            evidence.append(f"image_count={len(payload.get('image_data_urls') or [])}")
+        if parsed.stop_loss is not None:
+            evidence.append("stop_loss")
+        if parsed.take_profits:
+            evidence.append(f"take_profit_count={len(parsed.take_profits)}")
+        if parsed.entry_low is not None or parsed.entry_high is not None:
+            evidence.append("entry")
+        if parsed.leverage is not None:
+            evidence.append("leverage")
+        return "unmatched_visual_followup_with_openable_signal:" + ",".join(evidence)
+
     # ── Close-All Handler ─────────────────────────────────────────────────
 
     async def _handle_close_all_trades(
@@ -1501,7 +1676,10 @@ class LiveTradingEngine:
                 tp_updates_applied.append(f"SL={trade.stop_loss}")
             if new_tps:
                 self._pm.update_take_profits(trade=trade, new_tps=new_tps, message=attribution)
-                tp_updates_applied.append(f"TPs={[str(t) for t in new_tps]}")
+                tp_updates_applied.append(
+                    "TPs="
+                    + str([str(t) for t in trade.take_profits[trade.targets_hit :]])
+                )
             if tp_updates_applied:
                 if self._uses_exchange_execution():
                     try:
@@ -1511,6 +1689,16 @@ class LiveTradingEngine:
                         trade.take_profits = previous_take_profits
                         trade.last_exchange_sync_error = str(exc)
                         attribution.notes.append(f"exchange_trading_stop_failed={exc}")
+                        restored = await self._restore_previous_trade_protection(
+                            trade=trade,
+                            previous_stop_loss=previous_stop_loss,
+                            previous_take_profits=previous_take_profits,
+                            original_error=exc,
+                            attribution=attribution,
+                            sync_context="update_tp",
+                        )
+                        if restored:
+                            attribution.notes.append("exchange_previous_protection_restored")
                 trace.final_status = "updated_tp"
                 trace.effect_summary = " · ".join(tp_updates_applied)
             else:
@@ -1542,6 +1730,8 @@ class LiveTradingEngine:
         elif effective_action is SignalAction.UPDATE_ENTRY:
             updates_applied: list[str] = []
             protection_needs_sync = False
+            previous_stop_loss = trade.stop_loss
+            previous_take_profits = list(trade.take_profits)
             if parsed.stop_loss is not None:
                 self._pm.update_stop_loss(
                     trade=trade,
@@ -1586,6 +1776,18 @@ class LiveTradingEngine:
                 except Exception as exc:
                     trade.last_exchange_sync_error = str(exc)
                     attribution.notes.append(f"exchange_trading_stop_failed={exc}")
+                    trade.stop_loss = previous_stop_loss
+                    trade.take_profits = previous_take_profits
+                    restored = await self._restore_previous_trade_protection(
+                        trade=trade,
+                        previous_stop_loss=previous_stop_loss,
+                        previous_take_profits=previous_take_profits,
+                        original_error=exc,
+                        attribution=attribution,
+                        sync_context="update_entry",
+                    )
+                    if restored:
+                        attribution.notes.append("exchange_previous_protection_restored")
             if not updates_applied:
                 updates_applied.append("entry replay ignored for already-open trade")
             trace.final_status = "updated_entry"
@@ -2403,9 +2605,10 @@ class LiveTradingEngine:
                     attempts=attempts,
                     error_type=type(exc).__name__,
                     error=str(exc),
+                    **self._protection_log_fields(trade),
                     **self._trade_log_fields(trade),
                 )
-                if await self._exchange_trade_has_minimum_protection(trade):
+                if await self._exchange_trade_has_required_protection(trade):
                     if trade.message_history:
                         trade.message_history[-1].notes.append(
                             f"protection_sync_degraded={exc}"
@@ -2429,7 +2632,7 @@ class LiveTradingEngine:
         assert last_exc is not None
         raise last_exc
 
-    async def _exchange_trade_has_minimum_protection(self, trade: LiveTrade) -> bool:
+    async def _exchange_trade_has_required_protection(self, trade: LiveTrade) -> bool:
         if self._futures_client is None or not trade.is_open:
             return False
         try:
@@ -2438,12 +2641,59 @@ class LiveTradingEngine:
             return False
         if trade.stop_loss is not None and trade.sl_order_id is None:
             return False
-        if (
-            trade.stop_loss is None
-            and trade.take_profits[trade.targets_hit :]
-            and not trade.tp_order_ids
-        ):
+        if trade.take_profits[trade.targets_hit :] and not trade.tp_order_ids:
             return False
+        return True
+
+    async def _restore_previous_trade_protection(
+        self,
+        *,
+        trade: LiveTrade,
+        previous_stop_loss: Decimal | None,
+        previous_take_profits: list[Decimal],
+        original_error: Exception,
+        attribution: MessageAttribution | None,
+        sync_context: str,
+    ) -> bool:
+        if not self._uses_exchange_execution():
+            return False
+        trade.stop_loss = previous_stop_loss
+        trade.take_profits = list(previous_take_profits)
+        if previous_stop_loss is None and not previous_take_profits:
+            return False
+        try:
+            await self._sync_trade_protection(trade)
+        except Exception as restore_exc:
+            trade.last_exchange_sync_error = str(restore_exc)
+            if attribution is not None:
+                attribution.notes.append(
+                    f"exchange_previous_protection_restore_failed={restore_exc}"
+                )
+            self._log_event(
+                logging.ERROR,
+                "live_trading.exchange_protection_restore_failed",
+                sync_context=sync_context,
+                original_error_type=type(original_error).__name__,
+                original_error=str(original_error),
+                restore_error_type=type(restore_exc).__name__,
+                restore_error=str(restore_exc),
+                restored_stop_loss=self._decimal_text(previous_stop_loss),
+                restored_take_profit_count=len(previous_take_profits),
+                **self._protection_log_fields(trade),
+                **self._trade_log_fields(trade),
+            )
+            return False
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_protection_restored_after_failure",
+            sync_context=sync_context,
+            original_error_type=type(original_error).__name__,
+            original_error=str(original_error),
+            restored_stop_loss=self._decimal_text(previous_stop_loss),
+            restored_take_profit_count=len(previous_take_profits),
+            **self._protection_log_fields(trade),
+            **self._trade_log_fields(trade),
+        )
         return True
 
     def _apply_exchange_risk_limit_to_open_trade(self, trade: LiveTrade, spec: Any) -> None:
@@ -2702,14 +2952,11 @@ class LiveTradingEngine:
         step = self._coerce_decimal(getattr(spec, "contract_step_size", Decimal("0")))
         if step <= 0:
             return None
-        minimum_contract_qty = max(
-            self._coerce_decimal(getattr(spec, "contract_min_qty", Decimal("0"))),
-            Decimal("1"),
-        )
+        minimum_contract_qty = self._minimum_exchange_contract_quantity(spec)
         min_units = self._exchange_quantity_units_ceiling(minimum_contract_qty, step)
         if min_units <= 0:
             return None
-        entry_contract_step = max(step, Decimal("1"))
+        entry_contract_step = step
         if len(self._exchange_take_profit_orders(trade, spec=spec)) >= len(pending_targets):
             return trade.quantity.quantize(Decimal("0.00000001"))
 
@@ -2752,12 +2999,7 @@ class LiveTradingEngine:
         trade: LiveTrade,
         spec: Any,
     ) -> None:
-        # Toobit demo/live market opens can reject sub-1-contract quantities even
-        # when exchangeInfo exposes a smaller fractional contract step.
-        minimum_entry_contracts = max(
-            self._coerce_decimal(getattr(spec, "contract_min_qty", Decimal("0"))),
-            Decimal("1"),
-        )
+        minimum_entry_contracts = self._minimum_exchange_contract_quantity(spec)
         minimum_entry_quantity = _from_exchange_contract_quantity(
             minimum_entry_contracts,
             spec,
@@ -2776,6 +3018,7 @@ class LiveTradingEngine:
                 "Insufficient balance to satisfy the exchange minimum entry size"
             ),
             allocation_limit_error=allocation_limit_error,
+            reject_on_local_limit=False,
         )
 
     def _promote_exchange_open_quantity_if_needed(
@@ -2786,11 +3029,13 @@ class LiveTradingEngine:
         note_prefix: str,
         insufficient_balance_error: str,
         allocation_limit_error: str,
+        reject_on_local_limit: bool = True,
     ) -> None:
         required_quantity = required_quantity.quantize(Decimal("0.00000001"))
         if required_quantity <= 0 or trade.quantity >= required_quantity:
             return
 
+        previous_quantity = trade.quantity
         current_balance = self._current_balance_for_exchange_trade_sizing()
         max_margin_budget = (
             current_balance * self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT / Decimal("100")
@@ -2800,12 +3045,49 @@ class LiveTradingEngine:
             * required_quantity
             / Decimal(str(max(trade.leverage, 1)))
         ).quantize(Decimal("0.00000001"))
+        local_limit_reason: str | None = None
+        local_limit_error: str | None = None
         if required_margin > current_balance:
-            raise ValueError(insufficient_balance_error)
-        if max_margin_budget > 0 and required_margin > max_margin_budget:
-            raise ValueError(allocation_limit_error)
+            local_limit_reason = "insufficient_balance"
+            local_limit_error = insufficient_balance_error
+        elif max_margin_budget > 0 and required_margin > max_margin_budget:
+            local_limit_reason = "allocation_limit"
+            local_limit_error = allocation_limit_error
 
-        previous_quantity = trade.quantity
+        if local_limit_reason is not None:
+            error = self._format_exchange_quantity_promotion_error(
+                trade=trade,
+                base_error=local_limit_error or insufficient_balance_error,
+                required_quantity=required_quantity,
+                required_margin=required_margin,
+                current_balance=current_balance,
+                max_margin_budget=max_margin_budget,
+            )
+            event_name = (
+                "live_trading.exchange_quantity_promotion_rejected"
+                if reject_on_local_limit
+                else "live_trading.exchange_quantity_promotion_local_limit_exceeded"
+            )
+            self._log_event(
+                logging.WARNING,
+                event_name,
+                reason=local_limit_reason,
+                required_quantity=str(required_quantity),
+                required_margin=str(required_margin),
+                current_balance=str(current_balance),
+                max_margin_budget=str(max_margin_budget),
+                allocation_cap_pct=str(self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT),
+                previous_quantity=str(previous_quantity),
+                exchange_will_decide=not reject_on_local_limit,
+                **self._trade_log_fields(trade),
+            )
+            if reject_on_local_limit:
+                raise ValueError(error)
+            if trade.message_history:
+                trade.message_history[-1].notes.append(
+                    f"{note_prefix}_local_limit={local_limit_reason}"
+                )
+
         trade.quantity = required_quantity
         trade.remaining_quantity = required_quantity
         trade.margin = required_margin
@@ -2813,6 +3095,54 @@ class LiveTradingEngine:
             trade.message_history[-1].notes.append(
                 f"{note_prefix}={previous_quantity}->{required_quantity}"
             )
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_quantity_promoted",
+            reason=local_limit_reason or "minimum_requirement",
+            required_quantity=str(required_quantity),
+            required_margin=str(required_margin),
+            current_balance=str(current_balance),
+            max_margin_budget=str(max_margin_budget),
+            previous_quantity=str(previous_quantity),
+            promoted_quantity=str(required_quantity),
+            allocation_cap_pct=str(self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT),
+            note_prefix=note_prefix,
+            exchange_will_decide=local_limit_reason is not None and not reject_on_local_limit,
+            **self._trade_log_fields(trade),
+        )
+
+    def _format_exchange_quantity_promotion_error(
+        self,
+        *,
+        trade: LiveTrade,
+        base_error: str,
+        required_quantity: Decimal,
+        required_margin: Decimal,
+        current_balance: Decimal,
+        max_margin_budget: Decimal,
+    ) -> str:
+        return (
+            f"{base_error} "
+            f"(symbol={trade.symbol}, required_quantity={required_quantity}, "
+            f"entry_price={trade.entry_price}, leverage={trade.leverage}x, "
+            f"required_margin={required_margin}, current_balance={current_balance}, "
+            f"max_margin_budget={max_margin_budget}, "
+            f"allocation_cap_pct={self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT})"
+        )
+
+    @staticmethod
+    def _minimum_exchange_contract_quantity(spec: Any) -> Decimal:
+        min_contract_qty = LiveTradingEngine._coerce_decimal(
+            getattr(spec, "contract_min_qty", Decimal("0"))
+        )
+        if min_contract_qty > 0:
+            return min_contract_qty
+        step = LiveTradingEngine._coerce_decimal(
+            getattr(spec, "contract_step_size", Decimal("0"))
+        )
+        if step > 0:
+            return step
+        return Decimal("0")
 
     def _current_balance_for_exchange_trade_sizing(self) -> Decimal:
         if self.session.trading_mode == "demo":
@@ -3373,6 +3703,12 @@ class LiveTradingEngine:
     def _clear_exchange_position_miss_state(self, trade: LiveTrade) -> None:
         trade.exchange_position_missing_since = None
         trade.exchange_position_missing_confirmations = 0
+        if self._is_pending_exchange_position_miss_error(trade.last_exchange_sync_error):
+            trade.last_exchange_sync_error = None
+
+    @staticmethod
+    def _is_pending_exchange_position_miss_error(error: str | None) -> bool:
+        return bool(error and "pending_confirmation" in error)
 
     def _should_confirm_exchange_position_missing(
         self,
@@ -3407,11 +3743,24 @@ class LiveTradingEngine:
             ),
         )
         elapsed_seconds = int((now - trade.exchange_position_missing_since).total_seconds())
-        trade.last_exchange_sync_error = (
+        pending_state = (
             f"{reason}: pending_confirmation "
             f"{trade.exchange_position_missing_confirmations}/{required_confirmations} "
             f"elapsed={elapsed_seconds}s"
         )
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_position_missing_pending",
+            reason=reason,
+            confirmations=trade.exchange_position_missing_confirmations,
+            required_confirmations=required_confirmations,
+            elapsed_seconds=elapsed_seconds,
+            grace_seconds=grace_seconds,
+            pending_state=pending_state,
+            **self._trade_log_fields(trade),
+        )
+        if self._is_pending_exchange_position_miss_error(trade.last_exchange_sync_error):
+            trade.last_exchange_sync_error = None
         if trade.exchange_position_missing_confirmations < required_confirmations:
             return False
         return elapsed_seconds >= grace_seconds
@@ -3479,6 +3828,7 @@ class LiveTradingEngine:
             "live_trading.exchange_protection_sync_started",
             refresh_take_profits=refresh_take_profits,
             refresh_stop_loss=refresh_stop_loss,
+            **self._protection_log_fields(trade),
             **self._trade_log_fields(trade),
         )
         stop_loss, normalized_take_profits = await self._normalize_trade_protection_levels(trade)
@@ -3562,6 +3912,7 @@ class LiveTradingEngine:
             normalized_stop_loss=self._decimal_text(stop_loss),
             normalized_take_profit_count=len(normalized_take_profits),
             synced_tp_order_count=len(trade.tp_order_ids),
+            **self._protection_log_fields(trade),
             **self._trade_log_fields(trade),
         )
 
@@ -3964,6 +4315,35 @@ class LiveTradingEngine:
                 symbol_user_trades=symbol_user_trades,
             )
             return
+        if not trade.is_open or self._futures_client is None:
+            return
+        if await self._exchange_trade_has_required_protection(trade):
+            return
+        self._log_event(
+            logging.WARNING,
+            "live_trading.exchange_protection_gap_detected",
+            **self._protection_log_fields(trade),
+            **self._trade_log_fields(trade),
+        )
+        try:
+            await self._sync_trade_protection(trade)
+        except Exception as exc:
+            trade.last_exchange_sync_error = str(exc)
+            self._log_event(
+                logging.ERROR,
+                "live_trading.exchange_protection_gap_repair_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._protection_log_fields(trade),
+                **self._trade_log_fields(trade),
+            )
+            return
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_protection_gap_repaired",
+            **self._protection_log_fields(trade),
+            **self._trade_log_fields(trade),
+        )
 
     def _exchange_take_profit_orders(
         self,
@@ -4030,10 +4410,7 @@ class LiveTradingEngine:
         step = self._coerce_decimal(getattr(spec, "contract_step_size", Decimal("0")))
         if step <= 0:
             step = Decimal("1")
-        min_contract_qty = self._coerce_decimal(
-            getattr(spec, "contract_min_qty", Decimal("0"))
-        )
-        min_contract_qty = max(min_contract_qty, Decimal("1"))
+        min_contract_qty = self._minimum_exchange_contract_quantity(spec)
         total_exchange_qty = self._floor_exchange_contract_quantity(
             trade.remaining_quantity,
             spec,
@@ -4242,6 +4619,7 @@ class LiveTradingEngine:
             )
 
     def _finalize_closed_trade(self, trade: LiveTrade) -> None:
+        self._clear_exchange_position_miss_state(trade)
         self._book_trade_realized_totals(trade)
         if self.session.trading_mode == "demo" and not self._uses_exchange_execution():
             self.session.paper_balance += trade.realized_pnl + trade.margin
@@ -4265,10 +4643,14 @@ class LiveTradingEngine:
             slug = ch.rsplit("/", 1)[-1].lstrip("@")
             cid = channel_id.lstrip("@").lower()
             if cid == slug.lower() or ch == channel_id or ch.lower() == channel_id.lower():
+                if slug.lstrip("-").isdigit():
+                    return slug
                 return f"@{slug}"
         # If it looks like a URL already, extract slug
         if channel_id.startswith("https://t.me/"):
             return f"@{channel_id.rsplit('/', 1)[-1]}"
+        if channel_id.lstrip("-").isdigit():
+            return channel_id
         return f"@{channel_id.lstrip('@').lstrip('-')}" if channel_id else "unknown"
 
     def _channel_input(self, channel_id: str) -> str:

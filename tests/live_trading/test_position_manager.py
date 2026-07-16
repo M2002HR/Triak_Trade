@@ -27,6 +27,7 @@ def _make_settings() -> MagicMock:
     s.LIVE_TRADING_MAX_ALLOCATION_PCT = Decimal("20")
     s.LIVE_TRADING_DEFAULT_STOP_PCT = Decimal("5")
     s.LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT = Decimal("5")
+    s.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT = Decimal("1.5")
     s.LIVE_TRADING_FEE_RATE_PCT = Decimal("0.04")
     return s
 
@@ -266,6 +267,54 @@ class TestPositionSizing:
             == result.entry_price * result.quantity
         )
 
+    def test_explicit_take_profits_replace_all_below_min_first_profit_floor(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        session = _make_session(Decimal("1000"))
+        signal = _make_long_signal(
+            entry=Decimal("50000"),
+            sl=Decimal("49000"),
+            tps=[Decimal("50300"), Decimal("50500")],
+        )
+        strategy = MagicMock()
+
+        result = pm.compute_position_sizing(
+            session=session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+
+        assert result.take_profits == [Decimal("50750.00000000")]
+        assert "tp1_min_profit_pct=1.5" in result.notes
+        assert "tp1_min_profit_floor=50750.00000000" in result.notes
+
+    def test_strategy_take_profits_drop_subthreshold_first_target(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        session = _make_session(Decimal("1000"))
+        signal = _make_long_signal(sl=Decimal("49000"), tps=[])
+        strategy = MagicMock()
+        strategy.get_synthetic_take_profits.return_value = [
+            Decimal("50300"),
+            Decimal("52000"),
+            Decimal("53000"),
+        ]
+
+        result = pm.compute_position_sizing(
+            session=session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+
+        assert result.take_profits == [Decimal("52000"), Decimal("53000")]
+        assert any(
+            note.startswith("synthetic_take_profits_strategy=52000,53000")
+            for note in result.notes
+        )
+        assert "tp1_min_profit_removed=1" in result.notes
+
     def test_risk_factor_changes_size_when_not_floor_clamped(self) -> None:
         settings = _make_settings()
         settings.LIVE_TRADING_MIN_ALLOCATION_PCT = Decimal("0")
@@ -437,3 +486,26 @@ class TestPositionOperations:
         )
         assert record.previous_leverage == 10
         assert record.new_leverage == 20
+
+    def test_update_take_profits_enforces_min_first_profit_floor(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        trade = self._make_trade()
+        attr = MessageAttribution(
+            message_id=4,
+            channel_id="c",
+            channel_label="@c",
+            message_preview="tp update",
+            message_date=datetime.now(timezone.utc),
+            action="updated_tp",
+        )
+
+        pm.update_take_profits(
+            trade=trade,
+            new_tps=[Decimal("50100"), Decimal("50500")],
+            message=attr,
+        )
+
+        assert trade.take_profits == [Decimal("50750.00000000")]
+        assert "tp1_min_profit_pct=1.5" in trade.message_history[-1].notes
+        assert "TPs updated: ['50750.00000000']" in trade.message_history[-1].notes

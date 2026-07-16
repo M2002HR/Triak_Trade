@@ -518,6 +518,47 @@ async def test_telethon_fetch_history_stops_scanning_once_start_boundary_is_cros
     assert yielded_ids == [10, 9, 8]
 
 
+def test_telethon_client_channel_numeric_id_parses_private_channel_references() -> None:
+    settings = Settings(_env_file=None, TELEGRAM_API_ID=123, TELEGRAM_API_HASH="hash")
+    client = TelethonTelegramClient(settings)
+
+    assert client._channel_numeric_id("2443184591") == 2443184591
+    assert client._channel_numeric_id("-1002443184591") == 2443184591
+    assert client._channel_numeric_id("@Tofan_Trade") is None
+
+
+@pytest.mark.asyncio
+async def test_telethon_client_resolves_numeric_channel_from_dialog_cache() -> None:
+    settings = Settings(_env_file=None, TELEGRAM_API_ID=123, TELEGRAM_API_HASH="hash")
+    client = TelethonTelegramClient(settings)
+
+    class StubEntity:
+        id = 2443184591
+
+    class StubDialog:
+        entity = StubEntity()
+
+    class StubClient:
+        def __init__(self) -> None:
+            self.iter_calls = 0
+
+        def iter_dialogs(self):
+            self.iter_calls += 1
+
+            async def _items():
+                yield StubDialog()
+
+            return _items()
+
+    stub = StubClient()
+
+    first = await client._resolve_channel_entity(stub, "2443184591")
+    second = await client._resolve_channel_entity(stub, "2443184591")
+
+    assert first is second
+    assert stub.iter_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_telethon_forward_message_by_link_forwards_to_destination(
     monkeypatch: pytest.MonkeyPatch,

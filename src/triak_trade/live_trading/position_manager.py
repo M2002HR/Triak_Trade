@@ -195,6 +195,7 @@ class LivePositionManager:
         )
         if len(take_profits) < len(signal.take_profits):
             notes.append(f"tp_direction_filtered={len(signal.take_profits) - len(take_profits)}")
+        synthetic_take_profits_used = False
         if not take_profits and strategy is not None and stop_loss is not None:
             strategy_tps = strategy.get_synthetic_take_profits(
                 side=side,
@@ -208,11 +209,19 @@ class LivePositionManager:
                 entry_price=entry_price,
                 stop_loss=stop_loss,
             )
-            if take_profits:
-                notes.append(
-                    "synthetic_take_profits_strategy="
-                    + ",".join(str(item) for item in take_profits)
-                )
+            synthetic_take_profits_used = bool(take_profits)
+        take_profits, tp_floor_notes = _enforce_minimum_first_take_profit(
+            take_profits=take_profits,
+            is_long=side.is_long,
+            entry_price=entry_price,
+            min_profit_pct=self.settings.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT,
+        )
+        if synthetic_take_profits_used and take_profits:
+            notes.append(
+                "synthetic_take_profits_strategy="
+                + ",".join(str(item) for item in take_profits)
+            )
+        notes.extend(tp_floor_notes)
 
         margin = (entry_price * quantity / Decimal(str(leverage))).quantize(Decimal("0.00000001"))
 
@@ -357,8 +366,15 @@ class LivePositionManager:
             entry_price=trade.entry_price,
             stop_loss=trade.stop_loss,
         )
+        sanitized, tp_floor_notes = _enforce_minimum_first_take_profit(
+            take_profits=sanitized,
+            is_long=trade.side == "long",
+            entry_price=trade.entry_price,
+            min_profit_pct=self.settings.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT,
+        )
         # Preserve already-hit targets, append new pending ones (matches backtest)
         trade.take_profits = trade.take_profits[: trade.targets_hit] + sanitized
+        message.notes.extend(tp_floor_notes)
         message.notes.append(f"TPs updated: {[str(t) for t in sanitized]}")
         trade.add_attribution(message)
         log_event(
@@ -665,6 +681,42 @@ def _sanitize_take_profits(
         sanitized.append(tp)
     sanitized.sort(reverse=not is_long)
     return sanitized
+
+
+def _enforce_minimum_first_take_profit(
+    *,
+    take_profits: list[Decimal],
+    is_long: bool,
+    entry_price: Decimal,
+    min_profit_pct: Decimal,
+) -> tuple[list[Decimal], list[str]]:
+    if not take_profits or entry_price <= Decimal("0") or min_profit_pct <= Decimal("0"):
+        return take_profits, []
+
+    threshold_multiplier = (
+        Decimal("1") + (min_profit_pct / Decimal("100"))
+        if is_long
+        else Decimal("1") - (min_profit_pct / Decimal("100"))
+    )
+    threshold = (entry_price * threshold_multiplier).quantize(Decimal("0.00000001"))
+    adjusted = [
+        tp
+        for tp in take_profits
+        if (tp >= threshold if is_long else tp <= threshold)
+    ]
+    if adjusted == take_profits:
+        return take_profits, []
+
+    notes = [
+        f"tp1_min_profit_pct={min_profit_pct}",
+        f"tp1_min_profit_floor={threshold}",
+    ]
+    if adjusted:
+        notes.append(f"tp1_min_profit_removed={len(take_profits) - len(adjusted)}")
+        return adjusted, notes
+
+    notes.append(f"tp1_min_profit_replaced_all={len(take_profits)}")
+    return [threshold], notes
 
 
 def _resolve_entry_price(signal: ParsedSignal) -> Decimal | None:

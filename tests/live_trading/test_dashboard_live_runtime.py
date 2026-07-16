@@ -180,6 +180,18 @@ class TestDashboardLiveCoordinatorState:
             assert record.channel_input == "https://t.me/demo"
             assert record.total_saved_channels == 1
 
+    def test_save_channel_preserves_numeric_channel_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+
+            channels = coord.save_channel("2443184591")
+
+            assert channels[0]["channel_input"] == "2443184591"
+            assert channels[0]["channel_resolved"] == "2443184591"
+            assert channels[0]["label"] == "2443184591"
+
     def test_start_session_rejects_when_feature_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=False)
