@@ -435,3 +435,25 @@ def test_isolated_backtest_cli_uses_cpu_count_for_default_parallel_workers(
     request = fake_runner.last_request
     assert isinstance(request, IsolatedBacktestRunRequest)
     assert request.max_parallel_signals == 12
+
+
+def test_isolated_backtest_cli_rejects_fixed_leverage_without_a_value() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "isolated-backtest-run",
+            "--channel",
+            "https://t.me/Tofan_Trade",
+            "--hours",
+            "1",
+            "--leverage-source",
+            "fixed",
+            "--no-ai",
+            "--no-send-log-channel",
+            "--no-send-telegram-summary",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--fixed-leverage" in result.output
+    assert "must be a positive integer" in result.output

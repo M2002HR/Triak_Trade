@@ -1009,6 +1009,11 @@ def isolated_backtest_run_cmd(
     include_signals: bool = typer.Option(False, "--include-signals/--summary-only"),
 ) -> None:
     """Run the isolated per-signal real Telegram + Toobit public backtest."""
+    if leverage_source == "fixed" and (fixed_leverage is None or fixed_leverage <= 0):
+        raise typer.BadParameter(
+            "must be a positive integer when --leverage-source=fixed",
+            param_hint="--fixed-leverage",
+        )
     settings = _load_settings()
     runner = _build_isolated_backtest_runner(settings)
     request = IsolatedBacktestRunRequest(
