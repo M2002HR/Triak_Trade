@@ -8,7 +8,7 @@ import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import cast
+from typing import Literal, cast
 
 import httpx
 import typer
@@ -30,10 +30,17 @@ from triak_trade.ai.runtime import (
 from triak_trade.backtesting import (
     BacktestEngine,
     BacktestRequest,
+    IsolatedBacktestRunner,
+    IsolatedBacktestRunRequest,
     RealBacktestRunner,
     RealBacktestRunRequest,
     run_fixture_backtest,
 )
+from triak_trade.backtesting.isolated_runner import (
+    IsolatedBacktestResult,
+    default_isolated_parallel_workers,
+)
+from triak_trade.backtesting.real_runner import RealBacktestResult
 from triak_trade.config.settings import Settings, get_settings
 from triak_trade.core.formatting import format_decimal
 from triak_trade.core.health import run_health_checks
@@ -118,6 +125,32 @@ def _build_real_backtest_runner(
     telegram_client: TelegramClientInterface | None = None,
 ) -> RealBacktestRunner:
     return RealBacktestRunner(settings=settings, telegram_client=telegram_client)
+
+
+def _build_isolated_backtest_runner(
+    settings: Settings,
+    telegram_client: TelegramClientInterface | None = None,
+) -> IsolatedBacktestRunner:
+    return IsolatedBacktestRunner(settings=settings, telegram_client=telegram_client)
+
+
+def _run_backtest_with_quiet_network_logs(
+    runner: RealBacktestRunner | IsolatedBacktestRunner,
+    request: RealBacktestRunRequest | IsolatedBacktestRunRequest,
+) -> object:
+    logger_overrides = {
+        "telethon": logging.ERROR,
+        "httpx": logging.WARNING,
+        "httpcore": logging.WARNING,
+    }
+    previous_levels = {name: logging.getLogger(name).level for name in logger_overrides}
+    for name, level in logger_overrides.items():
+        logging.getLogger(name).setLevel(level)
+    try:
+        return runner.run_sync(request)
+    finally:
+        for name, level in previous_levels.items():
+            logging.getLogger(name).setLevel(level)
 
 
 def _build_ai_gateway_client(
@@ -845,6 +878,16 @@ def real_backtest_check_cmd() -> None:
     typer.echo(json.dumps(readiness, indent=2, sort_keys=True))
 
 
+@app.command("isolated-backtest-check")
+def isolated_backtest_check_cmd() -> None:
+    """Show non-secret readiness for the isolated real backtest pipeline."""
+    settings = _load_settings()
+    runner = _build_isolated_backtest_runner(settings)
+    readiness = runner.readiness().model_dump(mode="json")
+    readiness["dashboard_running"] = dashboard_status(settings)["running"]
+    typer.echo(json.dumps(readiness, indent=2, sort_keys=True))
+
+
 @app.command("real-backtest-run")
 def real_backtest_run_cmd(
     channel: str = typer.Option(..., "--channel"),
@@ -880,19 +923,10 @@ def real_backtest_run_cmd(
         send_log_channel=send_log_channel,
         log_per_message=settings.REAL_BACKTEST_LOG_PER_MESSAGE,
     )
-    logger_overrides = {
-        "telethon": logging.ERROR,
-        "httpx": logging.WARNING,
-        "httpcore": logging.WARNING,
-    }
-    previous_levels = {name: logging.getLogger(name).level for name in logger_overrides}
-    for name, level in logger_overrides.items():
-        logging.getLogger(name).setLevel(level)
-    try:
-        result = runner.run_sync(request)
-    finally:
-        for name, level in previous_levels.items():
-            logging.getLogger(name).setLevel(level)
+    result = cast(
+        "RealBacktestResult",
+        _run_backtest_with_quiet_network_logs(runner, request),
+    )
     typer.echo(
         json.dumps(
             {
@@ -915,6 +949,7 @@ def real_backtest_run_cmd(
                 "skipped_reasons": result.skipped_reasons,
                 "warnings": result.warnings,
                 "errors": result.errors,
+                "phase_durations_ms": result.phase_durations_ms,
                 "report_path": result.report_path,
                 "markdown_report_path": result.markdown_report_path,
             },
@@ -922,6 +957,150 @@ def real_backtest_run_cmd(
             sort_keys=True,
         )
     )
+
+
+@app.command("isolated-backtest-run")
+def isolated_backtest_run_cmd(
+    channel: str = typer.Option(..., "--channel"),
+    from_date: str | None = typer.Option(None, "--from"),
+    to_date: str | None = typer.Option(None, "--to"),
+    hours: int | None = typer.Option(None, "--hours"),
+    start_message_link: str | None = typer.Option(None, "--start-message-link"),
+    interval: str = typer.Option("1m", "--interval"),
+    max_messages: int = typer.Option(1000, "--max-messages"),
+    initial_balance: str | None = typer.Option(None, "--initial-balance"),
+    risk_per_trade_pct: str | None = typer.Option(None, "--risk-per-trade-pct"),
+    use_ai: bool = typer.Option(True, "--use-ai/--no-ai"),
+    send_telegram_summary: bool = typer.Option(
+        False,
+        "--send-telegram-summary/--no-send-telegram-summary",
+    ),
+    send_log_channel: bool = typer.Option(
+        True,
+        "--send-log-channel/--no-send-log-channel",
+    ),
+    capital_per_signal: str | None = typer.Option(None, "--capital-per-signal"),
+    fill_policy: str | None = typer.Option(None, "--fill-policy"),
+    leverage_source: str = typer.Option("signal_or_default", "--leverage-source"),
+    fixed_leverage: int | None = typer.Option(None, "--fixed-leverage"),
+    max_effective_leverage: str | None = typer.Option(None, "--max-effective-leverage"),
+    default_signal_leverage: str | None = typer.Option(None, "--default-signal-leverage"),
+    min_allocation_pct: str | None = typer.Option(None, "--min-allocation-pct"),
+    max_allocation_pct: str | None = typer.Option(None, "--max-allocation-pct"),
+    default_stop_pct: str | None = typer.Option(None, "--default-stop-pct"),
+    synthetic_stop_max_loss_pct: str | None = typer.Option(
+        None,
+        "--synthetic-stop-max-loss-pct",
+    ),
+    fee_rate_pct: str | None = typer.Option(None, "--fee-rate-pct"),
+    lifecycle_refresh_interval: str | None = typer.Option(
+        None,
+        "--lifecycle-refresh-interval",
+    ),
+    max_parallel_signals: int | None = typer.Option(None, "--max-parallel-signals"),
+    include_not_filled_signals: bool = typer.Option(
+        True,
+        "--include-not-filled-signals/--exclude-not-filled-signals",
+    ),
+    close_open_positions_at_end: bool = typer.Option(
+        True,
+        "--close-open-positions-at-end/--leave-open-positions-at-end",
+    ),
+    include_signals: bool = typer.Option(False, "--include-signals/--summary-only"),
+) -> None:
+    """Run the isolated per-signal real Telegram + Toobit public backtest."""
+    settings = _load_settings()
+    runner = _build_isolated_backtest_runner(settings)
+    request = IsolatedBacktestRunRequest(
+        channel=channel,
+        from_date=parse_user_datetime_to_utc(from_date) if from_date else None,
+        to_date=parse_user_datetime_to_utc(to_date) if to_date else None,
+        hours=hours,
+        start_message_link=start_message_link,
+        interval=interval,
+        max_messages=max_messages,
+        initial_balance=Decimal(initial_balance or str(settings.BACKTEST_DEFAULT_INITIAL_BALANCE)),
+        risk_per_trade_pct=Decimal(
+            risk_per_trade_pct or str(settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT)
+        ),
+        use_ai=use_ai,
+        send_telegram_summary=send_telegram_summary,
+        send_log_channel=send_log_channel,
+        log_per_message=settings.REAL_BACKTEST_LOG_PER_MESSAGE,
+        capital_per_signal=Decimal(
+            capital_per_signal or str(settings.BACKTEST_DEFAULT_INITIAL_BALANCE)
+        ),
+        fill_policy=BacktestFillPolicy(
+            fill_policy or settings.BACKTEST_DEFAULT_FILL_POLICY
+        ),
+        leverage_source=cast(
+            "Literal['signal_or_default', 'fixed']",
+            leverage_source,
+        ),
+        fixed_leverage=fixed_leverage,
+        max_effective_leverage=Decimal(
+            max_effective_leverage or str(settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE)
+        ),
+        default_signal_leverage=Decimal(
+            default_signal_leverage or str(settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE)
+        ),
+        min_allocation_pct=Decimal(
+            min_allocation_pct or str(settings.BACKTEST_MIN_ALLOCATION_PCT)
+        ),
+        max_allocation_pct=Decimal(
+            max_allocation_pct or str(settings.BACKTEST_MAX_ALLOCATION_PCT)
+        ),
+        default_stop_pct=Decimal(
+            default_stop_pct or str(settings.BACKTEST_DEFAULT_STOP_PCT)
+        ),
+        synthetic_stop_max_loss_pct_of_balance=Decimal(
+            synthetic_stop_max_loss_pct
+            or str(settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE)
+        ),
+        fee_rate_pct=Decimal(fee_rate_pct or str(settings.BACKTEST_FEE_RATE_PCT)),
+        close_open_positions_at_end=close_open_positions_at_end,
+        lifecycle_refresh_interval=(
+            lifecycle_refresh_interval or settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL
+        ),
+        max_parallel_signals=max_parallel_signals or default_isolated_parallel_workers(),
+        include_not_filled_signals=include_not_filled_signals,
+    )
+    result = cast(
+        "IsolatedBacktestResult",
+        _run_backtest_with_quiet_network_logs(runner, request),
+    )
+    payload: dict[str, object] = {
+        "success": result.success,
+        "run_type": result.run_type,
+        "channel": result.channel,
+        "from_date": result.from_date.isoformat(),
+        "to_date": result.to_date.isoformat(),
+        "interval": result.interval,
+        "real_telegram_used": result.real_telegram_used,
+        "real_market_data_used": result.real_market_data_used,
+        "ai_used": result.ai_used,
+        "regex_fallback_used": result.regex_fallback_used,
+        "total_messages": result.total_messages,
+        "classified_messages": result.classified_messages,
+        "parsed_signals": result.parsed_signals,
+        "valid_signals": result.valid_signals,
+        "invalid_signals": result.invalid_signals,
+        "trades_simulated": result.trades_simulated,
+        "trades_filled": result.trades_filled,
+        "wins": result.wins,
+        "losses": result.losses,
+        "total_pnl": str(result.total_pnl),
+        "max_drawdown": str(result.max_drawdown),
+        "warnings": result.warnings,
+        "errors": result.errors,
+        "phase_durations_ms": result.phase_durations_ms,
+        "report_path": result.report_path,
+        "markdown_report_path": result.markdown_report_path,
+        "aggregate": result.aggregate,
+    }
+    if include_signals:
+        payload["signals"] = result.signals
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @app.command("real-backtest-tofan")
@@ -943,6 +1122,48 @@ def real_backtest_tofan_cmd(
         use_ai=use_ai,
         send_telegram_summary=False,
         send_log_channel=settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
+    )
+
+
+@app.command("isolated-backtest-tofan")
+def isolated_backtest_tofan_cmd(
+    hours: int = typer.Option(24, "--hours"),
+    interval: str = typer.Option("1m", "--interval"),
+    max_messages: int = typer.Option(1000, "--max-messages"),
+    use_ai: bool = typer.Option(True, "--use-ai/--no-ai"),
+    include_signals: bool = typer.Option(False, "--include-signals/--summary-only"),
+) -> None:
+    """Run the default isolated real backtest against the configured real channel."""
+    settings = _load_settings()
+    isolated_backtest_run_cmd(
+        channel=settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+        from_date=None,
+        to_date=None,
+        hours=hours,
+        start_message_link=None,
+        interval=interval,
+        max_messages=max_messages,
+        initial_balance=None,
+        risk_per_trade_pct=None,
+        use_ai=use_ai,
+        send_telegram_summary=False,
+        send_log_channel=settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
+        capital_per_signal=None,
+        fill_policy=None,
+        leverage_source="signal_or_default",
+        fixed_leverage=None,
+        max_effective_leverage=None,
+        default_signal_leverage=None,
+        min_allocation_pct=None,
+        max_allocation_pct=None,
+        default_stop_pct=None,
+        synthetic_stop_max_loss_pct=None,
+        fee_rate_pct=None,
+        lifecycle_refresh_interval=None,
+        max_parallel_signals=None,
+        include_not_filled_signals=True,
+        close_open_positions_at_end=True,
+        include_signals=include_signals,
     )
 
 
