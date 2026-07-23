@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,16 +22,37 @@ class BacktestReportStore:
 
     def write(self, payload: dict[str, Any]) -> StoredBacktestReport:
         self.report_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        slug = _channel_slug(str(payload.get("channel", "channel")))
-        base_name = f"real_backtest_{slug}_{stamp}"
-        json_path = self.report_dir / f"{base_name}.report.json"
-        markdown_path = self.report_dir / f"{base_name}.report.md"
         payload = dict(payload)
+        json_path_hint = payload.get("report_path")
+        markdown_path_hint = payload.get("markdown_report_path")
+        if isinstance(json_path_hint, str) and isinstance(markdown_path_hint, str):
+            json_path = Path(json_path_hint)
+            markdown_path = Path(markdown_path_hint)
+        else:
+            # Microseconds plus a short random suffix keep rapid scenario sweeps
+            # from overwriting one another. A second write of the same run still
+            # uses the explicit path hints above and updates its own artifact.
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            slug = _channel_slug(str(payload.get("channel", "channel")))
+            base_name = f"real_backtest_{slug}_{stamp}_{uuid.uuid4().hex[:8]}"
+            json_path = self.report_dir / f"{base_name}.report.json"
+            markdown_path = self.report_dir / f"{base_name}.report.md"
         payload["report_path"] = str(json_path)
         payload["markdown_report_path"] = str(markdown_path)
-        json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        markdown_path.write_text(_render_markdown(payload), encoding="utf-8")
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        write_id = uuid.uuid4().hex
+        json_temporary = json_path.with_name(f".{json_path.name}.{write_id}.tmp")
+        markdown_temporary = markdown_path.with_name(
+            f".{markdown_path.name}.{write_id}.tmp"
+        )
+        json_temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        markdown_temporary.write_text(_render_markdown(payload), encoding="utf-8")
+        json_temporary.replace(json_path)
+        markdown_temporary.replace(markdown_path)
         return StoredBacktestReport(
             json_path=str(json_path),
             markdown_path=str(markdown_path),
