@@ -49,6 +49,11 @@ _STRATEGY_DESCRIPTIONS: dict[str, str] = {
     ),
 }
 
+_STRATEGY_DISPLAY_NAMES: dict[str, str] = {
+    "default_risk_managed": "Default Risk Managed",
+    "tp_trailing_risk_managed": "Trailing TP Risk Managed",
+}
+
 
 def load_strategy_from_dict(config: dict[str, Any]) -> TradeStrategy:
     """
@@ -151,7 +156,7 @@ def list_available_strategies(
         items.append(
             {
                 "key": strategy_key,
-                "name": strategy.name,
+                "name": _STRATEGY_DISPLAY_NAMES.get(strategy_key, strategy.name),
                 "class_name": strategy_class.__name__,
                 "active": strategy_key == active,
                 "description": _STRATEGY_DESCRIPTIONS.get(strategy_key, strategy_key),
@@ -170,7 +175,7 @@ def describe_strategy_by_key(
     strategy = build_strategy_from_key(strategy_key, config_path=config_path)
     return {
         "key": strategy_key,
-        "name": strategy.name,
+        "name": _STRATEGY_DISPLAY_NAMES.get(strategy_key, strategy.name),
         "class_name": type(strategy).__name__,
         "description": _STRATEGY_DESCRIPTIONS.get(strategy_key, strategy_key),
         "parameters": _serialize_strategy_parameters(strategy),
