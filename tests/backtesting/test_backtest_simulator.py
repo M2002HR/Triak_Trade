@@ -505,6 +505,54 @@ def test_simulator_incremental_live_preview_matches_full_replay() -> None:
     assert second_snapshots[-1].current_balance == full_snapshots[-1].current_balance
 
 
+def test_simulator_incremental_replay_defers_events_until_their_segment() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    update_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+        action=SignalAction.UPDATE_TP,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.UPDATE_TP),
+        related_signal_id="s1",
+        debug_notes=[],
+        source_message_id=2,
+    )
+    simulator = BacktestSimulator()
+    _, _, _, state = simulator.simulate_live_preview_incremental(
+        events=[open_event, update_event],
+        candles=[
+            _candle(0, "101.5", "99.5", o="100", c="100.5"),
+            _candle(1, "102", "100", o="100.5", c="101"),
+        ],
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+    )
+
+    assert state.processed_event_count == 1
+
+    _, _, _, state = simulator.simulate_live_preview_incremental(
+        events=[open_event, update_event],
+        candles=[
+            _candle(2, "103", "100", o="101", c="102"),
+            _candle(3, "104", "101", o="102", c="103"),
+        ],
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        previous_state=state,
+    )
+
+    assert state.processed_event_count == 2
+
+
 def test_simulator_incremental_live_preview_handles_new_symbol_with_older_candles() -> None:
     btc_open = BacktestEvent(
         timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
@@ -752,6 +800,46 @@ def test_simulator_builds_virtual_interval_snapshots_and_price_history() -> None
     interval_snapshots = [item for item in snapshots if item.checkpoint_kind == "interval"]
     assert interval_snapshots
     assert interval_snapshots[0].timestamp == datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc)
+
+
+def test_simulator_summary_snapshots_keep_only_final_detailed_state() -> None:
+    open_event = BacktestEvent(
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        action=SignalAction.OPEN,
+        signal_id="s1",
+        parsed_signal=_parsed(SignalAction.OPEN),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    candles = [
+        _candle(0, "101.5", "99.5", o="100", c="100.5"),
+        _candle(5, "103", "100.5", o="100.5", c="102.5"),
+        _candle(10, "104", "101", o="102.5", c="103.5"),
+    ]
+    simulator = BacktestSimulator()
+    _trades_full, _balance_full, full_snapshots = simulator.simulate_with_snapshots(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        snapshot_interval=timedelta(minutes=5),
+    )
+    _trades_summary, _balance_summary, summary_snapshots = simulator.simulate_with_snapshots(
+        events=[open_event],
+        candles=candles,
+        initial_balance=Decimal("1000"),
+        risk_per_trade_pct=Decimal("1"),
+        fill_policy=BacktestFillPolicy.CONSERVATIVE,
+        snapshot_interval=timedelta(minutes=5),
+        snapshot_detail="summary",
+    )
+
+    assert len(summary_snapshots) == len(full_snapshots)
+    assert any(not item.signal_states for item in summary_snapshots[:-1])
+    assert summary_snapshots[-1].signal_states["s1"] == full_snapshots[-1].signal_states["s1"]
+    assert summary_snapshots[-1].current_balance == full_snapshots[-1].current_balance
 
 
 def test_simulator_open_snapshot_does_not_expose_exit_after_partial_tp() -> None:

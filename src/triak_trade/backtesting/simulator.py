@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 from triak_trade.backtesting.models import BacktestEvent
 from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.core.symbols import canonical_market_symbol, same_market_symbol
 from triak_trade.domain.enums import BacktestFillPolicy, EntryType, SignalAction, TradeSide
 from triak_trade.domain.models import Candle, SimulatedTrade
+
+_MAX_SIGNAL_PRICE_HISTORY_POINTS = 1200
 
 
 @dataclass(frozen=True)
@@ -196,7 +199,8 @@ class BacktestSimulator:
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
         close_open_positions_at_end: bool = True,
-        ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
+        snapshot_detail: Literal["full", "summary"] = "full",
+    ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         return self._simulate_internal(
             events=events,
             candles=candles,
@@ -215,6 +219,7 @@ class BacktestSimulator:
             fee_rate_pct=fee_rate_pct,
             default_signal_leverage=default_signal_leverage,
             close_open_positions_at_end=close_open_positions_at_end,
+            snapshot_detail=snapshot_detail,
         )
 
     def simulate_live_preview_incremental(
@@ -235,6 +240,7 @@ class BacktestSimulator:
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
         previous_state: IncrementalPreviewState | None = None,
+        close_open_positions_at_end: bool = False,
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot], IncrementalPreviewState]:
         sorted_events = sorted(events, key=lambda item: item.timestamp)
         sorted_candles = sorted(candles, key=lambda item: item.open_time)
@@ -265,7 +271,22 @@ class BacktestSimulator:
             processed_until=state.processed_until,
         )
 
+        processed_event_count = state.processed_event_count
+        latest_candle_open_time = sorted_candles[-1].open_time if sorted_candles else None
         for event in sorted_events[state.processed_event_count :]:
+            # A segmented replay must not mark a later signal as not-filled
+            # merely because its entry candle belongs to a future segment.
+            # Leave the event pending until the segment that contains its
+            # executable candle is available.
+            if (
+                latest_candle_open_time is not None
+                and (
+                    state.processed_until is None
+                    or latest_candle_open_time > state.processed_until
+                )
+                and event.timestamp > latest_candle_open_time
+            ):
+                break
             candle_index, resolved_trades = self._process_candles_until(
                 open_positions=state.open_positions,
                 candles=sorted_candles,
@@ -306,6 +327,7 @@ class BacktestSimulator:
                 fee_rate_pct=fee_rate_pct,
                 default_signal_leverage=default_signal_leverage,
             )
+            processed_event_count += 1
 
         candle_index, resolved_trades = self._process_candles_until(
             open_positions=state.open_positions,
@@ -326,6 +348,32 @@ class BacktestSimulator:
         for trade in resolved_trades:
             state.closed_trades_by_signal[trade.signal_id] = trade
 
+        if close_open_positions_at_end:
+            for signal_id, position in list(state.open_positions.items()):
+                final_exit_time = (
+                    sorted_candles[-1].close_time
+                    if sorted_candles
+                    else position.exit_time or position.entry_time
+                )
+                outcome = self._close_remaining_position(
+                    position,
+                    final_exit_time,
+                    position.exit_price
+                    or self._last_price(
+                        sorted_candles,
+                        position.symbol,
+                        position.entry_price,
+                    ),
+                    "open_until_end"
+                    if position.targets_hit == 0
+                    else "partial_tp_open_until_end",
+                )
+                state.closed_trades_by_signal[outcome.signal_id] = outcome
+                state.closed_signal_metadata[outcome.signal_id] = (
+                    self._closed_signal_snapshot_meta(position)
+                )
+                del state.open_positions[signal_id]
+
         snapshot = self._build_live_preview_snapshot(
             events=sorted_events,
             candles=sorted_candles,
@@ -333,7 +381,7 @@ class BacktestSimulator:
             initial_balance=initial_balance,
             state=state,
         )
-        state.processed_event_count = len(sorted_events)
+        state.processed_event_count = processed_event_count
         processed_until = (
             sorted_candles[candle_index - 1].close_time
             if candle_index > 0
@@ -365,6 +413,7 @@ class BacktestSimulator:
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
         close_open_positions_at_end: bool = True,
+        snapshot_detail: Literal["full", "summary"] = "full",
     ) -> tuple[list[SimulatedTrade], Decimal, list[SimulationSnapshot]]:
         trades: list[SimulatedTrade] = []
         closed_trades_by_signal: dict[str, SimulatedTrade] = {}
@@ -383,6 +432,7 @@ class BacktestSimulator:
             snapshot_interval=snapshot_interval,
         )
         candle_index = 0
+        include_signal_states_in_intermediate_snapshots = snapshot_detail == "full"
 
         def record_not_filled_open(
             *,
@@ -431,6 +481,7 @@ class BacktestSimulator:
                         take_profit_history=take_profit_history,
                         closed_signal_metadata=closed_signal_metadata,
                         checkpoint_kind="message",
+                        include_signal_states=include_signal_states_in_intermediate_snapshots,
                     )
                 )
 
@@ -453,6 +504,9 @@ class BacktestSimulator:
                 closed_signal_metadata=closed_signal_metadata,
                 next_snapshot_at=next_snapshot_at,
                 snapshot_interval=snapshot_interval,
+                include_signal_states_in_snapshots=(
+                    include_signal_states_in_intermediate_snapshots
+                ),
             )
             if capture_snapshots and snapshot_interval is not None:
                 next_snapshot_at = self._advance_snapshot_anchor(
@@ -875,6 +929,7 @@ class BacktestSimulator:
                         take_profit_history=take_profit_history,
                         closed_signal_metadata=closed_signal_metadata,
                         checkpoint_kind="message",
+                        include_signal_states=include_signal_states_in_intermediate_snapshots,
                     )
                 )
 
@@ -896,6 +951,7 @@ class BacktestSimulator:
             closed_signal_metadata=closed_signal_metadata,
             next_snapshot_at=next_snapshot_at,
             snapshot_interval=snapshot_interval,
+            include_signal_states_in_snapshots=include_signal_states_in_intermediate_snapshots,
         )
         for trade in resolved_trades:
             trades.append(trade)
@@ -920,6 +976,7 @@ class BacktestSimulator:
                     take_profit_history=take_profit_history,
                     closed_signal_metadata=closed_signal_metadata,
                     checkpoint_kind="message",
+                    include_signal_states=include_signal_states_in_intermediate_snapshots,
                 )
             )
 
@@ -948,7 +1005,7 @@ class BacktestSimulator:
                 )
                 balance += outcome.pnl
                 del open_positions[signal_id]
-        if capture_snapshots and trades:
+        if capture_snapshots and (trades or open_positions or closed_trades_by_signal):
             latest_snapshot_time = snapshots[-1].timestamp if snapshots else None
             fallback_snapshot_time = (
                 sorted_candles[-1].close_time
@@ -959,31 +1016,49 @@ class BacktestSimulator:
                     else datetime.now(timezone.utc)
                 )
             )
-            final_timestamp = max(
-                (
-                    trade.exit_time
-                    or trade.entry_time
-                    or fallback_snapshot_time
-                )
+            final_timestamp_candidates = [
+                trade.exit_time or trade.entry_time or fallback_snapshot_time
                 for trade in trades
+            ]
+            final_timestamp_candidates.extend(
+                trade.exit_time or trade.entry_time or fallback_snapshot_time
+                for trade in closed_trades_by_signal.values()
             )
-            if latest_snapshot_time is None or final_timestamp > latest_snapshot_time:
-                snapshots.append(
-                    self._build_snapshot(
-                        timestamp=final_timestamp,
-                        source_message_id=None,
-                        open_positions=open_positions,
-                        closed_trades_by_signal=closed_trades_by_signal,
-                        candles=sorted_candles,
-                        processed_candle_count=candle_index,
-                        initial_balance=initial_balance,
-                        signal_price_history=signal_price_history,
-                        stop_loss_history=stop_loss_history,
-                        take_profit_history=take_profit_history,
-                        closed_signal_metadata=closed_signal_metadata,
-                        checkpoint_kind="message",
-                    )
+            final_timestamp_candidates.extend(
+                position.exit_time or position.entry_time or fallback_snapshot_time
+                for position in open_positions.values()
+            )
+            final_timestamp = max(final_timestamp_candidates, default=fallback_snapshot_time)
+            needs_detailed_final_snapshot = (
+                snapshot_detail == "summary"
+                or latest_snapshot_time is None
+                or final_timestamp > latest_snapshot_time
+            )
+            if needs_detailed_final_snapshot:
+                checkpoint_kind = (
+                    snapshots[-1].checkpoint_kind
+                    if snapshots and latest_snapshot_time == final_timestamp
+                    else "message"
                 )
+                detailed_snapshot = self._build_snapshot(
+                    timestamp=final_timestamp,
+                    source_message_id=None,
+                    open_positions=open_positions,
+                    closed_trades_by_signal=closed_trades_by_signal,
+                    candles=sorted_candles,
+                    processed_candle_count=candle_index,
+                    initial_balance=initial_balance,
+                    signal_price_history=signal_price_history,
+                    stop_loss_history=stop_loss_history,
+                    take_profit_history=take_profit_history,
+                    closed_signal_metadata=closed_signal_metadata,
+                    checkpoint_kind=checkpoint_kind,
+                    include_signal_states=True,
+                )
+                if snapshots and latest_snapshot_time == final_timestamp:
+                    snapshots[-1] = detailed_snapshot
+                else:
+                    snapshots.append(detailed_snapshot)
 
         return trades, balance, snapshots
 
@@ -1081,6 +1156,7 @@ class BacktestSimulator:
         closed_signal_metadata: dict[str, _ClosedSignalSnapshotMeta] | None = None,
         next_snapshot_at: datetime | None = None,
         snapshot_interval: timedelta | None = None,
+        include_signal_states_in_snapshots: bool = True,
     ) -> tuple[int, list[SimulatedTrade]]:
         if not open_positions:
             if stop_at is None:
@@ -1197,6 +1273,7 @@ class BacktestSimulator:
                             take_profit_history=take_profit_history,
                             closed_signal_metadata=closed_signal_metadata,
                             checkpoint_kind="interval",
+                            include_signal_states=include_signal_states_in_snapshots,
                         )
                     )
                     next_snapshot_at = next_snapshot_at + snapshot_interval
@@ -1923,59 +2000,26 @@ class BacktestSimulator:
         take_profit_history: dict[str, list[PriceLevelSpan]],
         closed_signal_metadata: dict[str, _ClosedSignalSnapshotMeta],
         checkpoint_kind: str,
+        include_signal_states: bool = True,
     ) -> SimulationSnapshot:
         realized_pnl = sum(
             (trade.pnl for trade in closed_trades_by_signal.values()),
             Decimal("0"),
         )
         signal_states: dict[str, SimulationSignalState] = {}
-        relevant_candles = candles[:processed_candle_count]
         unrealized_pnl = Decimal("0")
 
-        for signal_id, trade in closed_trades_by_signal.items():
-            mark_price = trade.exit_price or trade.entry_price or Decimal("0")
-            meta = closed_signal_metadata.get(signal_id)
-            signal_states[signal_id] = SimulationSignalState(
-                signal_id=signal_id,
-                symbol=trade.symbol,
-                side=trade.side,
-                status=trade.status,
-                original_quantity=trade.quantity,
-                open_quantity=Decimal("0"),
-                entry_price=trade.entry_price,
-                stop_loss=meta.stop_loss if meta is not None else None,
-                take_profits=list(meta.take_profits) if meta is not None else [],
-                notional_value=(trade.entry_price or Decimal("0")) * trade.quantity,
-                risk_amount=meta.risk_amount if meta is not None else Decimal("0"),
-                realized_pnl=trade.pnl,
-                unrealized_pnl=Decimal("0"),
-                total_pnl_pct=trade.pnl_pct,
-                mark_price=mark_price,
-                entry_time=trade.entry_time or timestamp,
-                exit_time=trade.exit_time,
-                exit_price=trade.exit_price,
-                targets_hit=meta.targets_hit if meta is not None else 0,
-                notes=list(trade.notes),
-                declared_leverage=meta.declared_leverage if meta is not None else None,
-                effective_leverage=(
-                    meta.effective_leverage if meta is not None else Decimal("1")
-                ),
-                margin=meta.margin if meta is not None else Decimal("0"),
-                balance_basis=meta.balance_basis if meta is not None else Decimal("0"),
-                margin_pnl_pct=(
-                    ((trade.pnl / meta.margin) * Decimal("100"))
-                    if meta is not None and meta.margin > Decimal("0")
-                    else Decimal("0")
-                ),
-                price_history=list(signal_price_history.get(signal_id, [])),
-                stop_loss_history=list(stop_loss_history.get(signal_id, [])),
-                take_profit_history=list(take_profit_history.get(signal_id, [])),
-            )
-
         for signal_id, position in open_positions.items():
-            mark_price = self._last_price(relevant_candles, position.symbol, position.entry_price)
+            mark_price = self._last_price_until(
+                candles=candles,
+                symbol=position.symbol,
+                fallback=position.entry_price,
+                processed_candle_count=processed_candle_count,
+            )
             unrealized = self._calculate_pnl(position, mark_price, position.remaining_quantity)
             unrealized_pnl += unrealized
+            if not include_signal_states:
+                continue
             notional_value = position.entry_price * position.original_quantity
             # Net the realized component by fees accrued so far (entry + any
             # partial exits) so live snapshots match the finalized net PnL.
@@ -2030,6 +2074,47 @@ class BacktestSimulator:
                 stop_loss_history=list(stop_loss_history.get(signal_id, [])),
                 take_profit_history=list(take_profit_history.get(signal_id, [])),
             )
+
+        if include_signal_states:
+            for signal_id, trade in closed_trades_by_signal.items():
+                mark_price = trade.exit_price or trade.entry_price or Decimal("0")
+                meta = closed_signal_metadata.get(signal_id)
+                signal_states[signal_id] = SimulationSignalState(
+                    signal_id=signal_id,
+                    symbol=trade.symbol,
+                    side=trade.side,
+                    status=trade.status,
+                    original_quantity=trade.quantity,
+                    open_quantity=Decimal("0"),
+                    entry_price=trade.entry_price,
+                    stop_loss=meta.stop_loss if meta is not None else None,
+                    take_profits=list(meta.take_profits) if meta is not None else [],
+                    notional_value=(trade.entry_price or Decimal("0")) * trade.quantity,
+                    risk_amount=meta.risk_amount if meta is not None else Decimal("0"),
+                    realized_pnl=trade.pnl,
+                    unrealized_pnl=Decimal("0"),
+                    total_pnl_pct=trade.pnl_pct,
+                    mark_price=mark_price,
+                    entry_time=trade.entry_time or timestamp,
+                    exit_time=trade.exit_time,
+                    exit_price=trade.exit_price,
+                    targets_hit=meta.targets_hit if meta is not None else 0,
+                    notes=list(trade.notes),
+                    declared_leverage=meta.declared_leverage if meta is not None else None,
+                    effective_leverage=(
+                        meta.effective_leverage if meta is not None else Decimal("1")
+                    ),
+                    margin=meta.margin if meta is not None else Decimal("0"),
+                    balance_basis=meta.balance_basis if meta is not None else Decimal("0"),
+                    margin_pnl_pct=(
+                        ((trade.pnl / meta.margin) * Decimal("100"))
+                        if meta is not None and meta.margin > Decimal("0")
+                        else Decimal("0")
+                    ),
+                    price_history=list(signal_price_history.get(signal_id, [])),
+                    stop_loss_history=list(stop_loss_history.get(signal_id, [])),
+                    take_profit_history=list(take_profit_history.get(signal_id, [])),
+                )
 
         wins = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl > 0)
         losses = sum(1 for trade in closed_trades_by_signal.values() if trade.pnl < 0)
@@ -2100,6 +2185,11 @@ class BacktestSimulator:
                 mark_price=candle.close,
             )
         )
+        if len(history) > _MAX_SIGNAL_PRICE_HISTORY_POINTS * 2:
+            # Charts are compacted to 1,200 points downstream. Keep the same
+            # bounded representation during long incremental replays so a
+            # months-long 1m run cannot retain every Decimal price point.
+            history[:] = history[::2]
 
     def _replace_stop_loss_history(
         self,
@@ -2229,10 +2319,28 @@ class BacktestSimulator:
         return current
 
     def _last_price(self, candles: list[Candle], symbol: str, fallback: Decimal) -> Decimal:
-        relevant = [c for c in candles if same_market_symbol(c.symbol, symbol)]
-        if not relevant:
-            return fallback
-        return relevant[-1].close
+        return self._last_price_until(
+            candles=candles,
+            symbol=symbol,
+            fallback=fallback,
+            processed_candle_count=None,
+        )
+
+    def _last_price_until(
+        self,
+        *,
+        candles: list[Candle],
+        symbol: str,
+        fallback: Decimal,
+        processed_candle_count: int | None,
+    ) -> Decimal:
+        upper_bound = len(candles) if processed_candle_count is None else processed_candle_count
+        safe_upper_bound = max(0, min(upper_bound, len(candles)))
+        for index in range(safe_upper_bound - 1, -1, -1):
+            candle = candles[index]
+            if same_market_symbol(candle.symbol, symbol):
+                return candle.close
+        return fallback
 
     def _hit_sl(self, position: _OpenPosition, candle: Candle) -> bool:
         if position.side.is_short:
