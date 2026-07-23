@@ -234,6 +234,20 @@ class Settings(BaseSettings):
     # a hard cap on per-symbol memory growth. 90 000 candles at 1m is about
     # 62.5 days of data for a single symbol. Set to 0 to disable the cap.
     REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL: int = 90000
+    # Isolated backtests fetch and simulate many independent symbols. Keep this
+    # budget deliberately lower than the regular runner's cache window: Candle
+    # objects carry Decimal values and a single large 1m series can otherwise
+    # exhaust the dashboard worker's cgroup memory. Oversized symbol windows
+    # are reported as skipped rather than silently truncated and ranked.
+    ISOLATED_BACKTEST_MAX_CANDLES_PER_SYMBOL: int = Field(default=10000, ge=1)
+    # This is an end-to-end budget for one symbol, including archive downloads,
+    # provider fallback and parsing; provider HTTP timeouts alone are not enough
+    # to bound a long series of successful-but-slow requests.
+    ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS: int = Field(default=180, ge=1)
+    # Fetching multiple Decimal-heavy candle series concurrently was the source
+    # of an OOM restart. Keep acquisition serialized; signal simulation retains
+    # its independently configured worker parallelism.
+    ISOLATED_BACKTEST_MARKET_DATA_MAX_CONCURRENCY: int = Field(default=1, ge=1)
     REAL_BACKTEST_ACTIVE_SIGNAL_HOURS: int = 0
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
     REAL_BACKTEST_USE_AI: bool = True

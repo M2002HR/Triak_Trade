@@ -84,6 +84,13 @@ Current behavior:
 - cached candle ranges extend only when a later signal needs more history/future coverage
 - long backtests therefore keep later signals fillable without forcing unbounded symbol caches
 
+Isolated runs add a stricter safety boundary because they can fetch many independent 1m
+series in one dashboard worker. `ISOLATED_BACKTEST_MAX_CANDLES_PER_SYMBOL` defaults to
+10,000 and `ISOLATED_BACKTEST_MARKET_DATA_MAX_CONCURRENCY` defaults to one. An oversized
+window is explicitly skipped (never silently truncated or included in aggregate rankings),
+and `ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS` is an end-to-end deadline covering
+archive reads, fallback, and parsing for one symbol.
+
 ## Outputs
 
 Successful runs can produce:
