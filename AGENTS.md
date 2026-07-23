@@ -44,3 +44,4 @@ Triak_Trade is a modular signal intelligence and trading platform.
 - Do not scatter direct log-channel sends through core logic; use observability event/reporting services.
 - Dashboard auth tokens and session secrets must live only in root `.env.local` and must never be printed.
 - Dashboard Auto Mode and Kill Switch are runtime state only until future Risk Engine/Demo Execution modules exist.
+- After completing every Codex task, always rebuild the Docker images with `docker compose build`, bring the stack up with `docker compose up -d`, and verify `docker compose ps` plus relevant health/log output before the final response. Never skip this final Docker rebuild-and-start verification; if Docker is genuinely unavailable, report the blocker explicitly.
