@@ -14,6 +14,7 @@ from html import escape
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from triak_trade.agents.classifier import (
@@ -159,6 +160,8 @@ class RealBacktestProgressEvent(BaseModel):
     summary: str
     current_message_id: int | None = None
     runtime_duration_ms: int | None = None
+    current_phase_elapsed_ms: int | None = None
+    phase_durations_ms: dict[str, int] = Field(default_factory=dict)
     counts: dict[str, int] = Field(default_factory=dict)
     live_metrics: dict[str, str] | None = None
     live_signals: list[dict[str, Any]] | None = None
@@ -173,6 +176,7 @@ class RealBacktestReadiness(BaseModel):
     telegram_session_configured: bool
     toobit_public_market_ready: bool
     ai_gateway_enabled: bool
+    ai_gateway_reachable: bool | None = None
     regex_fallback_enabled: bool
     report_dir: str
     log_channel_enabled: bool
@@ -264,6 +268,7 @@ class RealBacktestResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     generated_at: datetime
     runtime_duration_ms: int | None = None
+    phase_durations_ms: dict[str, int] = Field(default_factory=dict)
     report_path: str | None = None
     markdown_report_path: str | None = None
 
@@ -326,6 +331,9 @@ class RealBacktestRunner:
         self.strategy: TradeStrategy = strategy or load_strategy()
         self.strategy_key: str | None = None
         self._run_started_at: datetime | None = None
+        self._active_phase: str | None = None
+        self._active_phase_started_at: datetime | None = None
+        self._completed_phase_durations_ms: dict[str, int] = {}
 
     def _log_event(self, level: int, event: str, /, **fields: Any) -> None:
         log_event(log, level, event, **fields)
@@ -370,6 +378,11 @@ class RealBacktestRunner:
             issues.append("Binance public historical market-data settings are incomplete")
         Path(self.settings.REAL_BACKTEST_REPORT_DIR).mkdir(parents=True, exist_ok=True)
         Path(self.settings.BINANCE_PUBLIC_DATA_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+        ai_gateway_reachable = (
+            self._check_ai_gateway_reachable(timeout_seconds=2)
+            if self.settings.AI_GATEWAY_ENABLED
+            else None
+        )
         readiness = RealBacktestReadiness(
             ready=not issues,
             issues=issues,
@@ -378,6 +391,7 @@ class RealBacktestRunner:
             telegram_session_configured=telegram_session_configured,
             toobit_public_market_ready=historical_market_ready,
             ai_gateway_enabled=self.settings.AI_GATEWAY_ENABLED,
+            ai_gateway_reachable=ai_gateway_reachable,
             regex_fallback_enabled=self.settings.REAL_BACKTEST_USE_REGEX_FALLBACK,
             report_dir=self.settings.REAL_BACKTEST_REPORT_DIR,
             log_channel_enabled=(
@@ -392,6 +406,7 @@ class RealBacktestRunner:
             issue_count=len(readiness.issues),
             issues=readiness.issues,
             ai_gateway_enabled=readiness.ai_gateway_enabled,
+            ai_gateway_reachable=readiness.ai_gateway_reachable,
             regex_fallback_enabled=readiness.regex_fallback_enabled,
         )
         return readiness
@@ -404,6 +419,7 @@ class RealBacktestRunner:
     ) -> RealBacktestResult:
         self._log_sending_disabled_for_run = False
         self._run_started_at = datetime.now(timezone.utc)
+        self._reset_phase_tracking()
         readiness = self.readiness()
         from_date, to_date = request.resolve_range()
         warnings: list[str] = []
@@ -464,7 +480,7 @@ class RealBacktestRunner:
             if request.send_log_channel:
                 await self._try_send_log(
                     "Real backtest failed before classification\n"
-                    f"channel={request.channel}\nreason=AI gateway required but not enabled",
+                    f"channel={request.channel}\nreason=AI gateway required but unavailable",
                     warnings=warnings,
                     warning_message=(
                         "Telegram log channel send failed before AI-config return; "
@@ -476,7 +492,10 @@ class RealBacktestRunner:
                 from_date=from_date,
                 to_date=to_date,
                 interval=request.interval,
-                errors=["AI gateway is required for this backtest run but is not enabled."],
+                errors=[
+                    selection.warning
+                    or "AI gateway is required for this backtest run but is unavailable."
+                ],
             )
         self._emit_run_progress(
             progress_callback,
@@ -535,6 +554,8 @@ class RealBacktestRunner:
             )
 
         counts = {
+            "history_steps_total": 1,
+            "history_steps_completed": 1,
             "total_messages": len(messages),
             "caption_media_candidates": sum(
                 1
@@ -549,6 +570,12 @@ class RealBacktestRunner:
             "ignored_messages": 0,
             "ambiguous_messages": 0,
             "ai_failed_messages": 0,
+            "market_data_targets_total": 0,
+            "market_data_targets_completed": 0,
+            "simulation_targets_total": 0,
+            "simulation_targets_completed": 0,
+            "report_steps_total": 1,
+            "report_steps_completed": 0,
             "trades_simulated": 0,
             "trades_filled": 0,
         }
@@ -761,6 +788,8 @@ class RealBacktestRunner:
         candles: list[Any] = []
         skipped_reasons: list[str] = []
         real_market_data_used = False
+        counts["market_data_targets_total"] = len(symbols)
+        counts["market_data_targets_completed"] = 0
         self._emit_run_progress(
             progress_callback,
             phase="fetch_market_data",
@@ -844,6 +873,18 @@ class RealBacktestRunner:
                         trace=message_trace,
                     )
                     await self._maybe_send_message_log(request, message_trace, warnings)
+                counts["market_data_targets_completed"] += 1
+                self._emit_run_progress(
+                    progress_callback,
+                    phase="fetch_market_data",
+                    status="running",
+                    summary=(
+                        f"Processed market data for "
+                        f"{counts['market_data_targets_completed']} of "
+                        f"{counts['market_data_targets_total']} symbols."
+                    ),
+                    counts=counts,
+                )
                 continue
 
             if fetched:
@@ -907,6 +948,18 @@ class RealBacktestRunner:
                         trace=message_trace,
                     )
                     await self._maybe_send_message_log(request, message_trace, warnings)
+            counts["market_data_targets_completed"] += 1
+            self._emit_run_progress(
+                progress_callback,
+                phase="fetch_market_data",
+                status="running",
+                summary=(
+                    f"Processed market data for "
+                    f"{counts['market_data_targets_completed']} of "
+                    f"{counts['market_data_targets_total']} symbols."
+                ),
+                counts=counts,
+            )
 
         if request.send_log_channel:
             await self._try_send_log(
@@ -997,6 +1050,8 @@ class RealBacktestRunner:
             summary="Running simulation over the validated signal timeline.",
             counts=counts,
         )
+        counts["simulation_targets_total"] = len(signal_trace_map)
+        counts["simulation_targets_completed"] = 0
         for _signal_id, message_id in signal_trace_map.items():
             simulation_trace = traces_by_message_id.get(message_id)
             if simulation_trace is None:
@@ -1033,7 +1088,7 @@ class RealBacktestRunner:
         trades_filled = sum(1 for trade in report.trades if trade.status != "not_filled")
         wins = sum(1 for trade in report.trades if trade.pnl > 0)
         losses = sum(1 for trade in report.trades if trade.pnl < 0)
-        for signal_id, message_id in signal_trace_map.items():
+        for index, (signal_id, message_id) in enumerate(signal_trace_map.items(), start=1):
             trace: RealBacktestMessageTrace | None = traces_by_message_id.get(message_id)
             if trace is None:
                 continue
@@ -1072,6 +1127,17 @@ class RealBacktestRunner:
                 counts=counts,
                 trace=trace,
             )
+            counts["simulation_targets_completed"] = index
+            self._emit_run_progress(
+                progress_callback,
+                phase="simulate",
+                status="running",
+                summary=(
+                    f"Simulation finalized for {index} of "
+                    f"{counts['simulation_targets_total']} signals."
+                ),
+                counts=counts,
+            )
             await self._maybe_send_message_log(request, trace, warnings)
         result = RealBacktestResult(
             success=True,
@@ -1108,6 +1174,7 @@ class RealBacktestRunner:
             warnings=warnings,
             generated_at=report.generated_at,
             runtime_duration_ms=self._elapsed_runtime_ms(),
+            phase_durations_ms=self._phase_durations_snapshot(),
         )
         self._emit_run_progress(
             progress_callback,
@@ -1119,6 +1186,7 @@ class RealBacktestRunner:
             ),
             counts={
                 **counts,
+                "simulation_targets_completed": counts["simulation_targets_total"],
                 "trades_simulated": result.trades_simulated,
                 "trades_filled": result.trades_filled,
             },
@@ -1132,6 +1200,18 @@ class RealBacktestRunner:
                 "live_total_pnl": str(result.total_pnl),
                 "live_realized_balance": str(request.initial_balance + result.total_pnl),
                 "live_current_balance": str(request.initial_balance + result.total_pnl),
+            },
+        )
+        self._emit_run_progress(
+            progress_callback,
+            phase="report",
+            status="running",
+            summary="Writing final report artifacts.",
+            counts={
+                **counts,
+                "report_steps_completed": 0,
+                "trades_simulated": result.trades_simulated,
+                "trades_filled": result.trades_filled,
             },
         )
         stored = self.report_store.write(self._build_payload(result, report, score))
@@ -1154,6 +1234,7 @@ class RealBacktestRunner:
             summary=f"Report written to {result.report_path}.",
             counts={
                 **counts,
+                "report_steps_completed": 1,
                 "trades_simulated": result.trades_simulated,
                 "trades_filled": result.trades_filled,
             },
@@ -1168,6 +1249,14 @@ class RealBacktestRunner:
                 "live_realized_balance": str(request.initial_balance + result.total_pnl),
                 "live_current_balance": str(request.initial_balance + result.total_pnl),
             },
+        )
+        result.phase_durations_ms = self._phase_durations_snapshot()
+        self.report_store.write(
+            self._build_payload(result, report, score)
+            | {
+                "report_path": result.report_path,
+                "markdown_report_path": result.markdown_report_path,
+            }
         )
 
         if request.send_log_channel:
@@ -1233,6 +1322,28 @@ class RealBacktestRunner:
 
     def _select_classifier(self, use_ai: bool) -> _ClassificationSelection:
         if use_ai and self.settings.AI_GATEWAY_ENABLED:
+            gateway_running = self._check_ai_gateway_reachable(timeout_seconds=2)
+            warning: str | None = None
+            if not gateway_running:
+                from triak_trade.ai.runtime import ensure_local_ai_gateway_ready
+
+                try:
+                    gateway_status = ensure_local_ai_gateway_ready(self.settings)
+                except Exception as exc:
+                    gateway_status = {"running": False}
+                    warning = (
+                        "AI gateway is enabled but unreachable; "
+                        f"local start failed with {type(exc).__name__}."
+                    )
+                else:
+                    gateway_running = bool(
+                        gateway_status.get("running")
+                    ) or self._check_ai_gateway_reachable(timeout_seconds=2)
+                    if gateway_running and gateway_status.get("started"):
+                        warning = "AI gateway was auto-started for this backtest run."
+                    elif not gateway_running:
+                        warning = "AI gateway is enabled but unreachable."
+            allow_regex_fallback = self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK
             client = AjilGatewayClient(
                 base_url=self.settings.AI_GATEWAY_BASE_URL,
                 timeout_seconds=self.settings.AI_GATEWAY_TIMEOUT_SECONDS,
@@ -1256,20 +1367,23 @@ class RealBacktestRunner:
             classifier: MessageClassifier = AIMessageClassifier(
                 settings=self.settings,
                 gateway_client=client,
-                regex_fallback=None,
+                regex_fallback=RegexMessageClassifier() if allow_regex_fallback else None,
             )
             selection = _ClassificationSelection(
                 classifier=classifier,
                 ai_requested=True,
-                ai_configured=True,
-                warning=None,
+                ai_configured=gateway_running or allow_regex_fallback,
+                warning=warning,
             )
             self._log_event(
                 logging.INFO,
                 "backtesting.real_classifier_configured",
                 classifier_type=type(selection.classifier).__name__,
                 ai_requested=True,
-                ai_configured=True,
+                ai_configured=selection.ai_configured,
+                ai_gateway_reachable=gateway_running,
+                ai_regex_fallback_enabled=allow_regex_fallback,
+                warning=selection.warning,
             )
             return selection
         if use_ai:
@@ -1301,7 +1415,7 @@ class RealBacktestRunner:
                 ),
                 ai_requested=True,
                 ai_configured=False,
-                warning="AI gateway is required but not enabled.",
+                warning="AI gateway is required for this backtest run but is not enabled.",
             )
             self._log_event(
                 logging.WARNING,
@@ -1520,6 +1634,7 @@ class RealBacktestRunner:
             warnings=warnings or [],
             generated_at=datetime.now(timezone.utc),
             runtime_duration_ms=self._elapsed_runtime_ms(),
+            phase_durations_ms=self._phase_durations_snapshot(),
         )
         stored = self.report_store.write(self._build_payload(result, None, Decimal("0")))
         result.report_path = stored.json_path
@@ -2811,12 +2926,15 @@ class RealBacktestRunner:
                 last_error_type = type(exc).__name__
                 continue
             if fetched:
-                prefetched_candles_by_symbol[candidate_symbol] = list(fetched)
+                # Providers already return a list. Retaining that exact list
+                # avoids a second, potentially very large, Decimal/Candle
+                # allocation while the backtest worker is under memory pressure.
+                prefetched_candles_by_symbol[candidate_symbol] = fetched
                 prefetched_candle_ranges_by_symbol[candidate_symbol] = _PrefetchedCandleRange(
                     start=range_start,
                     end=range_end,
                 )
-                return list(fetched), candidate_symbol, False, None, no_data_candidates
+                return fetched, candidate_symbol, False, None, no_data_candidates
             no_data_candidates.append(candidate_symbol)
 
         return None, market_symbol, False, last_error_type, no_data_candidates
@@ -3778,6 +3896,12 @@ class RealBacktestRunner:
         event_timestamp: datetime | None = None,
         current_message_id: int | None = None,
     ) -> None:
+        event_time = event_timestamp or datetime.now(timezone.utc)
+        current_phase_elapsed_ms, phase_durations_ms = self._snapshot_phase_progress(
+            phase=phase,
+            status=status,
+            event_timestamp=event_time,
+        )
         self._log_event(
             logging.DEBUG,
             "backtesting.real_progress_run_event",
@@ -3792,12 +3916,14 @@ class RealBacktestRunner:
         progress_callback(
             RealBacktestProgressEvent(
                 event_type="run",
-                timestamp=event_timestamp or datetime.now(timezone.utc),
+                timestamp=event_time,
                 phase=phase,
                 status=status,
                 summary=summary,
                 current_message_id=current_message_id,
                 runtime_duration_ms=self._elapsed_runtime_ms(),
+                current_phase_elapsed_ms=current_phase_elapsed_ms,
+                phase_durations_ms=phase_durations_ms,
                 counts=counts or {},
                 live_metrics=live_metrics,
                 live_signals=live_signals,
@@ -3826,21 +3952,94 @@ class RealBacktestRunner:
         )
         if progress_callback is None:
             return
+        event_time = datetime.now(timezone.utc)
+        current_phase_elapsed_ms, phase_durations_ms = self._snapshot_phase_progress(
+            phase=phase,
+            status="running",
+            event_timestamp=event_time,
+        )
         progress_callback(
             RealBacktestProgressEvent(
                 event_type="message",
-                timestamp=datetime.now(timezone.utc),
+                timestamp=event_time,
                 phase=phase,
                 status="running",
                 summary=summary,
                 current_message_id=trace.message_id,
                 runtime_duration_ms=self._elapsed_runtime_ms(),
+                current_phase_elapsed_ms=current_phase_elapsed_ms,
+                phase_durations_ms=phase_durations_ms,
                 counts=counts,
                 live_metrics=live_metrics,
                 live_signals=live_signals,
                 trace=trace.model_copy(deep=True),
             )
         )
+
+    def _reset_phase_tracking(self) -> None:
+        self._active_phase = None
+        self._active_phase_started_at = None
+        self._completed_phase_durations_ms = {}
+
+    def _snapshot_phase_progress(
+        self,
+        *,
+        phase: str,
+        status: Literal["queued", "running", "completed", "failed"],
+        event_timestamp: datetime,
+    ) -> tuple[int | None, dict[str, int]]:
+        event_time = self._to_utc(event_timestamp)
+        if self._active_phase != phase:
+            self._finalize_active_phase(event_time)
+            self._active_phase = phase
+            self._active_phase_started_at = event_time
+        snapshot = self._phase_durations_snapshot(now=event_time)
+        current_phase_elapsed_ms = snapshot.get(phase)
+        if status in {"completed", "failed"}:
+            self._finalize_active_phase(event_time)
+            snapshot = self._phase_durations_snapshot()
+            current_phase_elapsed_ms = snapshot.get(phase)
+        return current_phase_elapsed_ms, snapshot
+
+    def _finalize_active_phase(self, event_timestamp: datetime) -> None:
+        if self._active_phase is None or self._active_phase_started_at is None:
+            return
+        duration_ms = max(
+            0,
+            int((event_timestamp - self._active_phase_started_at).total_seconds() * 1000),
+        )
+        self._completed_phase_durations_ms[self._active_phase] = (
+            self._completed_phase_durations_ms.get(self._active_phase, 0) + duration_ms
+        )
+        self._active_phase = None
+        self._active_phase_started_at = None
+
+    def _phase_durations_snapshot(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        snapshot = dict(self._completed_phase_durations_ms)
+        if self._active_phase is None or self._active_phase_started_at is None:
+            return snapshot
+        current_time = self._to_utc(now or datetime.now(timezone.utc))
+        snapshot[self._active_phase] = snapshot.get(self._active_phase, 0) + max(
+            0,
+            int((current_time - self._active_phase_started_at).total_seconds() * 1000),
+        )
+        return snapshot
+
+    def _check_ai_gateway_reachable(self, *, timeout_seconds: int) -> bool:
+        openapi_url = self.settings.AI_GATEWAY_BASE_URL.rstrip("/") + "/openapi.json"
+        try:
+            response = httpx.get(
+                openapi_url,
+                timeout=timeout_seconds,
+                trust_env=self.settings.AI_GATEWAY_TRUST_ENV,
+            )
+        except Exception:
+            return False
+        return response.status_code == 200
 
     def _classify_label(self, classified: ClassifiedMessage) -> str:
         if classified.is_potential_new_signal:
