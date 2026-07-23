@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -53,6 +53,9 @@ def test_dashboard_main_page_includes_status_cards(tmp_path: Path) -> None:
     assert "Auto Mode" in response.text
     assert "Operational State" in response.text
     assert "Control Surfaces" in response.text
+    assert "/isolated-backtests" in response.text
+    assert "Persistent Backtest Activity" in response.text
+    assert "/isolated-backtests/analysis" in response.text
 
 
 def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
@@ -60,7 +63,7 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "https://t.me/Tofan_Trade" in response.text
     assert "Start Backtest" in response.text
-    assert "Live Telegram Backtest Monitor" in response.text
+    assert "Portfolio Telegram Backtest Monitor" in response.text
     assert "Saved Channels" in response.text
     assert "Save Once, Reuse Anytime" in response.text
     assert "Add Channel To Saved List" in response.text
@@ -69,10 +72,122 @@ def test_backtest_form_renders_tofan_default(tmp_path: Path) -> None:
     assert "Load Into Form" in response.text
     assert 'id="backtest-saved-channel-select"' in response.text
     assert 'id="backtest-save-channel-input"' in response.text
+    assert 'id="backtest-run-type"' in response.text
+    assert 'method="post"' in response.text
+    assert 'action="/backtests"' in response.text
+    assert 'value="2026-' in response.text
+    assert "Default Risk Managed" in response.text
+    assert "Trailing TP Risk Managed" in response.text
+    assert 'data-backtest-mode="isolated"' not in response.text
+    assert 'id="isolated-backtest-config"' not in response.text
+    assert 'id="isolated-aggregate-preview"' not in response.text
+    assert 'id="phase-progress-grid"' in response.text
+    assert "/static/dashboard.js?v=" in response.text
+    assert "/static/dashboard.css?v=" in response.text
     send_log_slice = response.text.split('id="backtest-send-log-channel"', 1)[1][:160]
     log_per_message_slice = response.text.split('id="backtest-log-per-message"', 1)[1][:160]
     assert "checked" in send_log_slice
     assert "checked" in log_per_message_slice
+
+
+def test_isolated_backtest_page_renders_dedicated_workspace(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/isolated-backtests", headers=headers())
+    assert response.status_code == 200
+    assert "Independent Signal Replay Monitor" in response.text
+    assert "Start Isolated Backtest" in response.text
+    assert "https://t.me/tonMiniAppc" in response.text
+    assert 'value="2026-03-15T13:17"' in response.text
+    assert 'value="2026-07-16T13:17"' in response.text
+    assert "Only The Parameters That Affect Isolated Simulation" in response.text
+    assert "Default Risk Managed" in response.text
+    assert "Trailing TP Risk Managed" in response.text
+    assert 'id="backtest-run-type"' in response.text
+    assert 'method="post"' in response.text
+    assert 'action="/isolated-backtests"' in response.text
+    assert 'value="isolated"' in response.text
+    assert 'id="isolated-backtest-config"' in response.text
+    assert 'id="isolated-capital-per-signal"' in response.text
+    assert 'id="phase-progress-grid"' in response.text
+    assert 'id="isolated-default-stop-pct"' not in response.text
+    assert 'id="backtest-initial-balance"' not in response.text
+    assert 'id="backtest-send-log-channel"' not in response.text
+    assert 'id="backtest-log-per-message"' not in response.text
+    assert 'id="isolated-aggregate-preview"' in response.text
+    assert 'href="/isolated-backtests/analysis"' in response.text
+
+
+def test_isolated_analysis_page_renders_rankings_filters_and_charts(tmp_path: Path) -> None:
+    response = client(tmp_path).get("/isolated-backtests/analysis", headers=headers())
+
+    assert response.status_code == 200
+    assert "Channel, Strategy &amp; Risk Analysis" in response.text
+    assert 'id="isolated-analysis-filters"' in response.text
+    assert 'id="analysis-channel-rankings"' in response.text
+    assert 'id="analysis-risk-return-chart"' in response.text
+    assert 'id="analysis-bootstrap-chart"' in response.text
+    assert 'data-analysis-tab="parameters"' in response.text
+    assert 'data-analysis-tab="methodology"' in response.text
+    assert "/static/isolated_analysis.js?v=" in response.text
+
+
+def test_isolated_backtest_form_post_starts_run_and_redirects(tmp_path: Path) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    service = app.state.dashboard_service
+    service.real_backtest_readiness = lambda: {"ready": True, "issues": []}  # type: ignore[assignment]
+
+    def _start_run(request, *, channel_input: str, strategy_key: str, run_type: str):
+        return DashboardBacktestRun(
+            run_id="isolated_form_run",
+            run_type=run_type,
+            channel_input=channel_input,
+            channel_resolved=request.channel,
+            from_date=request.from_date,
+            to_date=request.to_date,
+            interval=request.interval,
+            max_messages=request.max_messages,
+            initial_balance=request.initial_balance,
+            risk_per_trade_pct=request.risk_per_trade_pct,
+            use_ai=request.use_ai,
+            send_log_channel=request.send_log_channel,
+            log_per_message=request.log_per_message,
+            status="queued",
+            created_at=datetime.now(timezone.utc),
+        )
+
+    service.backtests.start_run = _start_run  # type: ignore[method-assign]
+    client_obj = LocalASGIClient(app)
+
+    response = client_obj.post(
+        "/isolated-backtests",
+        headers=headers(),
+        data={
+            "channel": "https://t.me/tonMiniAppc",
+            "from_date": "2026-03-15T13:17",
+            "to_date": "2026-07-16T13:17",
+            "interval": "1m",
+            "max_messages": "1000",
+            "capital_per_signal": "100",
+            "risk_per_trade_pct": "60",
+            "fill_policy": "conservative",
+            "leverage_source": "signal_or_default",
+            "fixed_leverage": "50",
+            "max_effective_leverage": "50",
+            "default_signal_leverage": "50",
+            "min_allocation_pct": "2",
+            "max_allocation_pct": "20",
+            "synthetic_stop_max_loss_pct": "5",
+            "fee_rate_pct": "0.01",
+            "lifecycle_refresh_interval": "15m",
+            "max_parallel_signals": "2",
+            "include_not_filled_signals": "on",
+            "close_open_positions_at_end": "on",
+            "strategy_key": "tp_trailing_risk_managed",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/isolated-backtests?run_id=isolated_form_run"
 
 
 def test_backtest_run_messages_endpoint_returns_trace_list(tmp_path: Path) -> None:
@@ -118,6 +233,292 @@ def test_backtest_run_messages_endpoint_returns_trace_list(tmp_path: Path) -> No
     assert payload["limit"] == 500
     assert len(payload["messages"]) == 1
     assert payload["messages"][0]["message_id"] == 77
+
+
+def test_latest_run_endpoint_prefers_active_run_and_filters_workbench_type(
+    tmp_path: Path,
+) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    service = app.state.dashboard_service
+    now = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+    def _run(run_id: str, *, run_type: str, status: str, created_at: datetime):
+        return DashboardBacktestRun(
+            run_id=run_id,
+            run_type=run_type,
+            channel_input="@sample",
+            channel_resolved="https://t.me/sample",
+            from_date=now,
+            to_date=now,
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_log_channel=False,
+            log_per_message=False,
+            status=status,
+            created_at=created_at,
+            heartbeat_at=created_at,
+        )
+
+    service.backtests.store.write(
+        _run(
+            "portfolio_newer",
+            run_type="portfolio",
+            status="completed",
+            created_at=now,
+        )
+    )
+    service.backtests.store.write(
+        _run(
+            "isolated_completed",
+            run_type="isolated",
+            status="completed",
+            created_at=now - timedelta(minutes=1),
+        )
+    )
+    service.backtests.store.write(
+        _run(
+            "isolated_running",
+            run_type="isolated",
+            status="running",
+            created_at=now - timedelta(minutes=2),
+        )
+    )
+    client_obj = LocalASGIClient(app)
+
+    latest = client_obj.get(
+        "/api/backtests/runs/latest?run_type=isolated&prefer_active=true",
+        headers=headers(),
+    )
+    listed = client_obj.get(
+        "/api/backtests/runs?run_type=isolated&limit=10",
+        headers=headers(),
+    )
+
+    assert latest.status_code == 200
+    assert latest.json()["run"]["run_id"] == "isolated_running"
+    assert listed.status_code == 200
+    assert listed.json()["total_runs"] == 2
+    assert {run["run_id"] for run in listed.json()["runs"]} == {
+        "isolated_completed",
+        "isolated_running",
+    }
+
+
+def test_isolated_analysis_api_reads_persisted_run_and_applies_channel_filter(
+    tmp_path: Path,
+) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    service = app.state.dashboard_service
+    now = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    signals = [
+        {
+            "signal_id": f"signal_{index}",
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "status": "tp1_hit" if pnl > 0 else "stop_loss_hit",
+            "status_group": "inactive",
+            "entry_time": now.isoformat(),
+            "exit_time": now.isoformat(),
+            "initial_balance": "100",
+            "total_pnl": str(pnl),
+        }
+        for index, pnl in enumerate([10, 8, -2, 4, 5], start=1)
+    ]
+    service.backtests.store.write(
+        DashboardBacktestRun(
+            run_id="isolated_analysis_run",
+            run_type="isolated",
+            channel_input="@analysis_channel",
+            channel_resolved="https://t.me/analysis_channel",
+            from_date=now - timedelta(days=30),
+            to_date=now,
+            interval="1m",
+            max_messages=100,
+            strategy_key="default_risk_managed",
+            request_payload={
+                "capital_per_signal": "100",
+                "fill_policy": "conservative",
+                "fee_rate_pct": "0.01",
+            },
+            use_ai=False,
+            send_log_channel=False,
+            log_per_message=False,
+            status="completed",
+            created_at=now,
+            started_at=now,
+            finished_at=now + timedelta(minutes=1),
+            isolated_aggregate={
+                "total_signals": 5,
+                "filled_signals": 5,
+                "closed_signals": 5,
+                "wins": 4,
+                "losses": 1,
+                "total_pnl": "25",
+                "total_initial_balance": "500",
+                "max_drawdown": "2",
+                "period_pnl": {"daily": [{"period": "2026-07-20", "pnl": "25"}]},
+            },
+            signals=signals,
+        )
+    )
+    client_obj = LocalASGIClient(app)
+
+    response = client_obj.get(
+        "/api/backtests/isolated/analysis?channel=https%3A%2F%2Ft.me%2Fanalysis_channel",
+        headers=headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overview"]["completed_runs"] == 1
+    assert payload["overview"]["signals"] == 5
+    assert payload["channel_rankings"][0]["channel"] == "https://t.me/analysis_channel"
+    assert payload["channel_rankings"][0]["average_profit"] == "6.75"
+    assert payload["bootstrap"][0]["available"] is True
+    assert payload["methodology"]["version"] == "isolated-score-v1"
+
+
+def test_isolated_analysis_api_ingests_cli_report_only_runs(tmp_path: Path) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    service = app.state.dashboard_service
+    now = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    signals = [
+        {
+            "signal_id": f"cli_signal_{index}",
+            "symbol": "ETHUSDT",
+            "side": "short",
+            "status": "tp1_hit" if pnl > 0 else "stop_loss_hit",
+            "status_group": "inactive",
+            "entry_time": now.isoformat(),
+            "exit_time": now.isoformat(),
+            "initial_balance": "100",
+            "total_pnl": str(pnl),
+        }
+        for index, pnl in enumerate([6, 5, -2, 3, 4], start=1)
+    ]
+    service.real_runner.report_store.write(
+        {
+            "run_type": "isolated",
+            "success": True,
+            "channel": "https://t.me/cli_channel",
+            "from_date": (now - timedelta(days=14)).isoformat(),
+            "to_date": now.isoformat(),
+            "generated_at": now.isoformat(),
+            "interval": "5m",
+            "strategy_key": "tp_trailing_risk_managed",
+            "ai_used": False,
+            "request": {
+                "capital_per_signal": "100",
+                "fill_policy": "conservative",
+                "fee_rate_pct": "0.02",
+            },
+            "signals": signals,
+            "aggregate": {
+                "total_signals": 5,
+                "filled_signals": 5,
+                "closed_signals": 5,
+                "wins": 4,
+                "losses": 1,
+                "total_pnl": "16",
+                "total_initial_balance": "500",
+                "max_drawdown": "2",
+                "period_pnl": {"daily": [{"period": "2026-07-20", "pnl": "16"}]},
+            },
+            "errors": [],
+            "warnings": [],
+        }
+    )
+    client_obj = LocalASGIClient(app)
+
+    response = client_obj.get(
+        "/api/backtests/isolated/analysis?channel=https%3A%2F%2Ft.me%2Fcli_channel",
+        headers=headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overview"]["runs"] == 1
+    assert payload["overview"]["report_runs"] == 1
+    assert payload["data_sources"]["report_only_runs"] == 1
+    assert payload["run_comparison"][0]["source"] == "report"
+    assert payload["run_comparison"][0]["strategy"] == "tp_trailing_risk_managed"
+
+
+def test_isolated_analysis_deduplicates_dashboard_run_and_its_report(tmp_path: Path) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    service = app.state.dashboard_service
+    now = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    signal = {
+        "signal_id": "dedupe_signal",
+        "symbol": "BTCUSDT",
+        "side": "long",
+        "status": "tp1_hit",
+        "status_group": "inactive",
+        "entry_time": now.isoformat(),
+        "exit_time": now.isoformat(),
+        "initial_balance": "100",
+        "total_pnl": "5",
+    }
+    aggregate = {
+        "total_signals": 1,
+        "filled_signals": 1,
+        "closed_signals": 1,
+        "wins": 1,
+        "losses": 0,
+        "total_pnl": "5",
+        "total_initial_balance": "100",
+        "max_drawdown": "0",
+        "period_pnl": {"daily": [{"period": "2026-07-20", "pnl": "5"}]},
+    }
+    stored = service.real_runner.report_store.write(
+        {
+            "run_type": "isolated",
+            "success": True,
+            "channel": "https://t.me/dedupe",
+            "from_date": (now - timedelta(days=1)).isoformat(),
+            "to_date": now.isoformat(),
+            "generated_at": now.isoformat(),
+            "interval": "1m",
+            "strategy_key": "default_risk_managed",
+            "request": {"capital_per_signal": "100", "fill_policy": "conservative"},
+            "signals": [signal],
+            "aggregate": aggregate,
+        }
+    )
+    service.backtests.store.write(
+        DashboardBacktestRun(
+            run_id="dashboard_dedupe_run",
+            run_type="isolated",
+            channel_input="@dedupe",
+            channel_resolved="https://t.me/dedupe",
+            from_date=now - timedelta(days=1),
+            to_date=now,
+            interval="1m",
+            max_messages=10,
+            request_payload={"capital_per_signal": "100", "fill_policy": "conservative"},
+            use_ai=False,
+            send_log_channel=False,
+            log_per_message=False,
+            status="completed",
+            created_at=now,
+            signals=[signal],
+            isolated_aggregate=aggregate,
+            report_path=stored.json_path,
+            markdown_report_path=stored.markdown_path,
+        )
+    )
+
+    response = LocalASGIClient(app).get(
+        "/api/backtests/isolated/analysis?channel=https%3A%2F%2Ft.me%2Fdedupe",
+        headers=headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overview"]["runs"] == 1
+    assert payload["data_sources"]["report_only_runs"] == 0
+    assert payload["run_comparison"][0]["source"] == "dashboard"
 
 
 def test_logs_page_renders_log_channel_status(tmp_path: Path) -> None:

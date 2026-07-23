@@ -1,12 +1,11 @@
 <section class="panel backtest-command-center">
   <div class="section-head">
     <div>
-      <p class="eyebrow">Backtest Control</p>
-      <h2>Run A Portfolio Channel Backtest</h2>
+      <p class="eyebrow">Isolated Backtest Control</p>
+      <h2>Run An Independent Per-Signal Replay</h2>
       <p class="subtle">
-        Enter a Telegram channel and a date range. The dashboard will run the real history fetch,
-        classify each message, fetch market data, simulate trades against one shared balance, and
-        stream every step live.
+        The system first builds isolated signal records from Telegram history, then simulates each
+        signal independently with its own capital and lifecycle analytics.
       </p>
     </div>
     <div class="preset-cluster" role="group" aria-label="Backtest date presets">
@@ -20,16 +19,16 @@
     id="backtest-live-form"
     class="backtest-form-grid"
     method="post"
-    action="/backtests"
+    action="/isolated-backtests"
   >
-    <input id="backtest-run-type" name="run_type" type="hidden" value="portfolio">
+    <input id="backtest-run-type" name="run_type" type="hidden" value="isolated">
 
     <section class="panel subtle-panel span-2 saved-channel-panel">
       <div class="section-head compact saved-channel-head">
         <div>
           <p class="eyebrow">Saved Channels</p>
           <h3>Save Once, Reuse Anytime</h3>
-          <p class="subtle">Add a channel to your saved list once, then load it into the backtest form whenever you need it.</p>
+          <p class="subtle">Store the Telegram channels you replay often, then load them directly into this isolated run form.</p>
         </div>
       </div>
       <div class="saved-channel-guide" aria-label="Saved channel workflow">
@@ -43,7 +42,7 @@
         </div>
         <div class="saved-channel-step">
           <strong>3. Load it later</strong>
-          <span>Select it from the library and load it into the backtest form.</span>
+          <span>Select it from the library and load it into the isolated form.</span>
         </div>
       </div>
       <div class="saved-channel-entry">
@@ -54,7 +53,7 @@
             placeholder="@Crypto_Etehad or https://t.me/Crypto_Etehad"
             autocomplete="off"
           >
-          <span class="help-text">This field is only for saving channels. Starting a backtest still uses the main Telegram Channel field below.</span>
+          <span class="help-text">This field only stores channels. Starting a run still uses the main Telegram Channel field below.</span>
         </label>
         <button id="backtest-save-channel" type="button" class="button secondary-save-button">Save Channel</button>
       </div>
@@ -133,17 +132,17 @@
       <input id="backtest-max-messages" name="max_messages" type="number" min="1" step="1" value="1000" required>
     </label>
 
-    <label class="field">Initial Balance
+    <label class="field">Capital Per Signal
       <input
-        id="backtest-initial-balance"
-        name="initial_balance"
+        id="isolated-capital-per-signal"
+        name="capital_per_signal"
         type="number"
         min="0.0001"
         step="0.0001"
-        value="{{ bootstrap.default_initial_balance }}"
+        value="{{ bootstrap.default_capital_per_signal }}"
         required
       >
-      <span class="help-text">Default capital for the live simulation. Default: 100.</span>
+      <span class="help-text">Each isolated signal starts with this independent capital base.</span>
     </label>
 
     <label class="field">Allocation Factor
@@ -156,15 +155,96 @@
         value="{{ bootstrap.default_risk_per_trade_pct }}"
         required
       >
-      <span class="help-text">Actual allocation % is computed as factor / leverage, then clamped between the configured min and max. Default factor: 120.</span>
+      <span class="help-text">Sizing factor used to derive allocation from leverage, then clamped by the isolated min and max allocation bounds.</span>
     </label>
+
+    <section id="isolated-backtest-config" class="panel subtle-panel span-2 strategy-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Isolated Engine</p>
+          <h3>Only The Parameters That Affect Isolated Simulation</h3>
+          <p class="subtle">This page hides portfolio-only controls and only exposes settings that materially change isolated record building or simulation outcomes.</p>
+        </div>
+      </div>
+      <div class="strategy-parameter-grid">
+        <label class="field">
+          <span class="field-title">Fill Policy</span>
+          <select id="isolated-fill-policy" name="fill_policy">
+            <option value="conservative">Conservative</option>
+            <option value="optimistic">Optimistic</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-title">Leverage Source</span>
+          <select id="isolated-leverage-source" name="leverage_source">
+            <option value="signal_or_default">Signal Or Default</option>
+            <option value="fixed">Force Fixed</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-title">Fixed Leverage</span>
+          <input id="isolated-fixed-leverage" name="fixed_leverage" type="number" min="1" step="1" value="{{ bootstrap.default_fixed_leverage }}">
+        </label>
+        <label class="field">
+          <span class="field-title">Max Effective Leverage</span>
+          <input id="isolated-max-effective-leverage" name="max_effective_leverage" type="number" min="1" step="0.0001" value="{{ bootstrap.default_max_effective_leverage }}">
+        </label>
+        <label class="field">
+          <span class="field-title">Default Signal Leverage</span>
+          <input id="isolated-default-signal-leverage" name="default_signal_leverage" type="number" min="0.0001" step="0.0001" value="{{ bootstrap.default_signal_leverage }}">
+        </label>
+        <label class="field">
+          <span class="field-title">Min Allocation %</span>
+          <input id="isolated-min-allocation-pct" name="min_allocation_pct" type="number" min="0" step="0.0001" value="{{ bootstrap.default_min_allocation_pct }}">
+        </label>
+        <label class="field">
+          <span class="field-title">Max Allocation %</span>
+          <input id="isolated-max-allocation-pct" name="max_allocation_pct" type="number" min="0" step="0.0001" value="{{ bootstrap.default_max_allocation_pct }}">
+        </label>
+        <label class="field">
+          <span class="field-title">Synthetic Stop Max Loss %</span>
+          <input id="isolated-synthetic-stop-max-loss-pct" name="synthetic_stop_max_loss_pct" type="number" min="0" step="0.0001" value="{{ bootstrap.default_synthetic_stop_max_loss_pct }}">
+        </label>
+        <label class="field">
+          <span class="field-title">Fee Rate %</span>
+          <input id="isolated-fee-rate-pct" name="fee_rate_pct" type="number" min="0" step="0.0001" value="{{ bootstrap.default_fee_rate_pct }}">
+        </label>
+        <label class="field">
+          <span class="field-title">Lifecycle Refresh Interval</span>
+          <select id="isolated-lifecycle-refresh-interval" name="lifecycle_refresh_interval">
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-title">Parallel Workers</span>
+          <input id="isolated-max-parallel-signals" name="max_parallel_signals" type="number" min="1" step="1" value="{{ bootstrap.default_max_parallel_signals }}">
+        </label>
+        <label class="toggle-card">
+          <input id="isolated-include-not-filled-signals" name="include_not_filled_signals" type="checkbox" {% if bootstrap.default_include_not_filled_signals %}checked{% endif %}>
+          <span>
+            <strong>Include Not Filled Signals</strong>
+            <small>Keep isolated rows even when entry was never touched.</small>
+          </span>
+        </label>
+        <label class="toggle-card">
+          <input id="isolated-close-open-positions-at-end" name="close_open_positions_at_end" type="checkbox" {% if bootstrap.default_close_open_positions_at_end %}checked{% endif %}>
+          <span>
+            <strong>Close Open Positions At End</strong>
+            <small>Force any still-open isolated signal to close on the final available candle.</small>
+          </span>
+        </label>
+      </div>
+    </section>
 
     <section class="panel subtle-panel span-2 strategy-panel">
       <div class="section-head compact">
         <div>
           <p class="eyebrow">Strategy</p>
           <h3>Choose Execution Strategy</h3>
-          <p class="subtle">Pick the strategy for this run and inspect its rules before you start the backtest.</p>
+          <p class="subtle">Pick the isolated execution strategy for this run and inspect its active rules before starting the replay.</p>
         </div>
       </div>
       <div class="strategy-picker-grid">
@@ -187,7 +267,7 @@
       <div id="backtest-strategy-parameters" class="strategy-parameter-grid" aria-live="polite"></div>
     </section>
 
-    <label class="toggle-card">
+    <label class="toggle-card span-2">
       <input
         id="backtest-use-ai"
         name="use_ai"
@@ -200,35 +280,9 @@
       </span>
     </label>
 
-    <label class="toggle-card">
-      <input
-        id="backtest-send-log-channel"
-        name="send_log_channel"
-        type="checkbox"
-        {% if bootstrap.default_send_log_channel %}checked{% endif %}
-      >
-      <span>
-        <strong>Send Telegram Run Logs</strong>
-        <small>Send aggregate updates to the Telegram log channel.</small>
-      </span>
-    </label>
-
-    <label class="toggle-card span-2">
-      <input
-        id="backtest-log-per-message"
-        name="log_per_message"
-        type="checkbox"
-        {% if bootstrap.default_log_per_message %}checked{% endif %}
-      >
-      <span>
-        <strong>Send Per-Message Telegram Trace</strong>
-        <small>Send one formatted Telegram log message for every Telegram message processed in the channel.</small>
-      </span>
-    </label>
-
     <div class="action-row span-2">
       <button id="backtest-start-button" class="button launch-button" type="submit">
-        Start Backtest
+        Start Isolated Backtest
       </button>
       <div
         id="backtest-form-status"

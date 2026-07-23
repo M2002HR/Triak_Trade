@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -15,6 +16,7 @@ from triak_trade.dashboard.auth import DashboardAuth
 from triak_trade.dashboard.live_runtime import DashboardLiveCoordinator
 from triak_trade.dashboard.realtime import DashboardRealtimeHub
 from triak_trade.dashboard.services import DashboardService
+from triak_trade.dashboard.templates import STATIC_DIR
 from triak_trade.live_trading.models import LiveSessionConfig, build_live_session_label
 
 
@@ -28,16 +30,114 @@ def build_router(
 ) -> APIRouter:
     router = APIRouter()
     auth = DashboardAuth(settings)
+    asset_version = _static_asset_version()
 
     def context(request: Request, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "request": request,
             "title": "Triak Trade Dashboard",
             "dashboard_url": f"http://{settings.DASHBOARD_HOST}:{settings.DASHBOARD_PORT}",
+            "asset_version": asset_version,
         }
         if extra:
             payload.update(extra)
         return payload
+
+    def _form_payload(form: dict[str, str], *, run_type: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "run_type": run_type,
+            "channel": form.get("channel", ""),
+            "from_date": form.get("from_date", ""),
+            "to_date": form.get("to_date", ""),
+            "start_message_link": form.get("start_message_link", ""),
+            "interval": form.get("interval", ""),
+            "max_messages": form.get("max_messages", ""),
+            "initial_balance": form.get("initial_balance", ""),
+            "risk_per_trade_pct": form.get("risk_per_trade_pct", ""),
+            "strategy_key": form.get("strategy_key", ""),
+            "use_ai": form.get("use_ai") == "on",
+            "send_log_channel": form.get("send_log_channel") == "on",
+            "log_per_message": form.get("log_per_message") == "on",
+        }
+        if run_type == "isolated":
+            payload.update(
+                {
+                    "capital_per_signal": form.get("capital_per_signal", ""),
+                    "fill_policy": form.get("fill_policy", ""),
+                    "leverage_source": form.get("leverage_source", ""),
+                    "fixed_leverage": form.get("fixed_leverage", ""),
+                    "max_effective_leverage": form.get("max_effective_leverage", ""),
+                    "default_signal_leverage": form.get("default_signal_leverage", ""),
+                    "min_allocation_pct": form.get("min_allocation_pct", ""),
+                    "max_allocation_pct": form.get("max_allocation_pct", ""),
+                    "synthetic_stop_max_loss_pct": form.get(
+                        "synthetic_stop_max_loss_pct",
+                        "",
+                    ),
+                    "fee_rate_pct": form.get("fee_rate_pct", ""),
+                    "lifecycle_refresh_interval": form.get(
+                        "lifecycle_refresh_interval",
+                        "",
+                    ),
+                    "max_parallel_signals": form.get("max_parallel_signals", ""),
+                    "include_not_filled_signals": form.get("include_not_filled_signals")
+                    == "on",
+                    "close_open_positions_at_end": form.get("close_open_positions_at_end")
+                    == "on",
+                }
+            )
+        return payload
+
+    async def _handle_backtest_form_submit(
+        request: Request,
+        *,
+        run_type: str,
+        template_name: str,
+    ) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        form = {key: str(value) for key, value in (await request.form()).items()}
+        payload = _form_payload(form, run_type=run_type)
+        try:
+            result = service.start_live_backtest(payload)
+        except ValueError as exc:
+            bootstrap = service.backtest_bootstrap(run_type=run_type)
+            return templates.TemplateResponse(
+                request,
+                template_name,
+                context(
+                    request,
+                    {
+                        "default_channel": bootstrap["default_channel"],
+                        "bootstrap": bootstrap,
+                        "form_notice": str(exc),
+                        "form_notice_kind": "error",
+                    },
+                ),
+                status_code=400,
+            )
+        if result.get("started") and isinstance(result.get("run"), dict):
+            run_id = str(result["run"].get("run_id") or "")
+            suffix = f"?{urlencode({'run_id': run_id})}" if run_id else ""
+            destination = "/isolated-backtests" if run_type == "isolated" else "/backtests"
+            return RedirectResponse(url=f"{destination}{suffix}", status_code=303)
+
+        bootstrap = service.backtest_bootstrap(run_type=run_type)
+        return templates.TemplateResponse(
+            request,
+            template_name,
+            context(
+                request,
+                {
+                    "default_channel": bootstrap["default_channel"],
+                    "bootstrap": bootstrap,
+                    "form_notice": str(result.get("reason") or "Backtest start failed."),
+                    "form_notice_kind": "error",
+                },
+            ),
+            status_code=409,
+        )
 
     @router.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request, next: str = "/") -> Response:
@@ -99,6 +199,7 @@ def build_router(
         redirect = auth.redirect_if_needed(request)
         if redirect is not None:
             return redirect
+        bootstrap = service.backtest_bootstrap(run_type="portfolio")
         return templates.TemplateResponse(
             request,
             "backtests.html",
@@ -106,10 +207,59 @@ def build_router(
                 request,
                 {
                     "result": None,
-                    "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
-                    "bootstrap": service.backtest_bootstrap(),
+                    "default_channel": bootstrap["default_channel"],
+                    "bootstrap": bootstrap,
+                    "form_notice": None,
+                    "form_notice_kind": None,
                 },
             ),
+        )
+
+    @router.post("/backtests", response_class=HTMLResponse)
+    async def backtests_submit(request: Request) -> Response:
+        return await _handle_backtest_form_submit(
+            request,
+            run_type="portfolio",
+            template_name="backtests.html",
+        )
+
+    @router.get("/isolated-backtests", response_class=HTMLResponse)
+    async def isolated_backtests(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        bootstrap = service.backtest_bootstrap(run_type="isolated")
+        return templates.TemplateResponse(
+            request,
+            "isolated_backtests.html",
+            context(
+                request,
+                {
+                    "default_channel": bootstrap["default_channel"],
+                    "bootstrap": bootstrap,
+                    "form_notice": None,
+                    "form_notice_kind": None,
+                },
+            ),
+        )
+
+    @router.post("/isolated-backtests", response_class=HTMLResponse)
+    async def isolated_backtests_submit(request: Request) -> Response:
+        return await _handle_backtest_form_submit(
+            request,
+            run_type="isolated",
+            template_name="isolated_backtests.html",
+        )
+
+    @router.get("/isolated-backtests/analysis", response_class=HTMLResponse)
+    async def isolated_backtest_analysis_page(request: Request) -> Response:
+        redirect = auth.redirect_if_needed(request)
+        if redirect is not None:
+            return redirect
+        return templates.TemplateResponse(
+            request,
+            "isolated_backtest_analysis.html",
+            context(request),
         )
 
     @router.post("/backtests/run", response_class=HTMLResponse)
@@ -119,6 +269,7 @@ def build_router(
             return redirect
         form = {key: str(value) for key, value in (await request.form()).items()}
         result = await run_in_threadpool(service.run_fixture_backtest_from_form, form)
+        bootstrap = service.backtest_bootstrap(run_type="portfolio")
         return templates.TemplateResponse(
             request,
             "backtests.html",
@@ -126,8 +277,10 @@ def build_router(
                 request,
                 {
                     "result": result,
-                    "default_channel": settings.REAL_BACKTEST_DEFAULT_CHANNEL,
-                    "bootstrap": service.backtest_bootstrap(),
+                    "default_channel": bootstrap["default_channel"],
+                    "bootstrap": bootstrap,
+                    "form_notice": None,
+                    "form_notice_kind": None,
                 },
             ),
         )
@@ -171,12 +324,20 @@ def build_router(
         request: Request,
         limit: int = 20,
         offset: int = 0,
+        run_type: str | None = None,
     ) -> JSONResponse:
         auth.require_api(request)
+        normalized_run_type = run_type if run_type in {"portfolio", "isolated"} else None
+        if run_type and normalized_run_type is None:
+            return JSONResponse({"detail": "invalid_run_type"}, status_code=400)
         safe_limit = min(max(limit, 1), 100)
         safe_offset = max(offset, 0)
-        runs = service.list_backtest_runs(limit=safe_limit, offset=safe_offset)
-        total_runs = service.count_backtest_runs()
+        runs = service.list_backtest_runs(
+            limit=safe_limit,
+            offset=safe_offset,
+            run_type=normalized_run_type,
+        )
+        total_runs = service.count_backtest_runs(run_type=normalized_run_type)
         return JSONResponse(
             {
                 "runs": runs,
@@ -186,6 +347,59 @@ def build_router(
                 "has_more": safe_offset + len(runs) < total_runs,
             }
         )
+
+    @router.get("/api/backtests/runs/latest")
+    async def latest_backtest_run(
+        request: Request,
+        run_type: str | None = None,
+        prefer_active: bool = True,
+    ) -> JSONResponse:
+        auth.require_api(request)
+        normalized_run_type = run_type if run_type in {"portfolio", "isolated"} else None
+        if run_type and normalized_run_type is None:
+            return JSONResponse({"detail": "invalid_run_type"}, status_code=400)
+        run = service.latest_backtest_run(
+            run_type=normalized_run_type,
+            prefer_active=prefer_active,
+        )
+        if run is None:
+            return JSONResponse({"run": None})
+        return JSONResponse({"run": run})
+
+    @router.get("/api/backtests/isolated/analysis")
+    async def isolated_backtest_analysis(
+        request: Request,
+        channel: str | None = None,
+        strategy: str | None = None,
+        fill_policy: str | None = None,
+        interval: str | None = None,
+        status: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        min_signals: int = 0,
+        sort_by: str = "score",
+        sort_order: str = "desc",
+    ) -> JSONResponse:
+        auth.require_api(request)
+        try:
+            result = await run_in_threadpool(
+                service.isolated_backtest_analysis,
+                {
+                    "channel": channel,
+                    "strategy": strategy,
+                    "fill_policy": fill_policy,
+                    "interval": interval,
+                    "status": status,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "min_signals": min_signals,
+                    "sort_by": sort_by,
+                    "sort_order": sort_order,
+                },
+            )
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse(result)
 
     @router.get("/api/backtests/runs/{run_id}")
     async def get_backtest_run(request: Request, run_id: str) -> JSONResponse:
@@ -245,11 +459,21 @@ def build_router(
             return
         await realtime_hub.connect(websocket)
         try:
+            requested_run_type = websocket.query_params.get("run_type")
+            run_type = (
+                requested_run_type
+                if requested_run_type in {"portfolio", "isolated"}
+                else None
+            )
             await websocket.send_json(
                 {
                     "type": "bootstrap",
                     "readiness": service.real_backtest_readiness(),
-                    "runs": service.list_backtest_runs(limit=8, offset=0),
+                    "runs": service.list_backtest_runs(
+                        limit=8,
+                        offset=0,
+                        run_type=run_type,
+                    ),
                 }
             )
             while True:
@@ -690,3 +914,13 @@ def build_router(
             await realtime_hub.disconnect(websocket)
 
     return router
+
+
+def _static_asset_version() -> str:
+    candidates = [
+        STATIC_DIR / "dashboard.js",
+        STATIC_DIR / "isolated_analysis.js",
+        STATIC_DIR / "dashboard.css",
+    ]
+    mtimes = [int(path.stat().st_mtime) for path in candidates if path.exists()]
+    return str(max(mtimes)) if mtimes else "1"

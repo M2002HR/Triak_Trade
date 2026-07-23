@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from triak_trade.backtesting.isolated_runner import (
+    IsolatedBacktestResult,
+    IsolatedBacktestRunRequest,
+)
 from triak_trade.backtesting.real_runner import (
     RealBacktestMessageStage,
     RealBacktestMessageTrace,
@@ -184,8 +188,111 @@ class FakeRunner:
         )
 
 
+class FakeIsolatedRunner(FakeRunner):
+    def run_sync(
+        self,
+        request: IsolatedBacktestRunRequest,
+        progress_callback=None,
+    ) -> IsolatedBacktestResult:
+        now = datetime(2026, 6, 4, tzinfo=timezone.utc)
+        if progress_callback is not None:
+            progress_callback(
+                RealBacktestProgressEvent(
+                    event_type="run",
+                    timestamp=now,
+                    phase="fetch_history",
+                    status="completed",
+                    summary="Fetched 2 Telegram messages.",
+                    counts={"total_messages": 2},
+                )
+            )
+        return IsolatedBacktestResult(
+            success=True,
+            channel=request.channel,
+            from_date=request.from_date or now,
+            to_date=request.to_date or now,
+            interval=request.interval,
+            real_telegram_used=True,
+            real_market_data_used=True,
+            ai_used=False,
+            regex_fallback_used=True,
+            total_messages=2,
+            classified_messages=2,
+            parsed_signals=2,
+            valid_signals=2,
+            invalid_signals=0,
+            ignored_messages=0,
+            ambiguous_messages=0,
+            symbols_found=["BTCUSDT", "ETHUSDT"],
+            candles_fetched=120,
+            trades_simulated=2,
+            trades_filled=2,
+            wins=1,
+            losses=1,
+            win_rate=Decimal("0.5"),
+            total_pnl=Decimal("3"),
+            profit_factor=Decimal("1.5"),
+            max_drawdown=Decimal("2"),
+            conservative_pnl=Decimal("3"),
+            optimistic_pnl=Decimal("3"),
+            channel_score=Decimal("0"),
+            warnings=[],
+            errors=[],
+            generated_at=now,
+            report_path="runtime/reports/backtests/isolated.report.json",
+            markdown_report_path="runtime/reports/backtests/isolated.report.md",
+            signals=[
+                {
+                    "signal_id": "sig_iso_1",
+                    "symbol": "BTCUSDT",
+                    "side": "long",
+                    "status": "tp1_hit",
+                    "status_group": "inactive",
+                    "entry_time": now.isoformat(),
+                    "entry_time_tehran": "2026-06-04T03:30:00+03:30",
+                    "total_pnl": "5",
+                },
+                {
+                    "signal_id": "sig_iso_2",
+                    "symbol": "ETHUSDT",
+                    "side": "short",
+                    "status": "stop_loss_hit",
+                    "status_group": "inactive",
+                    "entry_time": now.isoformat(),
+                    "entry_time_tehran": "2026-06-04T03:35:00+03:30",
+                    "total_pnl": "-2",
+                },
+            ],
+            aggregate={
+                "total_signals": 2,
+                "filled_signals": 2,
+                "closed_signals": 2,
+                "open_signals": 0,
+                "wins": 1,
+                "losses": 1,
+                "total_pnl": "3",
+                "win_rate": "0.5",
+                "max_drawdown": "2",
+                "total_final_balance": "303",
+                "period_pnl": {"daily": [], "weekly": [], "monthly": []},
+            },
+        )
+
+
 def build_client(tmp_path: Path, monkeypatch) -> LocalASGIClient:
     monkeypatch.setattr("triak_trade.dashboard.services.RealBacktestRunner", FakeRunner)
+    monkeypatch.setattr(
+        "triak_trade.dashboard.backtest_runtime.RealBacktestRunner",
+        FakeRunner,
+    )
+    monkeypatch.setattr(
+        "triak_trade.dashboard.services.IsolatedBacktestRunner",
+        FakeIsolatedRunner,
+    )
+    monkeypatch.setattr(
+        "triak_trade.dashboard.backtest_runtime.IsolatedBacktestRunner",
+        FakeIsolatedRunner,
+    )
     settings = Settings(
         _env_file=None,
         DATABASE_URL=f"sqlite+pysqlite:///{tmp_path / 'dashboard.db'}",
@@ -206,8 +313,8 @@ def _headers() -> dict[str, str]:
 def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> None:
     response = build_client(tmp_path, monkeypatch).get("/backtests", headers=_headers())
     assert response.status_code == 200
-    assert "Live Telegram Backtest Monitor" in response.text
-    assert "AI-Ready Classification" in response.text
+    assert "Portfolio Telegram Backtest Monitor" in response.text
+    assert "Shared Balance Simulation" in response.text
     assert "Start Backtest" in response.text
     assert "Start From Message Link" in response.text
     assert "Per-Message Trace" in response.text
@@ -220,10 +327,76 @@ def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> No
     assert 'id="backtest-progress-track"' in response.text
     assert 'id="backtest-progress-fill"' in response.text
     assert 'id="backtest-progress-meta"' in response.text
+    assert 'id="phase-progress-grid"' in response.text
     assert 'id="backtest-runtime-label"' in response.text
     assert 'data-message-filter="signals"' in response.text
     assert 'id="message-modal" class="modal-shell" hidden' in response.text
     assert 'id="panel-modal" class="modal-shell" hidden' in response.text
+    assert 'data-backtest-mode="isolated"' not in response.text
+    assert 'id="isolated-aggregate-preview"' not in response.text
+
+
+def test_isolated_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> None:
+    response = build_client(tmp_path, monkeypatch).get("/isolated-backtests", headers=_headers())
+    assert response.status_code == 200
+    assert "Independent Signal Replay Monitor" in response.text
+    assert "Signal-First History Pass" in response.text
+    assert "Start Isolated Backtest" in response.text
+    assert 'id="isolated-capital-per-signal"' in response.text
+    assert 'id="isolated-backtest-config"' in response.text
+    assert 'id="isolated-aggregate-preview"' in response.text
+    assert 'id="phase-progress-grid"' in response.text
+    assert 'id="backtest-send-log-channel"' not in response.text
+    assert 'id="backtest-log-per-message"' not in response.text
+    assert 'id="backtest-initial-balance"' not in response.text
+    assert 'id="isolated-default-stop-pct"' not in response.text
+
+
+def test_backtest_start_api_runs_isolated_mode(tmp_path: Path, monkeypatch) -> None:
+    client = build_client(tmp_path, monkeypatch)
+    start = client.post(
+        "/api/backtests/start",
+        headers=_headers(),
+        json={
+            "run_type": "isolated",
+            "channel": "@Tofan_Trade",
+            "from_date": "2026-06-03T00:00:00Z",
+            "to_date": "2026-06-04T00:00:00Z",
+            "interval": "1m",
+            "max_messages": 1000,
+            "capital_per_signal": "150",
+            "fill_policy": "conservative",
+            "leverage_source": "fixed",
+            "fixed_leverage": "5",
+            "max_parallel_signals": 2,
+            "use_ai": False,
+            "send_log_channel": False,
+            "log_per_message": False,
+        },
+    )
+
+    assert start.status_code == 202
+    body = start.json()
+    assert body["started"] is True
+    assert body["run"]["run_type"] == "isolated"
+    run_id = body["run"]["run_id"]
+
+    loaded = None
+    for _ in range(50):
+        response = client.get(f"/api/backtests/runs/{run_id}", headers=_headers())
+        assert response.status_code == 200
+        loaded = response.json()
+        if loaded["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
+
+    assert loaded is not None
+    assert loaded["status"] == "completed"
+    assert loaded["run_type"] == "isolated"
+    assert loaded["capital_per_signal"] == "150"
+    assert loaded["max_parallel_signals"] == 2
+    assert loaded["isolated_aggregate"]["total_signals"] == 2
+    assert loaded["signals"][0]["signal_id"] == "sig_iso_1"
 
 
 def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatch) -> None:

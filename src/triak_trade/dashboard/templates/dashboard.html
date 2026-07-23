@@ -34,8 +34,18 @@
 <section class="overview-action-grid">
   <a class="action-card action-card-primary" href="/backtests">
     <span class="eyebrow">Replay</span>
-    <h2>Run Live Telegram Backtests</h2>
+    <h2>Run Portfolio Backtests</h2>
     <p>Inspect message-by-message classification, market-data checkpoints, and final score formation.</p>
+  </a>
+  <a class="action-card" href="/isolated-backtests">
+    <span class="eyebrow">Isolated</span>
+    <h2>Run Per-Signal Replays</h2>
+    <p>Build isolated signal records, simulate each one independently, and review aggregate signal analytics.</p>
+  </a>
+  <a class="action-card" href="/isolated-backtests/analysis">
+    <span class="eyebrow">Research</span>
+    <h2>Analyze Isolated Results</h2>
+    <p>Rank channels, compare scenarios, inspect parameter effects, and quantify downside uncertainty.</p>
   </a>
   <a class="action-card" href="/live-trading">
     <span class="eyebrow">Execution</span>
@@ -47,6 +57,37 @@
     <h2>Compare Backtest Reports</h2>
     <p>Rank channels by score, PnL, win rate, profit factor, and detailed symbol contribution.</p>
   </a>
+</section>
+
+<section class="panel overview-backtest-activity">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Persistent Backtest Activity</p>
+      <h2>Latest Worker Status</h2>
+      <p class="subtle">Browser refreshes do not stop server-side workers. Reopen a run to continue monitoring its persisted checkpoints.</p>
+    </div>
+    <div class="counter-pill">{{ overview.active_backtests | length }} active</div>
+  </div>
+  <div class="overview-detail-grid">
+    {% for run in overview.active_backtests %}
+    <a class="metric-card active-backtest-card" href="/{{ 'isolated-backtests' if run.run_type == 'isolated' else 'backtests' }}?run_id={{ run.run_id }}">
+      <span>{{ run.run_type | title }} · {{ run.status | title }}</span>
+      <strong>{{ run.channel_resolved }}</strong>
+      <p class="subtle">{{ run.current_phase_label }} · {{ run.current_phase_summary }}</p>
+    </a>
+    {% else %}
+      {% set latest = overview.latest_isolated_backtest or overview.latest_portfolio_backtest %}
+      {% if latest %}
+      <a class="metric-card active-backtest-card" href="/{{ 'isolated-backtests' if latest.run_type == 'isolated' else 'backtests' }}?run_id={{ latest.run_id }}">
+        <span>Latest {{ latest.run_type | title }} · {{ latest.status | title }}</span>
+        <strong>{{ latest.channel_resolved }}</strong>
+        <p class="subtle">{{ latest.current_phase_label }} · reopen persisted result</p>
+      </a>
+      {% else %}
+      <article class="metric-card"><span>Backtests</span><strong>No persisted runs</strong><p class="subtle">Start a portfolio or isolated simulation.</p></article>
+      {% endif %}
+    {% endfor %}
+  </div>
 </section>
 
 <section class="grid-two overview-grid">
@@ -89,8 +130,8 @@
         <p class="subtle">Monitor high-level readiness and inspect the active runtime posture.</p>
       </article>
       <article class="stack-item">
-        <strong>Backtests + Reports</strong>
-        <p class="subtle">Validate strategy behavior on Telegram history, then compare outputs across channels.</p>
+        <strong>Backtests + Isolated Backtests</strong>
+        <p class="subtle">Validate shared-balance replay or independent per-signal simulation, then compare outputs across channels.</p>
       </article>
       <article class="stack-item">
         <strong>Live Trading + Settings</strong>

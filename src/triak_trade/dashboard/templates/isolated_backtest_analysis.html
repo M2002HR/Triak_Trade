@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero backtest-hero analysis-hero">
+  <div>
+    <p class="eyebrow">Isolated Backtest Intelligence</p>
+    <h1>Channel, Strategy &amp; Risk Analysis</h1>
+    <p class="subtle hero-copy">
+      Compare every persisted isolated simulation, inspect downside and uncertainty, rank channels,
+      and measure how strategy and risk parameters changed the observed outcomes.
+    </p>
+  </div>
+  <div class="hero-stat-cluster">
+    <div class="hero-stat"><span>Completed Runs</span><strong id="analysis-hero-runs">—</strong></div>
+    <div class="hero-stat"><span>Signals</span><strong id="analysis-hero-signals">—</strong></div>
+    <div class="hero-stat"><span>Channels</span><strong id="analysis-hero-channels">—</strong></div>
+  </div>
+</section>
+
+<nav class="workbench-tabs" aria-label="Isolated backtest workspace">
+  <a class="workbench-tab" href="/isolated-backtests">Run &amp; Monitor</a>
+  <a class="workbench-tab active" href="/isolated-backtests/analysis" aria-current="page">Analysis &amp; Rankings</a>
+</nav>
+
+<section class="panel analysis-filter-panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Analysis Scope</p>
+      <h2>Filters &amp; Ranking Controls</h2>
+      <p class="subtle">All aggregate cards, rankings, charts, parameter effects, and uncertainty estimates use the same scope.</p>
+    </div>
+    <div id="analysis-refresh-status" class="counter-pill">Loading persisted runs…</div>
+  </div>
+  <form id="isolated-analysis-filters" class="analysis-filter-grid">
+    <label>Channel
+      <select id="analysis-channel" name="channel"><option value="">All channels</option></select>
+    </label>
+    <label>Strategy
+      <select id="analysis-strategy" name="strategy"><option value="">All strategies</option></select>
+    </label>
+    <label>Fill policy
+      <select id="analysis-fill-policy" name="fill_policy"><option value="">All fill policies</option></select>
+    </label>
+    <label>Interval
+      <select id="analysis-interval" name="interval"><option value="">All intervals</option></select>
+    </label>
+    <label>Run status
+      <select id="analysis-status" name="status">
+        <option value="">All statuses</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+        <option value="running">Running</option>
+      </select>
+    </label>
+    <label>Created from
+      <input id="analysis-date-from" name="date_from" type="datetime-local">
+    </label>
+    <label>Created to
+      <input id="analysis-date-to" name="date_to" type="datetime-local">
+    </label>
+    <label>Minimum signals
+      <input id="analysis-min-signals" name="min_signals" type="number" min="0" step="1" value="0">
+    </label>
+    <label>Sort runs by
+      <select id="analysis-sort-by" name="sort_by">
+        <option value="score">Decision score</option>
+        <option value="created_at">Creation time</option>
+        <option value="total_pnl">Total PnL</option>
+        <option value="return_pct">Return on allocated capital</option>
+        <option value="max_drawdown_pct">Maximum drawdown</option>
+        <option value="signals">Signal count</option>
+      </select>
+    </label>
+    <label>Order
+      <select id="analysis-sort-order" name="sort_order">
+        <option value="desc">Highest first</option>
+        <option value="asc">Lowest first</option>
+      </select>
+    </label>
+    <div class="analysis-filter-actions">
+      <button class="button" type="submit">Apply Analysis</button>
+      <button class="button secondary" id="analysis-reset" type="button">Reset</button>
+    </div>
+  </form>
+</section>
+
+<section id="analysis-data-quality" class="analysis-quality-strip" aria-live="polite"></section>
+
+<section id="analysis-overview" class="analysis-overview-grid" aria-live="polite">
+  <article class="metric-card"><span>Loading</span><strong>—</strong></article>
+</section>
+
+<section class="panel analysis-ranking-panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Decision Ranking</p>
+      <h2>Channel Scoreboard</h2>
+      <p class="subtle">Score includes profitability, downside, cross-scenario stability, execution fill, evidence, and a multiple-configuration selection penalty.</p>
+    </div>
+  </div>
+  <div id="analysis-channel-rankings" class="analysis-table-shell empty-state-box">Loading channel rankings…</div>
+</section>
+
+<section class="analysis-chart-grid">
+  <article class="panel analysis-chart-panel">
+    <div class="section-head compact"><div><p class="eyebrow">Risk / Reward</p><h2>Run Scenario Map</h2></div></div>
+    <div id="analysis-risk-return-chart" class="analysis-chart" role="img" aria-label="Run return versus maximum drawdown"></div>
+  </article>
+  <article class="panel analysis-chart-panel">
+    <div class="section-head compact"><div><p class="eyebrow">History</p><h2>Score &amp; Return Through Time</h2></div></div>
+    <div id="analysis-timeline-chart" class="analysis-chart" role="img" aria-label="Backtest score and return over time"></div>
+  </article>
+  <article class="panel analysis-chart-panel">
+    <div class="section-head compact"><div><p class="eyebrow">Outcome Shape</p><h2>Per-Signal Return Distribution</h2></div></div>
+    <div id="analysis-distribution-chart" class="analysis-chart" role="img" aria-label="Per-signal return histogram"></div>
+  </article>
+  <article class="panel analysis-chart-panel">
+    <div class="section-head compact"><div><p class="eyebrow">Uncertainty</p><h2>Bootstrap Mean-Return Range</h2></div></div>
+    <div id="analysis-bootstrap-chart" class="analysis-chart" role="img" aria-label="Bootstrap return uncertainty by channel"></div>
+  </article>
+</section>
+
+<section class="panel analysis-detail-panel">
+  <div class="analysis-section-tabs" role="tablist" aria-label="Analysis details">
+    <button class="filter-pill active" type="button" role="tab" data-analysis-tab="runs">Run Comparison</button>
+    <button class="filter-pill" type="button" role="tab" data-analysis-tab="parameters">Parameter Impact</button>
+    <button class="filter-pill" type="button" role="tab" data-analysis-tab="strategies">Strategies</button>
+    <button class="filter-pill" type="button" role="tab" data-analysis-tab="signals">Best / Worst Signals</button>
+    <button class="filter-pill" type="button" role="tab" data-analysis-tab="methodology">Score Methodology</button>
+  </div>
+  <div id="analysis-tab-runs" class="analysis-tab-panel" data-analysis-panel="runs">
+    <div id="analysis-run-comparison" class="analysis-table-shell empty-state-box">Loading run scenarios…</div>
+  </div>
+  <div id="analysis-tab-parameters" class="analysis-tab-panel" data-analysis-panel="parameters" hidden>
+    <div id="analysis-parameter-impact" class="parameter-impact-grid"></div>
+  </div>
+  <div id="analysis-tab-strategies" class="analysis-tab-panel" data-analysis-panel="strategies" hidden>
+    <div id="analysis-strategy-comparison" class="analysis-table-shell"></div>
+  </div>
+  <div id="analysis-tab-signals" class="analysis-tab-panel" data-analysis-panel="signals" hidden>
+    <div id="analysis-signal-extremes" class="signal-extremes-grid"></div>
+  </div>
+  <div id="analysis-tab-methodology" class="analysis-tab-panel" data-analysis-panel="methodology" hidden>
+    <div id="analysis-methodology" class="methodology-panel"></div>
+  </div>
+</section>
+
+<div id="analysis-empty" class="panel empty-state-box" hidden>
+  No isolated backtests match this scope. Run an isolated simulation or loosen the filters.
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="/static/isolated_analysis.js?v={{ asset_version }}"></script>
+{% endblock %}

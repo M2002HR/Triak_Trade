@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import defaultdict
@@ -9,12 +10,22 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal, cast
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from triak_trade.backtesting import RealBacktestRunner, RealBacktestRunRequest
 from triak_trade.backtesting.engine import BacktestEngine
+from triak_trade.backtesting.isolated_analytics import (
+    IsolatedAnalyticsFilters,
+    IsolatedAnalyticsRun,
+    IsolatedBacktestAnalytics,
+)
+from triak_trade.backtesting.isolated_runner import (
+    IsolatedBacktestRunner,
+    IsolatedBacktestRunRequest,
+    default_isolated_parallel_workers,
+)
 from triak_trade.backtesting.models import BacktestRequest
 from triak_trade.backtesting.report import extract_channel_score, report_to_json
 from triak_trade.backtesting.strategies.registry import (
@@ -22,7 +33,7 @@ from triak_trade.backtesting.strategies.registry import (
     list_available_strategies,
 )
 from triak_trade.config.settings import Settings
-from triak_trade.core.time import parse_user_datetime_to_utc
+from triak_trade.core.time import TEHRAN_TZ, parse_user_datetime_to_utc
 from triak_trade.dashboard.backtest_runtime import (
     DashboardBacktestCoordinator,
     normalize_channel_reference,
@@ -289,14 +300,22 @@ class DashboardService:
         self.backtests = DashboardBacktestCoordinator(
             settings=settings,
             runner_factory=lambda: RealBacktestRunner(settings=settings),
+            isolated_runner_factory=lambda: IsolatedBacktestRunner(settings=settings),
             notifier=realtime_notifier,
         )
+        self.isolated_analytics = IsolatedBacktestAnalytics()
 
     def overview(self) -> dict[str, Any]:
         log_status = TelegramLogChannelClient(settings=self.settings).safe_status()
         latest_report = self.real_runner.report_store.latest()
         auto_mode = self.state.get_auto_mode()
         kill_switch = self.state.get_kill_switch()
+        latest_portfolio = self.backtests.latest_run_summary(run_type="portfolio")
+        latest_isolated = self.backtests.latest_run_summary(run_type="isolated")
+        active_backtests = self.backtests.list_run_summaries(
+            limit=20,
+            statuses={"queued", "running", "cancelling"},
+        )
         return {
             "cards": [
                 {
@@ -321,16 +340,34 @@ class DashboardService:
             "log_status": log_status,
             "auto_mode": auto_mode,
             "kill_switch": kill_switch,
+            "active_backtests": [
+                run.model_dump(mode="json") for run in active_backtests
+            ],
+            "latest_portfolio_backtest": (
+                latest_portfolio.model_dump(mode="json") if latest_portfolio else None
+            ),
+            "latest_isolated_backtest": (
+                latest_isolated.model_dump(mode="json") if latest_isolated else None
+            ),
             "recent_audit_events": [],
         }
 
-    def backtest_bootstrap(self) -> dict[str, Any]:
+    def backtest_bootstrap(self, *, run_type: str = "portfolio") -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         readiness = self.real_backtest_readiness()
+        normalized_run_type = "isolated" if run_type == "isolated" else "portfolio"
         recent_runs = [
             run.model_dump(mode="json")
-            for run in self.backtests.list_run_summaries(limit=8, offset=0)
+            for run in self.backtests.list_run_summaries(
+                limit=8,
+                offset=0,
+                run_type=normalized_run_type,
+            )
         ]
+        latest_run = self.backtests.latest_run_summary(
+            run_type=normalized_run_type,
+            prefer_active=True,
+        )
         saved_channels = self.state.get_saved_channels()
         strategies = [
             StrategyCatalogEntry.model_validate(item).model_dump(mode="json")
@@ -340,32 +377,168 @@ class DashboardService:
             (item["key"] for item in strategies if item.get("active")),
             "default_risk_managed",
         )
+        isolated_defaults = {
+            "default_channel": "https://t.me/tonMiniAppc",
+            "default_from_date": "2026-03-15T09:47:00+00:00",
+            "default_to_date": "2026-07-16T09:47:00+00:00",
+            "default_start_message_link": "",
+            "default_risk_per_trade_pct": "60",
+            "default_fill_policy": "conservative",
+            "default_capital_per_signal": "100",
+            "default_fee_rate_pct": "0.01",
+            "default_max_effective_leverage": "50",
+            "default_signal_leverage": "50",
+            "default_min_allocation_pct": "2",
+            "default_max_allocation_pct": "20",
+            "default_synthetic_stop_max_loss_pct": "5",
+            "default_leverage_source": "signal_or_default",
+            "default_fixed_leverage": "50",
+            "default_lifecycle_refresh_interval": "15m",
+            "default_max_parallel_signals": default_isolated_parallel_workers(),
+            "default_include_not_filled_signals": True,
+            "default_close_open_positions_at_end": True,
+            "default_send_log_channel": False,
+            "default_log_per_message": False,
+        }
+        default_from_date = (now - timedelta(hours=24)).isoformat()
+        default_to_date = now.isoformat()
+        if normalized_run_type == "isolated":
+            default_from_date = str(isolated_defaults["default_from_date"])
+            default_to_date = str(isolated_defaults["default_to_date"])
+        default_channel = (
+            str(isolated_defaults["default_channel"])
+            if normalized_run_type == "isolated"
+            else self.settings.REAL_BACKTEST_DEFAULT_CHANNEL
+        )
         return {
-            "default_channel": self.settings.REAL_BACKTEST_DEFAULT_CHANNEL,
+            "default_channel": default_channel,
+            "default_start_message_link": (
+                str(isolated_defaults["default_start_message_link"])
+                if normalized_run_type == "isolated"
+                else ""
+            ),
             "default_interval": self.settings.REAL_BACKTEST_DEFAULT_INTERVAL,
-            "default_lifecycle_refresh_interval": self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL,
+            "default_lifecycle_refresh_interval": (
+                str(isolated_defaults["default_lifecycle_refresh_interval"])
+                if normalized_run_type == "isolated"
+                else self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL
+            ),
             "default_max_messages": self.settings.REAL_BACKTEST_MAX_MESSAGES,
+            "default_run_type": normalized_run_type,
             "default_initial_balance": str(self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE),
-            "default_risk_per_trade_pct": str(
-                self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT
+            "default_risk_per_trade_pct": (
+                str(isolated_defaults["default_risk_per_trade_pct"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT)
+            ),
+            "default_fill_policy": (
+                str(isolated_defaults["default_fill_policy"])
+                if normalized_run_type == "isolated"
+                else self.settings.BACKTEST_DEFAULT_FILL_POLICY
+            ),
+            "default_capital_per_signal": (
+                str(isolated_defaults["default_capital_per_signal"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE)
+            ),
+            "default_fee_rate_pct": (
+                str(isolated_defaults["default_fee_rate_pct"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_FEE_RATE_PCT)
+            ),
+            "default_max_effective_leverage": (
+                str(isolated_defaults["default_max_effective_leverage"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE)
+            ),
+            "default_signal_leverage": (
+                str(isolated_defaults["default_signal_leverage"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE)
+            ),
+            "default_min_allocation_pct": (
+                str(isolated_defaults["default_min_allocation_pct"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_MIN_ALLOCATION_PCT)
+            ),
+            "default_max_allocation_pct": (
+                str(isolated_defaults["default_max_allocation_pct"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_MAX_ALLOCATION_PCT)
+            ),
+            "default_stop_pct": str(self.settings.BACKTEST_DEFAULT_STOP_PCT),
+            "default_synthetic_stop_max_loss_pct": (
+                str(isolated_defaults["default_synthetic_stop_max_loss_pct"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE)
+            ),
+            "default_leverage_source": (
+                str(isolated_defaults["default_leverage_source"])
+                if normalized_run_type == "isolated"
+                else "signal_or_default"
+            ),
+            "default_fixed_leverage": (
+                str(isolated_defaults["default_fixed_leverage"])
+                if normalized_run_type == "isolated"
+                else str(self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE)
+            ),
+            "default_max_parallel_signals": (
+                cast(int, isolated_defaults["default_max_parallel_signals"])
+                if normalized_run_type == "isolated"
+                else default_isolated_parallel_workers()
+            ),
+            "default_include_not_filled_signals": (
+                bool(isolated_defaults["default_include_not_filled_signals"])
+                if normalized_run_type == "isolated"
+                else True
+            ),
+            "default_close_open_positions_at_end": (
+                bool(isolated_defaults["default_close_open_positions_at_end"])
+                if normalized_run_type == "isolated"
+                else True
             ),
             "default_use_ai": (
                 self.settings.REAL_BACKTEST_USE_AI
                 and self.settings.AI_GATEWAY_ENABLED
                 and self.settings.AI_CLASSIFIER_ENABLED
             ),
-            "default_send_log_channel": self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
-            "default_log_per_message": True,
+            "default_send_log_channel": (
+                bool(isolated_defaults["default_send_log_channel"])
+                if normalized_run_type == "isolated"
+                else self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL
+            ),
+            "default_log_per_message": (
+                bool(isolated_defaults["default_log_per_message"])
+                if normalized_run_type == "isolated"
+                else True
+            ),
             "default_strategy_key": default_strategy_key,
             "available_strategies": strategies,
-            "default_from_date": (now - timedelta(hours=24)).isoformat(),
-            "default_to_date": now.isoformat(),
+            "default_from_date": default_from_date,
+            "default_to_date": default_to_date,
+            "default_from_input": self._format_datetime_local_input(default_from_date),
+            "default_to_input": self._format_datetime_local_input(default_to_date),
             "readiness": readiness,
             "recent_runs": recent_runs,
+            "active_run_id": latest_run.run_id if latest_run else None,
+            "active_run_status": latest_run.status if latest_run else None,
             "saved_channels": [item.model_dump(mode="json") for item in saved_channels.channels],
         }
 
+    @staticmethod
+    def _format_datetime_local_input(value: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return ""
+        if parsed.tzinfo is None:
+            localized = parsed.replace(tzinfo=TEHRAN_TZ)
+        else:
+            localized = parsed.astimezone(TEHRAN_TZ)
+        return localized.strftime("%Y-%m-%dT%H:%M")
+
     def start_live_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
+        run_type = str(payload.get("run_type") or "portfolio").strip().lower()
         channel_input = str(payload.get("channel") or "").strip()
         start_message_link = str(payload.get("start_message_link") or "").strip()
         channel_resolved: str | None = (
@@ -400,36 +573,113 @@ class DashboardService:
         if from_date is None or to_date is None:
             raise ValueError("from_date and to_date are required")
 
-        request = RealBacktestRunRequest(
-            channel=channel_resolved,
-            from_date=from_date,
-            to_date=to_date,
-            hours=None,
-            start_message_link=normalized_start_message_link,
-            start_message_id=start_message_id,
-            interval=str(payload.get("interval") or self.settings.REAL_BACKTEST_DEFAULT_INTERVAL),
-            max_messages=int(
+        common_request: dict[str, Any] = {
+            "channel": channel_resolved,
+            "from_date": from_date,
+            "to_date": to_date,
+            "hours": None,
+            "start_message_link": normalized_start_message_link,
+            "start_message_id": start_message_id,
+            "interval": str(
+                payload.get("interval") or self.settings.REAL_BACKTEST_DEFAULT_INTERVAL
+            ),
+            "max_messages": int(
                 payload.get("max_messages") or self.settings.REAL_BACKTEST_MAX_MESSAGES
             ),
-            initial_balance=Decimal(
+            "initial_balance": Decimal(
                 str(
                     payload.get("initial_balance")
                     or self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE
                 )
             ),
-            risk_per_trade_pct=Decimal(
+            "risk_per_trade_pct": Decimal(
                 str(
                     payload.get("risk_per_trade_pct")
                     or self.settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT
                 )
             ),
-            use_ai=bool(payload.get("use_ai", self.settings.REAL_BACKTEST_USE_AI)),
-            send_telegram_summary=False,
-            send_log_channel=bool(
+            "use_ai": bool(payload.get("use_ai", self.settings.REAL_BACKTEST_USE_AI)),
+            "send_telegram_summary": False,
+            "send_log_channel": bool(
                 payload.get("send_log_channel", self.settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL)
             ),
-            log_per_message=bool(payload.get("log_per_message", True)),
-        )
+            "log_per_message": bool(payload.get("log_per_message", True)),
+        }
+        request: RealBacktestRunRequest | IsolatedBacktestRunRequest
+        if run_type == "isolated":
+            leverage_source = cast(
+                Literal["signal_or_default", "fixed"],
+                str(payload.get("leverage_source") or "signal_or_default"),
+            )
+            request = IsolatedBacktestRunRequest(
+                **common_request,
+                capital_per_signal=Decimal(
+                    str(
+                        payload.get("capital_per_signal")
+                        or self.settings.BACKTEST_DEFAULT_INITIAL_BALANCE
+                    )
+                ),
+                fill_policy=BacktestFillPolicy(
+                    str(payload.get("fill_policy") or self.settings.BACKTEST_DEFAULT_FILL_POLICY)
+                ),
+                leverage_source=leverage_source,
+                fixed_leverage=(
+                    int(payload["fixed_leverage"])
+                    if str(payload.get("fixed_leverage") or "").strip()
+                    else None
+                ),
+                max_effective_leverage=Decimal(
+                    str(
+                        payload.get("max_effective_leverage")
+                        or self.settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE
+                    )
+                ),
+                default_signal_leverage=Decimal(
+                    str(
+                        payload.get("default_signal_leverage")
+                        or self.settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE
+                    )
+                ),
+                min_allocation_pct=Decimal(
+                    str(
+                        payload.get("min_allocation_pct")
+                        or self.settings.BACKTEST_MIN_ALLOCATION_PCT
+                    )
+                ),
+                max_allocation_pct=Decimal(
+                    str(
+                        payload.get("max_allocation_pct")
+                        or self.settings.BACKTEST_MAX_ALLOCATION_PCT
+                    )
+                ),
+                default_stop_pct=Decimal(
+                    str(payload.get("default_stop_pct") or self.settings.BACKTEST_DEFAULT_STOP_PCT)
+                ),
+                synthetic_stop_max_loss_pct_of_balance=Decimal(
+                    str(
+                        payload.get("synthetic_stop_max_loss_pct")
+                        or self.settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE
+                    )
+                ),
+                fee_rate_pct=Decimal(
+                    str(payload.get("fee_rate_pct") or self.settings.BACKTEST_FEE_RATE_PCT)
+                ),
+                close_open_positions_at_end=bool(
+                    payload.get("close_open_positions_at_end", True)
+                ),
+                lifecycle_refresh_interval=str(
+                    payload.get("lifecycle_refresh_interval")
+                    or self.settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL
+                ),
+                max_parallel_signals=int(
+                    payload.get("max_parallel_signals") or default_isolated_parallel_workers()
+                ),
+                include_not_filled_signals=bool(
+                    payload.get("include_not_filled_signals", True)
+                ),
+            )
+        else:
+            request = RealBacktestRunRequest(**common_request)
         strategy_key = str(
             payload.get("strategy_key") or self.backtest_bootstrap()["default_strategy_key"]
         )
@@ -438,6 +688,7 @@ class DashboardService:
             request,
             channel_input=channel_input,
             strategy_key=strategy_key,
+            run_type=run_type,
         )
         return {
             "started": True,
@@ -462,14 +713,144 @@ class DashboardService:
             return None
         return [message.model_dump(mode="json") for message in messages]
 
-    def list_backtest_runs(self, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+    def list_backtest_runs(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        *,
+        run_type: str | None = None,
+    ) -> list[dict[str, Any]]:
         return [
             run.model_dump(mode="json")
-            for run in self.backtests.list_run_summaries(limit=limit, offset=offset)
+            for run in self.backtests.list_run_summaries(
+                limit=limit,
+                offset=offset,
+                run_type=run_type,
+            )
         ]
 
-    def count_backtest_runs(self) -> int:
-        return self.backtests.count_runs()
+    def count_backtest_runs(self, *, run_type: str | None = None) -> int:
+        return self.backtests.count_runs(run_type=run_type)
+
+    def latest_backtest_run(
+        self,
+        *,
+        run_type: str | None = None,
+        prefer_active: bool = True,
+    ) -> dict[str, Any] | None:
+        run = self.backtests.latest_run_summary(
+            run_type=run_type,
+            prefer_active=prefer_active,
+        )
+        return run.model_dump(mode="json") if run else None
+
+    def isolated_backtest_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        filters = IsolatedAnalyticsFilters.model_validate(
+            {
+                "channel": self._optional_text(payload.get("channel")),
+                "strategy": self._optional_text(payload.get("strategy")),
+                "fill_policy": self._optional_text(payload.get("fill_policy")),
+                "interval": self._optional_text(payload.get("interval")),
+                "status": self._optional_text(payload.get("status")),
+                "date_from": self._parse_datetime(payload.get("date_from")),
+                "date_to": self._parse_datetime(payload.get("date_to")),
+                "min_signals": max(int(payload.get("min_signals") or 0), 0),
+                "sort_by": str(payload.get("sort_by") or "score"),
+                "sort_order": str(payload.get("sort_order") or "desc"),
+            }
+        )
+        summaries = self.backtests.list_run_summaries(
+            limit=max(self.backtests.count_runs(run_type="isolated"), 1),
+            run_type="isolated",
+        )
+        analytics_runs: list[IsolatedAnalyticsRun] = []
+        seen_report_paths: set[str] = set()
+        for summary in summaries:
+            run = self.backtests.get_run(summary.run_id)
+            if run is None:
+                continue
+            analytics_run = IsolatedAnalyticsRun.model_validate(
+                run.model_dump(mode="python") | {"source": "dashboard"}
+            )
+            analytics_runs.append(analytics_run)
+            if analytics_run.report_path:
+                seen_report_paths.add(self._normalized_report_path(analytics_run.report_path))
+        report_runs, skipped_reports = self._load_isolated_report_runs(
+            seen_report_paths=seen_report_paths
+        )
+        analytics_runs.extend(report_runs)
+        result = self.isolated_analytics.analyze(analytics_runs, filters=filters)
+        result["data_sources"] = {
+            "dashboard_runs": sum(1 for run in analytics_runs if run.source == "dashboard"),
+            "report_only_runs": len(report_runs),
+            "dashboard_report_references": len(seen_report_paths),
+            "skipped_invalid_reports": skipped_reports,
+        }
+        return result
+
+    def _load_isolated_report_runs(
+        self,
+        *,
+        seen_report_paths: set[str],
+    ) -> tuple[list[IsolatedAnalyticsRun], int]:
+        runs: list[IsolatedAnalyticsRun] = []
+        skipped = 0
+        for path in self.real_runner.report_store.list_reports():
+            normalized_path = self._normalized_report_path(str(path))
+            if normalized_path in seen_report_paths:
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict) or payload.get("run_type") != "isolated":
+                    continue
+                request_payload = payload.get("request")
+                aggregate = payload.get("aggregate")
+                signals = payload.get("signals")
+                if not isinstance(request_payload, dict):
+                    request_payload = {}
+                if not isinstance(aggregate, dict):
+                    aggregate = {}
+                if not isinstance(signals, list):
+                    signals = []
+                report_id = hashlib.sha256(normalized_path.encode("utf-8")).hexdigest()[:12]
+                runs.append(
+                    IsolatedAnalyticsRun.model_validate(
+                        {
+                            "run_id": f"report_{report_id}",
+                            "run_type": "isolated",
+                            "channel_resolved": payload.get("channel"),
+                            "from_date": payload.get("from_date"),
+                            "to_date": payload.get("to_date"),
+                            "interval": payload.get("interval"),
+                            "strategy_key": payload.get("strategy_key")
+                            or "default_risk_managed",
+                            "status": "completed" if payload.get("success") else "failed",
+                            "created_at": payload.get("generated_at")
+                            or datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                            "finished_at": payload.get("generated_at"),
+                            "use_ai": bool(payload.get("ai_used")),
+                            "request_payload": request_payload,
+                            "isolated_aggregate": aggregate,
+                            "signals": signals,
+                            "errors": payload.get("errors") or [],
+                            "warnings": payload.get("warnings") or [],
+                            "source": "report",
+                            "report_path": str(path),
+                        }
+                    )
+                )
+            except (OSError, ValueError, TypeError):
+                skipped += 1
+        return runs, skipped
+
+    @staticmethod
+    def _normalized_report_path(value: str) -> str:
+        return str(Path(value).resolve())
+
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
 
     def stop_backtest_run(self, run_id: str) -> dict[str, Any] | None:
         run, stopped, reason = self.backtests.stop_run(run_id)

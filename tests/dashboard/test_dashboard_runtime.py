@@ -118,6 +118,34 @@ def test_dashboard_runtime_default_lifecycle_refresh_interval_is_thirty_minutes(
     assert bootstrap["default_lifecycle_refresh_interval"] == "30m"
 
 
+def test_dashboard_runtime_isolated_bootstrap_exposes_fixed_datetime_inputs(
+    tmp_path: Path,
+) -> None:
+    service = DashboardService(settings(tmp_path))
+
+    bootstrap = service.backtest_bootstrap(run_type="isolated")
+
+    assert bootstrap["default_from_date"] == "2026-03-15T09:47:00+00:00"
+    assert bootstrap["default_to_date"] == "2026-07-16T09:47:00+00:00"
+    assert bootstrap["default_from_input"] == "2026-03-15T13:17"
+    assert bootstrap["default_to_input"] == "2026-07-16T13:17"
+
+
+def test_dashboard_runtime_isolated_default_parallel_workers_uses_cpu_slots(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "triak_trade.dashboard.services.default_isolated_parallel_workers",
+        lambda: 10,
+    )
+    service = DashboardService(settings(tmp_path))
+
+    bootstrap = service.backtest_bootstrap(run_type="isolated")
+
+    assert bootstrap["default_max_parallel_signals"] == 10
+
+
 def test_dashboard_runtime_duplicate_start_and_stop_safe(tmp_path: Path) -> None:
     cfg = settings(tmp_path)
     Path(cfg.DASHBOARD_RUNTIME_DIR).mkdir(parents=True, exist_ok=True)
