@@ -700,18 +700,25 @@ class DashboardService:
         run = self.backtests.get_run(run_id)
         if run is None:
             return None
-        return run.model_dump(mode="json")
+        payload = run.model_dump(mode="json", exclude={"messages"})
+        payload["message_count"] = len(run.messages)
+        payload["messages_loaded"] = False
+        return payload
 
     def get_backtest_run_messages(
         self,
         run_id: str,
         *,
         limit: int = 500,
-    ) -> list[dict[str, Any]] | None:
-        messages = self.backtests.get_run_messages(run_id, limit=limit)
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int] | None:
+        run = self.backtests.get_run(run_id)
+        if run is None:
+            return None
+        messages = self.backtests.get_run_messages(run_id, limit=limit, offset=offset)
         if messages is None:
             return None
-        return [message.model_dump(mode="json") for message in messages]
+        return [message.model_dump(mode="json") for message in messages], len(run.messages)
 
     def list_backtest_runs(
         self,
@@ -871,6 +878,12 @@ class DashboardService:
             "rerun_of": run_id,
             "run": run.model_dump(mode="json"),
         }
+
+    def resume_backtest_run(self, run_id: str) -> dict[str, Any] | None:
+        run = self.backtests.resume_run(run_id)
+        if run is None:
+            return None
+        return {"started": True, "resumed_from": run_id, "run": run.model_dump(mode="json")}
 
     def list_saved_channels(self) -> list[dict[str, Any]]:
         state = self.state.get_saved_channels()

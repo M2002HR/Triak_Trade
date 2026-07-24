@@ -38,6 +38,10 @@ document.documentElement.dataset.dashboardReady = "true";
     charts: new Map(),
     wsPingTimer: null,
     recoveringLatest: false,
+    loadedMessages: [],
+    messageNextOffset: 0,
+    messageHasMore: false,
+    messageLoading: false,
   };
 
   const nodes = {
@@ -102,9 +106,7 @@ document.documentElement.dataset.dashboardReady = "true";
     progressFill: document.getElementById("backtest-progress-fill"),
     progressMeta: document.getElementById("backtest-progress-meta"),
     phaseProgressGrid: document.getElementById("phase-progress-grid"),
-    messageCountLabel: document.getElementById("message-count-label"),
-    messageFilterBar: document.getElementById("message-filter-bar"),
-    messageStream: document.getElementById("message-stream"),
+    messageStreamPreview: document.getElementById("message-stream-preview"),
     eventFeed: document.getElementById("event-feed"),
     recentRuns: document.getElementById("recent-runs"),
     signalStatePreview: document.getElementById("signal-state-preview"),
@@ -255,39 +257,32 @@ document.documentElement.dataset.dashboardReady = "true";
         applyDateRange(start.toISOString(), end.toISOString());
       });
     });
-    if (nodes.messageFilterBar) {
-      nodes.messageFilterBar.addEventListener("click", (event) => {
-        const target = event.target instanceof Element ? event.target.closest("[data-message-filter]") : null;
-        if (!target) {
-          return;
-        }
-        state.messageFilter = target.getAttribute("data-message-filter") || "all";
-        renderFilterBar();
-        renderMessages((state.activeRun && state.activeRun.messages) || []);
-      });
-    }
-    if (nodes.messageStream) {
-      nodes.messageStream.addEventListener("click", (event) => {
-        const target = event.target instanceof Element ? event.target.closest("[data-message-id]") : null;
-        if (!target) {
-          return;
-        }
-        const messageId = Number(target.getAttribute("data-message-id") || "0");
-        state.selectedMessageId = messageId;
-        const traces = state.activeRun && Array.isArray(state.activeRun.messages)
-          ? state.activeRun.messages
-          : [];
-        const trace = traces.find((item) => item.message_id === messageId);
-        if (trace) {
-          openModal(trace);
-        }
-      });
-    }
     document.addEventListener("click", (event) => {
       const panelTarget = event.target instanceof Element ? event.target.closest("[data-open-panel-modal]") : null;
       if (panelTarget) {
         const kind = panelTarget.getAttribute("data-open-panel-modal") || "feed";
         openPanelModal(kind);
+        return;
+      }
+      const messageFilterTarget = event.target instanceof Element ? event.target.closest("[data-message-filter]") : null;
+      if (messageFilterTarget && state.activePanelModal === "messages") {
+        state.messageFilter = messageFilterTarget.getAttribute("data-message-filter") || "all";
+        renderLazyMessages();
+        return;
+      }
+      const messageLoadTarget = event.target instanceof Element ? event.target.closest("[data-load-more-messages]") : null;
+      if (messageLoadTarget) {
+        loadMessagePage(true);
+        return;
+      }
+      const messageTarget = event.target instanceof Element ? event.target.closest("[data-message-id]") : null;
+      if (messageTarget) {
+        const messageId = Number(messageTarget.getAttribute("data-message-id") || "0");
+        const trace = state.loadedMessages.find((item) => item.message_id === messageId);
+        if (trace) {
+          state.selectedMessageId = messageId;
+          openModal(trace);
+        }
         return;
       }
       const stopTarget = event.target instanceof Element ? event.target.closest("[data-stop-run-id]") : null;
@@ -302,6 +297,11 @@ document.documentElement.dataset.dashboardReady = "true";
         event.preventDefault();
         event.stopPropagation();
         rerunRun(rerunTarget.getAttribute("data-rerun-run-id") || "");
+        return;
+      }
+      const resumeTarget = event.target instanceof Element ? event.target.closest("[data-resume-run-id]") : null;
+      if (resumeTarget) {
+        resumeRun(resumeTarget.getAttribute("data-resume-run-id") || "");
         return;
       }
       const signalTarget = event.target instanceof Element ? event.target.closest("[data-signal-id]") : null;
@@ -509,21 +509,18 @@ document.documentElement.dataset.dashboardReady = "true";
     }
   }
 
-  function renderFilterBar() {
-    if (!nodes.messageFilterBar) {
-      return;
-    }
-    nodes.messageFilterBar.querySelectorAll("[data-message-filter]").forEach((button) => {
-      const active = button.getAttribute("data-message-filter") === state.messageFilter;
-      button.classList.toggle("active", active);
-    });
-  }
-
   function openPanelModal(kind) {
     state.panelModalOpen = true;
     state.activePanelModal = kind;
     nodes.panelModal.hidden = false;
-    if (kind === "history") {
+    if (kind === "messages") {
+      nodes.panelModalTitle.textContent = "Per-Message Trace";
+      state.loadedMessages = [];
+      state.messageNextOffset = 0;
+      state.messageHasMore = false;
+      nodes.panelModalBody.innerHTML = '<div class="empty-state-box">Loading message traces…</div>';
+      loadMessagePage(false);
+    } else if (kind === "history") {
       nodes.panelModalTitle.textContent = "Recent Backtests";
       nodes.panelModalBody.innerHTML = buildRecentRunsMarkup(state.recentRuns, true);
     } else if (kind === "signals") {
@@ -861,7 +858,7 @@ document.documentElement.dataset.dashboardReady = "true";
     renderProgress(run);
     renderPhaseProgress(run);
     renderEventFeed(run.events || []);
-    renderMessages(run.messages || []);
+    renderMessageStreamPreview(run);
     renderSignals(run.signals || []);
     renderAggregate(run.isolated_aggregate || {});
     renderRecentRuns(state.recentRuns);
@@ -901,11 +898,9 @@ document.documentElement.dataset.dashboardReady = "true";
     renderRunActions(run);
     nodes.currentPhaseLabel.textContent = run.current_phase_label;
     nodes.currentPhaseSummary.textContent = run.current_phase_summary || "No summary yet.";
-    const runMessages = Array.isArray(run.messages) ? run.messages : [];
-    const currentTrace = runMessages.find((item) => item.message_id === run.current_message_id);
-    nodes.currentMessageLabel.textContent = currentTrace ? `Message ${currentTrace.message_id}` : "None";
-    nodes.currentMessageSummary.textContent = currentTrace
-      ? `${currentTrace.current_stage} • ${currentTrace.result_summary || currentTrace.preview_text || "Processing"}`
+    nodes.currentMessageLabel.textContent = run.current_message_id ? `Message ${run.current_message_id}` : "None";
+    nodes.currentMessageSummary.textContent = run.current_message_id
+      ? "Open Message Stream to load this trace."
       : "No message is being processed right now.";
   }
 
@@ -917,8 +912,7 @@ document.documentElement.dataset.dashboardReady = "true";
       nodes.runtimeLabel.textContent = formatElapsedMs(Number(run.runtime_duration_ms || 0));
     }
     const totalMessages = Number(run.total_messages || 0);
-    const fallbackProcessed = Array.isArray(run.messages) ? run.messages.length : 0;
-    const processedMessages = Math.max(Number(run.processed_messages || 0), fallbackProcessed);
+    const processedMessages = Number(run.processed_messages || 0);
     const safeProcessed = totalMessages > 0
       ? Math.min(processedMessages, totalMessages)
       : processedMessages;
@@ -998,19 +992,55 @@ document.documentElement.dataset.dashboardReady = "true";
     }
   }
 
-  function renderMessages(messages) {
-    const filteredMessages = messages.filter(matchesMessageFilter);
-    nodes.messageCountLabel.textContent = `${filteredMessages.length} of ${messages.length} messages`;
-    if (!filteredMessages.length) {
-      nodes.messageStream.textContent = messages.length
-        ? "No messages match the current filter."
-        : "No messages have been processed yet.";
-      nodes.messageStream.classList.add("empty-state-box");
+  function renderMessageStreamPreview(run) {
+    if (!nodes.messageStreamPreview) {
       return;
     }
-    nodes.messageStream.classList.remove("empty-state-box");
-    nodes.messageStream.innerHTML = messages
-      .filter(matchesMessageFilter)
+    const count = Number(run.message_count || run.processed_messages || 0);
+    nodes.messageStreamPreview.textContent = count
+      ? `${count} trace records available. Open Message Stream to load them in pages.`
+      : "No messages have been processed yet.";
+    nodes.messageStreamPreview.classList.toggle("empty-state-box", !count);
+  }
+
+  async function loadMessagePage(append) {
+    if (!state.activeRunId || state.messageLoading) {
+      return;
+    }
+    state.messageLoading = true;
+    try {
+      const offset = append ? state.messageNextOffset : 0;
+      const response = await fetch(withAuthPath(
+        `/api/backtests/runs/${encodeURIComponent(state.activeRunId)}/messages?limit=50&offset=${offset}`,
+      ));
+      if (!response.ok) {
+        throw new Error("message trace request failed");
+      }
+      const payload = await response.json();
+      const incoming = Array.isArray(payload.messages) ? payload.messages : [];
+      state.loadedMessages = append ? [...state.loadedMessages, ...incoming] : incoming;
+      state.messageNextOffset = Number(payload.next_offset || state.loadedMessages.length);
+      state.messageHasMore = Boolean(payload.has_more);
+      renderLazyMessages();
+    } catch (_error) {
+      if (state.panelModalOpen && state.activePanelModal === "messages") {
+        nodes.panelModalBody.innerHTML = '<div class="empty-state-box">Message traces could not be loaded. Try again.</div>';
+      }
+    } finally {
+      state.messageLoading = false;
+    }
+  }
+
+  function renderLazyMessages() {
+    if (!state.panelModalOpen || state.activePanelModal !== "messages") {
+      return;
+    }
+    const messages = state.loadedMessages;
+    const filteredMessages = messages.filter(matchesMessageFilter);
+    const filters = ["all", "signals", "updates", "invalid", "ignored", "ambiguous"]
+      .map((filter) => `<button type="button" class="filter-pill ${state.messageFilter === filter ? "active" : ""}" data-message-filter="${filter}">${escapeHtml(replaceUnderscores(filter))}</button>`)
+      .join("");
+    const rows = filteredMessages
       .map((trace) => {
         const active = Boolean(state.activeRun && state.activeRun.current_message_id === trace.message_id);
         return `
@@ -1036,6 +1066,11 @@ document.documentElement.dataset.dashboardReady = "true";
         `;
       })
       .join("");
+    nodes.panelModalBody.innerHTML = `
+      <div class="message-stream-toolbar"><div class="filter-pill-row">${filters}</div><div class="counter-pill">${filteredMessages.length} loaded</div></div>
+      <div class="message-stream ${rows ? "" : "empty-state-box"}">${rows || "No messages match the current filter."}</div>
+      ${state.messageHasMore ? '<button type="button" class="button secondary-open-button" data-load-more-messages="true">Load 50 More</button>' : ""}
+    `;
   }
 
   function renderRecentRuns(runs) {
@@ -1885,8 +1920,12 @@ document.documentElement.dataset.dashboardReady = "true";
     const stopButton = isActiveStatus(run.status)
       ? `<button type="button" class="danger compact-action" data-stop-run-id="${escapeHtml(run.run_id)}">Stop Run</button>`
       : "";
+    const resumeButton = run.status === "failed" && run.resume_available_from
+      ? `<button type="button" class="button compact-action" data-resume-run-id="${escapeHtml(run.run_id)}">Resume From ${escapeHtml(replaceUnderscores(run.resume_available_from))}</button>`
+      : "";
     nodes.runActionBar.innerHTML = `
       <button type="button" class="ghost-button compact-action" data-rerun-run-id="${escapeHtml(run.run_id)}">Run Again</button>
+      ${resumeButton}
       ${stopButton}
     `;
   }
@@ -1950,6 +1989,27 @@ document.documentElement.dataset.dashboardReady = "true";
       }
     } catch (error) {
       setFormStatus(`Rerun failed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+    }
+  }
+
+  async function resumeRun(runId) {
+    if (!runId) return;
+    setFormStatus("Resuming from the saved isolated checkpoint...", "working");
+    try {
+      const response = await fetch(withAuthPath(`/api/backtests/runs/${encodeURIComponent(runId)}/resume`), { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) {
+        setFormStatus(`Resume unavailable: ${data.detail || "checkpoint not found"}`, "error");
+        return;
+      }
+      rememberActiveRun(data.run.run_id);
+      state.activeRun = mergeRunPayload(null, data.run);
+      upsertRun(data.run);
+      renderRun(state.activeRun);
+      setFormStatus("Resumed from the saved phase checkpoint.", "success");
+      if (!state.wsReady) startPolling();
+    } catch (error) {
+      setFormStatus(`Resume failed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
     }
   }
 

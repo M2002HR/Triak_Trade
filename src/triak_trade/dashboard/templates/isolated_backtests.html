@@ -125,23 +125,11 @@
         <div>
           <p class="eyebrow">Message Stream</p>
           <h2>Per-Message Trace</h2>
-          <p class="subtle">Click any row to open the full stage timeline, parsed action, and isolated attachment decisions.</p>
-        </div>
-        <div class="message-stream-toolbar">
-          <div id="message-filter-bar" class="filter-pill-row">
-            <button type="button" class="filter-pill active" data-message-filter="all">All</button>
-            <button type="button" class="filter-pill" data-message-filter="signals">Signals</button>
-            <button type="button" class="filter-pill" data-message-filter="updates">Updates</button>
-            <button type="button" class="filter-pill" data-message-filter="invalid">Invalid</button>
-            <button type="button" class="filter-pill" data-message-filter="ignored">Ignored</button>
-            <button type="button" class="filter-pill" data-message-filter="ambiguous">Ambiguous</button>
-          </div>
-          <div id="message-count-label" class="counter-pill">0 messages</div>
+          <p class="subtle">Load trace records only when you need them; the main workspace stays focused on run progress.</p>
         </div>
       </div>
-      <div id="message-stream" class="message-stream empty-state-box">
-        No messages have been processed yet.
-      </div>
+      <div id="message-stream-preview" class="modal-preview-blurb empty-state-box">No message trace has been loaded.</div>
+      <button type="button" class="button secondary-open-button" data-open-panel-modal="messages">Open Message Stream</button>
     </section>
   </div>
 

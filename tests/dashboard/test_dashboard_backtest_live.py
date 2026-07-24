@@ -435,8 +435,14 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
     assert loaded["channel_resolved"] == "https://t.me/Tofan_Trade"
     assert loaded["strategy_key"] == "tp_trailing_risk_managed"
     assert loaded["processed_messages"] == 1
-    assert loaded["messages"][0]["message_id"] == 501
-    assert loaded["messages"][0]["classification"] == "new_signal"
+    assert loaded["messages_loaded"] is False
+    assert loaded["message_count"] == 1
+    traces = client.get(
+        f"/api/backtests/runs/{run_id}/messages?limit=1&offset=0",
+        headers=_headers(),
+    ).json()
+    assert traces["messages"][0]["message_id"] == 501
+    assert traces["messages"][0]["classification"] == "new_signal"
     assert loaded["signals"][0]["signal_id"] == "sig_501"
     assert loaded["signals"][0]["status_group"] == "active"
     assert loaded["report_path"] == "runtime/reports/backtests/report.json"

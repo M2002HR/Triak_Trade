@@ -414,13 +414,29 @@ def build_router(
         request: Request,
         run_id: str,
         limit: int = 500,
+        offset: int = 0,
     ) -> JSONResponse:
         auth.require_api(request)
         safe_limit = min(max(limit, 1), 500)
-        messages = service.get_backtest_run_messages(run_id, limit=safe_limit)
-        if messages is None:
+        safe_offset = max(offset, 0)
+        result = service.get_backtest_run_messages(
+            run_id,
+            limit=safe_limit,
+            offset=safe_offset,
+        )
+        if result is None:
             return JSONResponse({"detail": "run_not_found"}, status_code=404)
-        return JSONResponse({"messages": messages, "limit": safe_limit})
+        messages, total_messages = result
+        return JSONResponse(
+            {
+                "messages": messages,
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "total_messages": total_messages,
+                "next_offset": safe_offset + len(messages),
+                "has_more": safe_offset + len(messages) < total_messages,
+            }
+        )
 
     @router.post("/api/backtests/start")
     async def start_backtest_run(request: Request) -> JSONResponse:
@@ -450,6 +466,14 @@ def build_router(
         result = service.rerun_backtest_run(run_id)
         if result is None:
             return JSONResponse({"detail": "run_not_found"}, status_code=404)
+        return JSONResponse(result, status_code=202)
+
+    @router.post("/api/backtests/runs/{run_id}/resume")
+    async def resume_backtest_run(request: Request, run_id: str) -> JSONResponse:
+        auth.require_api(request)
+        result = service.resume_backtest_run(run_id)
+        if result is None:
+            return JSONResponse({"detail": "resume_checkpoint_not_found"}, status_code=409)
         return JSONResponse(result, status_code=202)
 
     @router.websocket("/ws/backtests")
