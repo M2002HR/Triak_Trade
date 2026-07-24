@@ -15,6 +15,7 @@ from decimal import Decimal
 from multiprocessing import get_context
 from pathlib import Path
 from statistics import median
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -265,7 +266,27 @@ class IsolatedBacktestResult(RealBacktestResult):
     report_payload: dict[str, Any] | None = None
 
 
+class IsolatedBacktestCheckpoint(BaseModel):
+    """Durable, non-secret state needed to restart an isolated pipeline phase."""
+
+    resume_phase: Literal["classify_messages", "fetch_market_data", "simulate", "report"]
+    messages: list[RawTelegramMessage] = Field(default_factory=list)
+    real_telegram_used: bool = False
+    events: list[BacktestEvent] = Field(default_factory=list)
+    traces: list[RealBacktestMessageTrace] = Field(default_factory=list)
+    signal_trace_map: dict[str, int] = Field(default_factory=dict)
+    symbol_trace_map: dict[str, list[int]] = Field(default_factory=dict)
+    records: list[IsolatedSignalRecord] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    ai_used: bool = False
+    regex_fallback_used: bool = False
+
+
 class IsolatedBacktestRunner(RealBacktestRunner):
+    checkpoint_callback: Callable[[IsolatedBacktestCheckpoint], None] | None = None
+    resume_checkpoint: IsolatedBacktestCheckpoint | None = None
+
     async def run(
         self,
         request: RealBacktestRunRequest,
@@ -283,6 +304,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         readiness = self.readiness()
         from_date, to_date = isolated_request.resolve_range()
         warnings: list[str] = []
+        checkpoint = self.resume_checkpoint
 
         self._emit_run_progress(
             progress_callback,
@@ -314,28 +336,37 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             progress_callback,
             phase="fetch_history",
             status="running",
-            summary="Fetching Telegram message history.",
+            summary=(
+                "Restoring saved isolated checkpoint."
+                if checkpoint
+                else "Fetching Telegram message history."
+            ),
         )
-        try:
-            messages, fetch_result = await self.telegram_source.fetch(
-                channel=isolated_request.channel,
-                start=from_date,
-                end=to_date,
-                limit=min(
-                    isolated_request.max_messages,
-                    self.settings.REAL_BACKTEST_MAX_MESSAGES,
-                ),
-                start_message_id=isolated_request.start_message_id,
-            )
-        except Exception as exc:
-            return self._write_isolated_failure(
-                request=isolated_request,
-                from_date=from_date,
-                to_date=to_date,
-                errors=[f"Telegram history fetch failed: {type(exc).__name__}"],
-            )
+        fetch_result: Any
+        if checkpoint is not None:
+            messages = checkpoint.messages
+            fetch_result = SimpleNamespace(used_real_telegram=checkpoint.real_telegram_used)
+        else:
+            try:
+                messages, fetch_result = await self.telegram_source.fetch(
+                    channel=isolated_request.channel,
+                    start=from_date,
+                    end=to_date,
+                    limit=min(
+                        isolated_request.max_messages,
+                        self.settings.REAL_BACKTEST_MAX_MESSAGES,
+                    ),
+                    start_message_id=isolated_request.start_message_id,
+                )
+            except Exception as exc:
+                return self._write_isolated_failure(
+                    request=isolated_request,
+                    from_date=from_date,
+                    to_date=to_date,
+                    errors=[f"Telegram history fetch failed: {type(exc).__name__}"],
+                )
 
-        counts: dict[str, int] = {
+        counts: dict[str, int] = checkpoint.counts.copy() if checkpoint is not None else {
             "history_steps_total": 1,
             "history_steps_completed": 1,
             "total_messages": len(messages),
@@ -398,6 +429,22 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         )
         if selection.warning:
             self._append_warning(warnings, selection.warning)
+        self._publish_checkpoint(
+            IsolatedBacktestCheckpoint(
+                resume_phase="fetch_market_data",
+                messages=messages,
+                real_telegram_used=fetch_result.used_real_telegram,
+                events=events,
+                traces=list(traces_by_message_id.values()),
+                signal_trace_map=signal_trace_map,
+                symbol_trace_map=symbol_trace_map,
+                records=list(records_by_signal_id.values()),
+                counts=counts,
+                warnings=warnings,
+                ai_used=ai_used,
+                regex_fallback_used=regex_fallback_used,
+            )
+        )
 
         self._emit_run_progress(
             progress_callback,
@@ -836,6 +883,11 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         )
         return result
 
+    def _publish_checkpoint(self, checkpoint: IsolatedBacktestCheckpoint) -> None:
+        callback = getattr(self, "checkpoint_callback", None)
+        if callback is not None:
+            callback(checkpoint)
+
     @staticmethod
     def _estimated_candle_count(*, start: datetime, end: datetime, interval: str) -> int:
         duration_seconds = max(0, int((end - start).total_seconds()))
@@ -878,6 +930,16 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         dict[str, IsolatedSignalRecord],
         dict[str, int],
     ]:
+        checkpoint = self.resume_checkpoint
+        if checkpoint is not None and checkpoint.resume_phase == "fetch_market_data":
+            return (
+                checkpoint.events,
+                {trace.message_id: trace for trace in checkpoint.traces},
+                checkpoint.signal_trace_map,
+                checkpoint.symbol_trace_map,
+                {record.signal_id: record for record in checkpoint.records},
+                checkpoint.counts.copy(),
+            )
         context = ChannelContext(
             channel_id=request.channel,
             max_message_limit=max(
