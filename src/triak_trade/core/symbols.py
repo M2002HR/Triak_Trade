@@ -15,6 +15,16 @@ def canonical_market_symbol(raw: str | None) -> str | None:
     if not compact:
         return None
 
+    # AI and noisy channel messages occasionally repeat the quote asset on
+    # both sides (for example ``USDT/TAIKO/USDT``).  Treat that as a quote
+    # wrapper, not as part of the base asset, before creating exchange symbol
+    # candidates.  Otherwise we query non-existent contracts such as
+    # ``USDTTAIKO-SWAP-USDT`` and discard an otherwise valid signal.
+    for quote in ("USDT", "USDC"):
+        if compact.startswith(quote) and compact.endswith(quote) and len(compact) > len(quote) * 2:
+            compact = compact[len(quote) :]
+            break
+
     for quote in ("USDT", "USDC"):
         marker = f"SWAP{quote}"
         if compact.endswith(marker) and len(compact) > len(marker):
