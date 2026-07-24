@@ -19,6 +19,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from triak_trade.backtesting.isolated_runner import (
+    IsolatedBacktestCheckpoint,
     IsolatedBacktestResult,
     IsolatedBacktestRunner,
     IsolatedBacktestRunRequest,
@@ -112,6 +113,8 @@ class DashboardBacktestRun(BaseModel):
     report_path: str | None = None
     markdown_report_path: str | None = None
     isolated_aggregate: dict[str, Any] = Field(default_factory=dict)
+    resume_checkpoint: dict[str, Any] | None = None
+    resume_available_from: str | None = None
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     messages: list[RealBacktestMessageTrace] = Field(default_factory=list)
@@ -422,6 +425,7 @@ class DashboardBacktestCoordinator:
         channel_input: str,
         strategy_key: str = "default_risk_managed",
         run_type: str = "portfolio",
+        resume_checkpoint: dict[str, Any] | None = None,
     ) -> DashboardBacktestRun:
         from_date, to_date = request.resolve_range()
         created_at = datetime.now(timezone.utc)
@@ -485,7 +489,7 @@ class DashboardBacktestCoordinator:
         )
         thread = threading.Thread(
             target=self._execute_run,
-            args=(run.run_id, request),
+            args=(run.run_id, request, resume_checkpoint),
             name=f"dashboard-backtest-{run.run_id}",
             daemon=True,
         )
@@ -553,6 +557,19 @@ class DashboardBacktestCoordinator:
             run_type=previous.run_type,
         )
 
+    def resume_run(self, run_id: str) -> DashboardBacktestRun | None:
+        previous = self.store.read(run_id)
+        if previous is None or previous.run_type != "isolated" or not previous.resume_checkpoint:
+            return None
+        request = IsolatedBacktestRunRequest.model_validate(previous.request_payload)
+        return self.start_run(
+            request,
+            channel_input=previous.channel_input,
+            strategy_key=previous.strategy_key,
+            run_type="isolated",
+            resume_checkpoint=previous.resume_checkpoint,
+        )
+
     def get_run(self, run_id: str) -> DashboardBacktestRun | None:
         with self._lock:
             active = self._active_runs.get(run_id)
@@ -565,12 +582,14 @@ class DashboardBacktestCoordinator:
         run_id: str,
         *,
         limit: int = 500,
+        offset: int = 0,
     ) -> list[RealBacktestMessageTrace] | None:
         run = self.get_run(run_id)
         if run is None:
             return None
         safe_limit = max(1, limit)
-        return list(run.messages[:safe_limit])
+        safe_offset = max(0, offset)
+        return list(run.messages[safe_offset : safe_offset + safe_limit])
 
     def list_runs(self, limit: int = 20) -> list[DashboardBacktestRun]:
         return self.store.list_runs(limit=limit)
@@ -608,6 +627,7 @@ class DashboardBacktestCoordinator:
         self,
         run_id: str,
         request: RealBacktestRunRequest | IsolatedBacktestRunRequest,
+        resume_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         run = self.get_run(run_id)
         if run is None:
@@ -615,10 +635,19 @@ class DashboardBacktestCoordinator:
         runner: RealBacktestRunner | IsolatedBacktestRunner
         if run.run_type == "isolated":
             runner = self.isolated_runner_factory()
+            if resume_checkpoint is not None:
+                runner.resume_checkpoint = IsolatedBacktestCheckpoint.model_validate(
+                    resume_checkpoint
+                )
         else:
             runner = self.runner_factory()
         runner.strategy = build_strategy_from_key(run.strategy_key)
         runner.strategy_key = run.strategy_key
+        if isinstance(runner, IsolatedBacktestRunner):
+            runner.checkpoint_callback = lambda checkpoint: self._store_isolated_checkpoint(
+                run_id,
+                checkpoint.model_dump(mode="json"),
+            )
         if self._is_cancel_requested(run_id):
             self._mark_cancelled(run_id)
             return
@@ -763,6 +792,16 @@ class DashboardBacktestCoordinator:
             },
         )
         self._notify(completed)
+
+    def _store_isolated_checkpoint(self, run_id: str, checkpoint: dict[str, Any]) -> None:
+        run = self.get_run(run_id)
+        if run is None:
+            return
+        run.resume_checkpoint = checkpoint
+        run.resume_available_from = str(checkpoint.get("resume_phase") or "") or None
+        self.store.write(run)
+        with self._lock:
+            self._active_runs[run_id] = run
 
     def _handle_progress(self, run_id: str, event: RealBacktestProgressEvent) -> None:
         if self._is_cancel_requested(run_id):
