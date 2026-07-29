@@ -586,6 +586,7 @@ class ToobitFuturesClient:
         order_type: str = "MARKET",
         quantity: Decimal,
         price: Decimal | None = None,
+        stop_price: Decimal | None = None,
         leverage: int | None = None,
         client_order_id: str | None = None,
         time_in_force: str = "GTC",
@@ -620,6 +621,22 @@ class ToobitFuturesClient:
         elif normalized_order_type == "MARKET":
             params["priceType"] = "MARKET"
             params["timeInForce"] = "IOC"
+        elif normalized_order_type == "STOP":
+            if stop_price is None:
+                raise ToobitAPIError("stop_price is required for STOP futures orders")
+            params["type"] = "STOP"
+            params["priceType"] = "MARKET"
+            params["stopPrice"] = _fmt_decimal(
+                _normalize_price_to_tick(
+                    stop_price,
+                    spec,
+                    rounding=(
+                        ROUND_UP
+                        if side.strip().upper() == "BUY_OPEN"
+                        else ROUND_DOWN
+                    ),
+                )
+            )
         else:
             raise ToobitAPIError(f"Unsupported futures order type: {order_type}")
         if take_profit is not None:
@@ -642,6 +659,9 @@ class ToobitFuturesClient:
         symbol: str,
         quantity: Decimal,
         leverage: int | None = None,
+        order_type: str = "MARKET",
+        price: Decimal | None = None,
+        stop_price: Decimal | None = None,
         take_profit: Decimal | None = None,
         stop_loss: Decimal | None = None,
         client_order_id: str | None = None,
@@ -650,8 +670,10 @@ class ToobitFuturesClient:
         return await self.place_order(
             symbol=symbol,
             side="BUY_OPEN",
-            order_type="MARKET",
+            order_type=order_type,
             quantity=quantity,
+            price=price,
+            stop_price=stop_price,
             leverage=leverage,
             take_profit=take_profit,
             stop_loss=stop_loss,
@@ -665,6 +687,9 @@ class ToobitFuturesClient:
         symbol: str,
         quantity: Decimal,
         leverage: int | None = None,
+        order_type: str = "MARKET",
+        price: Decimal | None = None,
+        stop_price: Decimal | None = None,
         take_profit: Decimal | None = None,
         stop_loss: Decimal | None = None,
         client_order_id: str | None = None,
@@ -673,8 +698,10 @@ class ToobitFuturesClient:
         return await self.place_order(
             symbol=symbol,
             side="SELL_OPEN",
-            order_type="MARKET",
+            order_type=order_type,
             quantity=quantity,
+            price=price,
+            stop_price=stop_price,
             leverage=leverage,
             take_profit=take_profit,
             stop_loss=stop_loss,

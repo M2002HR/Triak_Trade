@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.config.settings import Settings
@@ -13,6 +13,11 @@ from triak_trade.core.logging import log_event
 from triak_trade.domain.enums import TradeSide
 from triak_trade.domain.models import ParsedSignal
 from triak_trade.live_trading.models import LiveSession, LiveTrade, MessageAttribution
+from triak_trade.risk.stop_loss import (
+    StopLossRiskResult,
+    clamp_stop_loss_to_risk_budget,
+    max_quantity_for_stop_risk_budget,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +35,7 @@ class PositionSizingResult:
         margin: Decimal,
         leverage: int,
         entry_price: Decimal,
+        balance_at_entry: Decimal,
         stop_loss: Decimal | None,
         take_profits: list[Decimal],
         is_synthetic_stop: bool,
@@ -40,6 +46,7 @@ class PositionSizingResult:
         self.margin = margin
         self.leverage = leverage
         self.entry_price = entry_price
+        self.balance_at_entry = balance_at_entry
         self.stop_loss = stop_loss
         self.take_profits = take_profits
         self.is_synthetic_stop = is_synthetic_stop
@@ -173,6 +180,47 @@ class LivePositionManager:
                 )
                 notes.extend(synthetic_stop_notes)
             is_synthetic_stop = True
+        assert stop_loss is not None
+        if signal.stop_loss is not None:
+            max_stop_safe_quantity = max_quantity_for_stop_risk_budget(
+                side=side,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                balance_at_entry=current_balance,
+                fee_rate_pct=self.settings.LIVE_TRADING_FEE_RATE_PCT,
+                max_loss_pct_of_balance=(
+                    self.settings.LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE
+                ),
+            ).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+            if max_stop_safe_quantity <= Decimal("0"):
+                raise ValueError(
+                    "Requested stop loss leaves no positive risk-safe position size"
+                )
+            if quantity > max_stop_safe_quantity:
+                previous_quantity = quantity
+                quantity = max_stop_safe_quantity
+                notes.append(
+                    "quantity_risk_capped_to_preserve_stop="
+                    f"{previous_quantity}->{quantity}; stop_loss={stop_loss}"
+                )
+        stop_risk = self._clamp_stop_loss(
+            side=side,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            quantity=quantity,
+            balance_at_entry=current_balance,
+        )
+        if signal.stop_loss is not None and stop_risk.was_capped:
+            raise ValueError(
+                "Risk-sized quantity could not preserve the requested stop loss"
+            )
+        stop_loss = signal.stop_loss if signal.stop_loss is not None else stop_risk.stop_loss
+        if signal.stop_loss is None and stop_risk.was_capped:
+            notes.append(
+                "synthetic_stop_loss_risk_capped="
+                f"max_loss_pct={self.settings.LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE}; "
+                f"risk_budget={stop_risk.risk_budget}; risk_amount={stop_risk.risk_amount}"
+            )
         if quantity <= 0:
             log_event(
                 log,
@@ -195,6 +243,7 @@ class LivePositionManager:
         )
         if len(take_profits) < len(signal.take_profits):
             notes.append(f"tp_direction_filtered={len(signal.take_profits) - len(take_profits)}")
+        explicit_take_profits_used = bool(take_profits)
         synthetic_take_profits_used = False
         if not take_profits and strategy is not None and stop_loss is not None:
             strategy_tps = strategy.get_synthetic_take_profits(
@@ -210,12 +259,16 @@ class LivePositionManager:
                 stop_loss=stop_loss,
             )
             synthetic_take_profits_used = bool(take_profits)
-        take_profits, tp_floor_notes = _enforce_minimum_first_take_profit(
-            take_profits=take_profits,
-            is_long=side.is_long,
-            entry_price=entry_price,
-            min_profit_pct=self.settings.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT,
-        )
+        tp_floor_notes: list[str] = []
+        if synthetic_take_profits_used and not explicit_take_profits_used:
+            take_profits, tp_floor_notes = _enforce_minimum_first_take_profit(
+                take_profits=take_profits,
+                is_long=side.is_long,
+                entry_price=entry_price,
+                min_profit_pct=self.settings.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT,
+            )
+        if not take_profits:
+            raise ValueError("No valid take-profit targets available for position sizing")
         if synthetic_take_profits_used and take_profits:
             notes.append(
                 "synthetic_take_profits_strategy="
@@ -250,6 +303,7 @@ class LivePositionManager:
             margin=margin,
             leverage=leverage,
             entry_price=entry_price,
+            balance_at_entry=current_balance,
             stop_loss=stop_loss,
             take_profits=take_profits,
             is_synthetic_stop=is_synthetic_stop,
@@ -292,17 +346,18 @@ class LivePositionManager:
             side="long" if side.is_long else "short",
             leverage=sizing.leverage,
             entry_price=sizing.entry_price,
+            entry_type=signal.entry_type.value,
+            requested_entry_low=signal.entry_low,
+            requested_entry_high=signal.entry_high,
+            requested_stop_loss=signal.stop_loss,
+            requested_take_profits=list(signal.take_profits),
             quantity=sizing.quantity,
             remaining_quantity=sizing.quantity,
             stop_loss=sizing.stop_loss,
             take_profits=sizing.take_profits,
             margin=sizing.margin,
-            balance_at_entry=(
-                session.paper_balance
-                if session.trading_mode == "demo"
-                else Decimal("0")
-            ),
-            status="open",
+            balance_at_entry=sizing.balance_at_entry,
+            status="waiting_entry",
             message_history=[attribution],
         )
         log_event(
@@ -331,14 +386,42 @@ class LivePositionManager:
         new_sl: Decimal | None,
         message: MessageAttribution,
         move_to_entry: bool = False,
-    ) -> None:
+    ) -> StopLossRiskResult | None:
         previous_stop_loss = trade.stop_loss
+        applied_risk: StopLossRiskResult | None = None
         if move_to_entry:
             trade.stop_loss = trade.entry_price
             message.notes.append(f"SL moved to entry (breakeven) {trade.entry_price}")
         elif new_sl is not None:
+            risk = self.clamp_trade_stop_loss(trade=trade, stop_loss=new_sl)
+            if risk.was_capped:
+                message.action = "ignored"
+                message.notes.append(
+                    "SL update rejected to preserve requested value and account risk: "
+                    f"requested={new_sl}; maximum_safe_stop={risk.stop_loss}; "
+                    f"risk_budget={risk.risk_budget}"
+                )
+                trade.add_attribution(message)
+                log_event(
+                    log,
+                    logging.WARNING,
+                    "live_trading.trade_stop_loss_update_rejected",
+                    requested_stop_loss=str(new_sl),
+                    existing_stop_loss=(
+                        str(previous_stop_loss)
+                        if previous_stop_loss is not None
+                        else None
+                    ),
+                    risk_budget=str(risk.risk_budget),
+                    message_id=message.message_id,
+                    **self._trade_fields(trade),
+                )
+                return risk
             trade.stop_loss = new_sl
             message.notes.append(f"SL updated to {new_sl}")
+            applied_risk = risk
+        else:
+            return None
         trade.add_attribution(message)
         log_event(
             log,
@@ -352,6 +435,72 @@ class LivePositionManager:
             message_id=message.message_id,
             **self._trade_fields(trade),
         )
+        if applied_risk is not None:
+            return applied_risk
+        return (
+            self.clamp_trade_stop_loss(trade=trade, stop_loss=trade.stop_loss)
+            if trade.stop_loss is not None
+            else None
+        )
+
+    def clamp_trade_stop_loss(
+        self,
+        *,
+        trade: LiveTrade,
+        stop_loss: Decimal,
+    ) -> StopLossRiskResult:
+        side = TradeSide.LONG if trade.side == "long" else TradeSide.SHORT
+        return self._clamp_stop_loss(
+            side=side,
+            entry_price=trade.entry_price,
+            stop_loss=stop_loss,
+            quantity=trade.remaining_quantity,
+            balance_at_entry=trade.balance_at_entry,
+        )
+
+    def _clamp_stop_loss(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+        quantity: Decimal,
+        balance_at_entry: Decimal,
+    ) -> StopLossRiskResult:
+        return clamp_stop_loss_to_risk_budget(
+            side=side,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            quantity=quantity,
+            balance_at_entry=balance_at_entry,
+            fee_rate_pct=self.settings.LIVE_TRADING_FEE_RATE_PCT,
+            max_loss_pct_of_balance=self.settings.LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE,
+        )
+
+    def _record_stop_loss_risk_cap(
+        self,
+        *,
+        trade: LiveTrade,
+        requested_stop_loss: Decimal,
+        result: StopLossRiskResult,
+        message_id: int,
+    ) -> None:
+        if not result.was_capped:
+            return
+        log_event(
+            log,
+            logging.WARNING,
+            "live_trading.trade_stop_loss_risk_capped",
+            requested_stop_loss=str(requested_stop_loss),
+            capped_stop_loss=str(result.stop_loss),
+            risk_budget=str(result.risk_budget),
+            risk_amount=str(result.risk_amount),
+            max_loss_pct_of_balance=str(
+                self.settings.LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE
+            ),
+            message_id=message_id,
+            **self._trade_fields(trade),
+        )
 
     def update_take_profits(
         self,
@@ -359,22 +508,27 @@ class LivePositionManager:
         trade: LiveTrade,
         new_tps: list[Decimal],
         message: MessageAttribution,
-    ) -> None:
+    ) -> bool:
         sanitized = _sanitize_take_profits(
             take_profits=new_tps,
             side=trade.side,
             entry_price=trade.entry_price,
             stop_loss=trade.stop_loss,
         )
-        sanitized, tp_floor_notes = _enforce_minimum_first_take_profit(
-            take_profits=sanitized,
-            is_long=trade.side == "long",
-            entry_price=trade.entry_price,
-            min_profit_pct=self.settings.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT,
-        )
+        if not sanitized:
+            message.notes.append("TP update ignored: no valid price targets")
+            trade.add_attribution(message)
+            log_event(
+                log,
+                logging.WARNING,
+                "live_trading.trade_take_profits_update_ignored",
+                requested_take_profit_count=len(new_tps),
+                message_id=message.message_id,
+                **self._trade_fields(trade),
+            )
+            return False
         # Preserve already-hit targets, append new pending ones (matches backtest)
         trade.take_profits = trade.take_profits[: trade.targets_hit] + sanitized
-        message.notes.extend(tp_floor_notes)
         message.notes.append(f"TPs updated: {[str(t) for t in sanitized]}")
         trade.add_attribution(message)
         log_event(
@@ -387,6 +541,192 @@ class LivePositionManager:
             message_id=message.message_id,
             **self._trade_fields(trade),
         )
+        return True
+
+    def build_default_take_profits(
+        self,
+        *,
+        trade: LiveTrade,
+        strategy: TradeStrategy,
+    ) -> list[Decimal]:
+        """Build a safe synthetic TP ladder for a trade that has none pending."""
+        if trade.stop_loss is None or trade.entry_price <= Decimal("0"):
+            return []
+        side = TradeSide.LONG if trade.side == "long" else TradeSide.SHORT
+        try:
+            generated = strategy.get_synthetic_take_profits(
+                side=side,
+                entry_price=trade.entry_price,
+                stop_loss=trade.stop_loss,
+                notional_value=trade.entry_price * trade.remaining_quantity,
+            )
+        except Exception:
+            log.exception(
+                "live_trading.default_take_profits_generation_failed",
+                extra=self._trade_fields(trade),
+            )
+            return []
+        sanitized = _sanitize_take_profits(
+            take_profits=list(generated),
+            side=trade.side,
+            entry_price=trade.entry_price,
+            stop_loss=trade.stop_loss,
+        )
+        sanitized, _ = _enforce_minimum_first_take_profit(
+            take_profits=sanitized,
+            is_long=trade.side == "long",
+            entry_price=trade.entry_price,
+            min_profit_pct=self.settings.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT,
+        )
+        return sanitized
+
+    def build_default_stop_loss(
+        self,
+        *,
+        trade: LiveTrade,
+        strategy: TradeStrategy,
+    ) -> Decimal | None:
+        """Build and risk-cap a synthetic stop for an unprotected open trade."""
+        if (
+            trade.entry_price <= Decimal("0")
+            or trade.remaining_quantity <= Decimal("0")
+            or trade.balance_at_entry <= Decimal("0")
+        ):
+            return None
+        side = TradeSide.LONG if trade.side == "long" else TradeSide.SHORT
+        try:
+            generated = strategy.get_synthetic_stop(
+                side=side,
+                entry_price=trade.entry_price,
+                balance_at_entry=trade.balance_at_entry,
+                quantity=trade.remaining_quantity,
+                fee_rate_pct=self.settings.LIVE_TRADING_FEE_RATE_PCT,
+            )
+        except Exception:
+            log.exception(
+                "live_trading.default_stop_loss_generation_failed",
+                extra=self._trade_fields(trade),
+            )
+            return None
+        if generated <= Decimal("0"):
+            return None
+        if side.is_long and generated >= trade.entry_price:
+            return None
+        if side.is_short and generated <= trade.entry_price:
+            return None
+        return self.clamp_trade_stop_loss(
+            trade=trade,
+            stop_loss=generated,
+        ).stop_loss
+
+    def rebase_trade_protection_after_entry_fill(
+        self,
+        *,
+        trade: LiveTrade,
+        strategy: TradeStrategy,
+    ) -> list[str]:
+        """Recalculate protection from the actual exchange fill price.
+
+        Pending orders can fill at a price that differs from the requested
+        entry. Protection must never retain geometry calculated from the
+        pre-fill reference price.
+        """
+        if trade.entry_price <= Decimal("0") or trade.remaining_quantity <= Decimal("0"):
+            raise ValueError("Cannot build protection without a positive entry fill")
+
+        notes: list[str] = []
+        side = TradeSide.LONG if trade.side == "long" else TradeSide.SHORT
+        requested_stop = (
+            trade.requested_stop_loss
+            if trade.requested_stop_loss is not None
+            else trade.stop_loss
+        )
+        stop_is_directionally_valid = (
+            requested_stop is not None
+            and requested_stop > Decimal("0")
+            and (
+                (side.is_long and requested_stop < trade.entry_price)
+                or (side.is_short and requested_stop > trade.entry_price)
+            )
+        )
+        if stop_is_directionally_valid:
+            assert requested_stop is not None
+            stop_loss = requested_stop
+        else:
+            stop_loss = strategy.get_synthetic_stop(
+                side=side,
+                entry_price=trade.entry_price,
+                balance_at_entry=trade.balance_at_entry,
+                quantity=trade.remaining_quantity,
+                fee_rate_pct=self.settings.LIVE_TRADING_FEE_RATE_PCT,
+            )
+            notes.append(
+                "entry_fill_synthetic_stop="
+                f"{getattr(strategy, 'name', 'unknown')}:{stop_loss}"
+            )
+
+        stop_risk = self._clamp_stop_loss(
+            side=side,
+            entry_price=trade.entry_price,
+            stop_loss=stop_loss,
+            quantity=trade.remaining_quantity,
+            balance_at_entry=trade.balance_at_entry,
+        )
+        if trade.requested_stop_loss is not None and stop_risk.was_capped:
+            raise ValueError(
+                "Actual entry fill would require moving the requested stop loss "
+                f"({stop_loss}->{stop_risk.stop_loss}); refusing unsafe protection rewrite"
+            )
+        trade.stop_loss = (
+            stop_loss
+            if trade.requested_stop_loss is not None
+            else stop_risk.stop_loss
+        )
+        if trade.requested_stop_loss is None and stop_risk.was_capped:
+            notes.append(
+                "entry_fill_synthetic_stop_loss_risk_capped="
+                f"{stop_loss}->{trade.stop_loss}; risk_budget={stop_risk.risk_budget}"
+            )
+
+        explicit_requested_tps = bool(trade.requested_take_profits)
+        requested_tps = list(
+            trade.requested_take_profits
+            if explicit_requested_tps
+            else trade.take_profits
+        )
+        take_profits = _sanitize_take_profits(
+            take_profits=requested_tps,
+            side=trade.side,
+            entry_price=trade.entry_price,
+            stop_loss=trade.stop_loss,
+        )
+        if len(take_profits) < len(requested_tps):
+            notes.append(
+                f"entry_fill_tp_direction_filtered={len(requested_tps) - len(take_profits)}"
+            )
+        if not take_profits:
+            take_profits = self.build_default_take_profits(
+                trade=trade,
+                strategy=strategy,
+            )
+            if take_profits:
+                notes.append(
+                    "entry_fill_default_take_profits="
+                    + ",".join(str(item) for item in take_profits)
+                )
+        if not explicit_requested_tps:
+            take_profits, floor_notes = _enforce_minimum_first_take_profit(
+                take_profits=take_profits,
+                is_long=side.is_long,
+                entry_price=trade.entry_price,
+                min_profit_pct=self.settings.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT,
+            )
+            notes.extend(f"entry_fill_{note}" for note in floor_notes)
+        if not take_profits:
+            raise ValueError("No valid take-profit targets after entry fill")
+        trade.take_profits = take_profits
+        trade.targets_hit = 0
+        return notes
 
     def update_leverage(
         self,

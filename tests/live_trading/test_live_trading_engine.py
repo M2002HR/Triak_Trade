@@ -16,7 +16,7 @@ from triak_trade.domain.enums import EntryType, MarketType, SignalAction, Signal
 from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
 from triak_trade.exchange.toobit.errors import ToobitAPIError
-from triak_trade.exchange.toobit.futures import FuturesContractSpec
+from triak_trade.exchange.toobit.futures import FuturesContractSpec, FuturesOrder
 from triak_trade.live_trading.engine import LiveTradingEngine
 from triak_trade.live_trading.models import (
     LiveAccountInfo,
@@ -45,6 +45,7 @@ def _settings() -> SimpleNamespace:
         LIVE_TRADING_MAX_ALLOCATION_PCT=Decimal("20"),
         LIVE_TRADING_DEFAULT_STOP_PCT=Decimal("5"),
         LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT=Decimal("5"),
+        LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE=Decimal("5"),
         LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT=Decimal("1.5"),
         LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS=8,
         LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS=3,
@@ -52,6 +53,8 @@ def _settings() -> SimpleNamespace:
         LIVE_TRADING_PROTECTION_SYNC_RETRY_DELAY_SECONDS=0,
         LIVE_TRADING_EXCHANGE_POSITION_MISS_CONFIRMATIONS=2,
         LIVE_TRADING_EXCHANGE_POSITION_MISS_GRACE_SECONDS=15,
+        LIVE_TRADING_STOP_COOLDOWN_BASE_SECONDS=3600,
+        LIVE_TRADING_STOP_COOLDOWN_MAX_SECONDS=21600,
         LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False,
         LIVE_TRADING_FAIL_CLOSED_ON_LEVERAGE_SYNC_ERROR=True,
         LIVE_TRADING_FAIL_CLOSED_ON_PROTECTION_SYNC_ERROR=True,
@@ -195,6 +198,91 @@ def _ignored_signal() -> ParsedSignal:
         source_message_id=1,
         parser_version="test",
     )
+
+
+def test_stop_cooldown_grows_after_consecutive_same_direction_stops(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(timezone.utc)
+    for index, minutes_ago in enumerate((20, 10), start=1):
+        trade = _trade(engine.session.session_id).model_copy(
+            update={
+                "trade_id": f"stopped_{index}",
+                "signal_id": f"stopped_signal_{index}",
+                "status": "closed",
+                "close_reason": "sl_hit",
+                "closed_at": now - timedelta(minutes=minutes_ago),
+                "remaining_quantity": Decimal("0"),
+            }
+        )
+        engine.store.save_trade(trade)
+
+    decision = engine._stop_cooldown_decision(_open_signal(), "@testchan")
+
+    assert decision.blocked is True
+    assert decision.consecutive_stops == 2
+    assert 6500 <= decision.remaining_seconds <= 6600
+    assert decision.source_trade_id == "stopped_2"
+
+
+def test_profitable_close_resets_stop_cooldown(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(timezone.utc)
+    stopped = _trade(engine.session.session_id).model_copy(
+        update={
+            "trade_id": "stopped",
+            "signal_id": "stopped_signal",
+            "status": "closed",
+            "close_reason": "sl_hit",
+            "closed_at": now - timedelta(minutes=20),
+            "remaining_quantity": Decimal("0"),
+        }
+    )
+    profitable = stopped.model_copy(
+        update={
+            "trade_id": "profitable",
+            "signal_id": "profitable_signal",
+            "close_reason": "tp2_hit",
+            "closed_at": now - timedelta(minutes=5),
+        }
+    )
+    engine.store.save_trade(stopped)
+    engine.store.save_trade(profitable)
+
+    decision = engine._stop_cooldown_decision(_open_signal(), "@testchan")
+
+    assert decision.blocked is False
+
+
+@pytest.mark.asyncio
+async def test_try_open_signal_blocks_during_stop_cooldown_before_exchange_call(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    stopped = _trade(engine.session.session_id).model_copy(
+        update={
+            "trade_id": "recent_stop",
+            "signal_id": "recent_stop_signal",
+            "status": "closed",
+            "close_reason": "sl_hit",
+            "closed_at": datetime.now(timezone.utc) - timedelta(minutes=5),
+            "remaining_quantity": Decimal("0"),
+        }
+    )
+    engine.store.save_trade(stopped)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal(), status=SignalStatus.PENDING_CONSOLIDATION)
+    context.add_signal(state, pending=True)
+    engine._futures_client = AsyncMock()
+
+    await engine._try_open_signal("sig_test", state, context)
+
+    assert state.status is SignalStatus.CANCELLED
+    engine._futures_client.validate_symbol_tradable.assert_not_awaited()
+    snapshot = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
+    assert snapshot is not None
+    assert snapshot.status == SignalStatus.CANCELLED.value
 
 
 def test_normalize_open_geometry_infers_long_side_for_unknown_signal(tmp_path: Path) -> None:
@@ -360,6 +448,122 @@ async def test_process_message_ignore_emits_structured_logs(
     )
     assert completed.final_status == "ignored"
     assert completed.message_id == 301
+
+
+@pytest.mark.asyncio
+async def test_recent_dexe_open_is_not_merged_into_opposite_side_stale_signal(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    channel_id = "https://t.me/Scalping_300"
+    context = engine._get_or_create_context(channel_id)
+    old_short = _open_signal().model_copy(
+        update={
+            "symbol": "DEXEUSDT",
+            "side": TradeSide.SHORT,
+            "entry_low": Decimal("3.203"),
+            "entry_high": Decimal("3.36"),
+            "stop_loss": Decimal("3.45924"),
+            "take_profits": [Decimal("3.186985")],
+            "source_channel_id": channel_id,
+            "source_message_id": 158516,
+        }
+    )
+    old_state = _state(old_short, status=SignalStatus.OPEN).model_copy(
+        update={
+            "signal_id": "sig_dexe_old",
+            "channel_id": channel_id,
+            "created_from_message_id": 158516,
+            "related_message_ids": [158516],
+        }
+    )
+    context.add_signal(old_state, pending=False)
+    new_long = old_short.model_copy(
+        update={
+            "side": TradeSide.LONG,
+            "entry_low": Decimal("3.063"),
+            "entry_high": Decimal("3.105"),
+            "stop_loss": Decimal("2.8566"),
+            "take_profits": [
+                Decimal("3.120525"),
+                Decimal("3.13605"),
+                Decimal("3.1671"),
+                Decimal("3.19815"),
+                Decimal("3.2292"),
+                Decimal("3.26025"),
+                Decimal("3.2913"),
+                Decimal("3.32235"),
+            ],
+            "source_message_id": 158712,
+            "parser_version": "ai-v1",
+        }
+    )
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, current_context: SimpleNamespace(
+            parsed_signal=new_long,
+            classification="open",
+            related_signal_id="sig_from_context",
+            debug_notes=["classifier=ai", "ai_required=true"],
+        )
+    )
+    message = _message(
+        158712,
+        (
+            "DEXEUSDT\nDirection: LONG\nLeverage: Cross 20x\n"
+            "Entry: 3.063 — 3.105\nStop Loss: 2.8566\n"
+            "Target 1 - 3.120525\nTarget 2 - 3.13605\n"
+            "Target 3 - 3.1671\nTarget 4 - 3.19815\n"
+            "Target 5 - 3.2292\nTarget 6 - 3.26025\n"
+            "Target 7 - 3.2913\nTarget 8 - 3.32235"
+        ),
+    ).model_copy(
+        update={
+            "channel_id": channel_id,
+            "channel_username": "Scalping_300",
+        }
+    )
+
+    await engine._process_message(message)
+
+    expected_signal_id = make_signal_id(channel_id, 158712)
+    trace = engine.store.list_message_traces(engine.session.session_id, limit=1)[0]
+    assert trace.final_status == "pending_consolidation"
+    assert trace.signal_id == expected_signal_id
+    assert trace.correlation_method == "new_signal"
+    assert "classifier=ai" in trace.debug_notes
+    assert expected_signal_id in context.pending_signal_ids
+    assert 158712 not in old_state.related_message_ids
+
+
+@pytest.mark.asyncio
+async def test_new_open_detaches_same_side_signal_without_open_trade(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    stale_state = _state(_open_signal(), status=SignalStatus.OPEN)
+    context.add_signal(stale_state, pending=False)
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, current_context: SimpleNamespace(
+            parsed_signal=_open_signal().model_copy(
+                update={"source_message_id": raw.message_id}
+            ),
+            classification="open",
+            related_signal_id=None,
+            debug_notes=["classifier=ai"],
+        )
+    )
+
+    await engine._process_message(_message(302, "BTCUSDT LONG Entry 50000"))
+
+    new_signal_id = make_signal_id("@testchan", 302)
+    trace = engine.store.list_message_traces(engine.session.session_id, limit=1)[0]
+    assert trace.final_status == "pending_consolidation"
+    assert trace.signal_id == new_signal_id
+    assert trace.correlation_method == "new_signal"
+    assert trace.correlation_note is None
+    assert "stale_related_signal_detached=sig_test" in trace.debug_notes
+    assert new_signal_id in context.pending_signal_ids
 
 
 @pytest.mark.asyncio
@@ -881,6 +1085,25 @@ async def test_try_open_signal_treats_missing_entry_as_market_and_uses_mark_pric
     assert opened.entry_high == Decimal("50123")
 
 
+def test_explicit_pending_entry_without_price_is_never_promoted_to_market(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    parsed = _open_signal().model_copy(
+        update={
+            "entry_type": EntryType.TRIGGER,
+            "entry_low": None,
+            "entry_high": None,
+        }
+    )
+
+    normalized = engine._normalize_missing_entry_to_market(parsed)
+
+    assert normalized.entry_type is EntryType.TRIGGER
+    assert normalized.entry_low is None
+    assert normalized.entry_high is None
+
+
 @pytest.mark.asyncio
 async def test_try_open_signal_rejects_inconsistent_stop_geometry_before_open(
     tmp_path: Path,
@@ -1031,6 +1254,275 @@ async def test_real_open_position_uses_demo_exchange_symbol_for_demo_sessions(
     engine._futures_client.set_trading_stop.assert_awaited_once()
     assert trade.tp_order_ids == ["tp_protect_1", "tp_protect_2"]
     assert trade.sl_order_id == "sl_protect"
+
+
+@pytest.mark.asyncio
+async def test_real_limit_entry_is_submitted_pending_without_market_fill_wait(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.LIMIT.value
+    trade.entry_price = Decimal("0.2941")
+    trade.quantity = Decimal("100")
+    trade.remaining_quantity = Decimal("100")
+    trade.requested_entry_low = Decimal("0.2941")
+    trade.requested_entry_high = Decimal("0.2941")
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = FuturesContractSpec(
+        {
+            "symbol": "BANK-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "1",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "1",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
+                }
+            ],
+        }
+    )
+    engine._futures_client.open_long.return_value = SimpleNamespace(
+        order_id="entry_limit_1",
+        client_order_id="triak_entry_trade_test_limit",
+        exchange_symbol="TBV_BANK-SWAP-TBV_USDT",
+        status="NEW",
+    )
+    engine._ensure_exchange_quantity_supports_market_entry = MagicMock()  # type: ignore[method-assign]
+    engine._ensure_exchange_quantity_supports_take_profit_ladder = MagicMock()  # type: ignore[method-assign]
+    engine._apply_exchange_risk_limit_to_open_trade = MagicMock()  # type: ignore[method-assign]
+    engine._ensure_supported_exchange_leverage = AsyncMock()  # type: ignore[method-assign]
+    engine._ensure_trade_protection_after_open = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._real_open_position(
+        trade,
+        current_mark_price=Decimal("0.30751"),
+    )
+
+    assert trade.status == "waiting_entry"
+    assert trade.entry_order_type == "LIMIT"
+    assert trade.entry_order_status == "NEW"
+    assert trade.entry_order_id == "entry_limit_1"
+    engine._futures_client.open_long.assert_awaited_once()
+    call = engine._futures_client.open_long.await_args.kwargs
+    assert call["order_type"] == "LIMIT"
+    assert call["price"] == Decimal("0.2941")
+    assert call["stop_price"] is None
+    engine._futures_client.wait_for_order_fill.assert_not_awaited()
+    engine._ensure_trade_protection_after_open.assert_not_awaited()
+
+
+def test_trigger_entry_waits_with_stop_order_until_price_reached(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_type = EntryType.TRIGGER.value
+    trade.entry_price = Decimal("51000")
+
+    request = engine._build_entry_order_request(
+        trade=trade,
+        current_mark_price=Decimal("50000"),
+    )
+
+    assert request.order_type == "STOP"
+    assert request.stop_price == Decimal("51000")
+    assert request.price is None
+
+
+def test_trigger_entry_rejects_stale_market_chase(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_type = EntryType.TRIGGER.value
+    trade.entry_price = Decimal("50000")
+
+    with pytest.raises(ValueError, match="Trigger entry is stale"):
+        engine._build_entry_order_request(
+            trade=trade,
+            current_mark_price=Decimal("51000"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pending_entry_fill_activates_then_builds_protection(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.LIMIT.value
+    trade.entry_order_id = "entry_limit_1"
+    trade.entry_order_status = "NEW"
+    trade.entry_order_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    trade.requested_stop_loss = Decimal("49000")
+    trade.requested_take_profits = [Decimal("51000"), Decimal("52000")]
+    engine._open_trades[trade.signal_id] = trade
+    context = engine._get_or_create_context(trade.channel_id)
+    state = _state(_open_signal(), status=SignalStatus.ORDER_SUBMITTED)
+    context.add_signal(state, pending=False)
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = FuturesContractSpec(
+        {
+            "symbol": "BTC-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "0.001",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.0001",
+                    "maxQty": "120",
+                    "stepSize": "0.0001",
+                }
+            ],
+        }
+    )
+    engine._ensure_trade_protection_after_open = AsyncMock()  # type: ignore[method-assign]
+    filled_order = SimpleNamespace(
+        order_id="entry_limit_1",
+        status="FILLED",
+        executed_qty=Decimal("10"),
+        avg_price=Decimal("50100"),
+        exchange_symbol="BTC-SWAP-USDT",
+    )
+
+    activated = await engine._reconcile_pending_entry(
+        trade=trade,
+        history_orders=[filled_order],
+        open_orders=[],
+        symbol_user_trades=[],
+    )
+
+    assert activated is True
+    assert trade.status == "open"
+    assert trade.entry_price == Decimal("50100")
+    assert trade.quantity == Decimal("0.01")
+    assert trade.entry_filled_at is not None
+    assert state.status is SignalStatus.OPEN
+    assert all(target > trade.entry_price for target in trade.take_profits)
+    engine._ensure_trade_protection_after_open.assert_awaited_once_with(trade)
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_entry_is_cancelled_without_opening_position(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.LIMIT.value
+    trade.entry_order_id = "entry_expired"
+    trade.entry_order_status = "NEW"
+    trade.entry_order_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    engine._open_trades[trade.signal_id] = trade
+    engine.session.open_positions_count = 1
+    context = engine._get_or_create_context(trade.channel_id)
+    state = _state(_open_signal(), status=SignalStatus.ORDER_SUBMITTED)
+    context.add_signal(state, pending=False)
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_order.return_value = SimpleNamespace(
+        order_id="entry_expired",
+        status="CANCELED",
+        executed_qty=Decimal("0"),
+    )
+
+    activated = await engine._reconcile_pending_entry(
+        trade=trade,
+        history_orders=[],
+        open_orders=[],
+        symbol_user_trades=[],
+    )
+
+    assert activated is False
+    assert trade.status == "expired"
+    assert trade.close_reason == "entry_order_expired"
+    assert trade.signal_id not in engine._open_trades
+    assert state.status is SignalStatus.EXPIRED
+    engine._futures_client.cancel_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminal_partial_entry_missing_on_exchange_closes_without_recancel(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.LIMIT.value
+    trade.entry_order_id = "entry_partial_cancelled"
+    trade.entry_order_status = "PARTIALLY_CANCELED"
+    trade.entry_order_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    trade.exchange_position = None
+    engine._open_trades[trade.signal_id] = trade
+    engine.session.open_positions_count = 1
+    context = engine._get_or_create_context(trade.channel_id)
+    state = _state(_open_signal(), status=SignalStatus.ORDER_SUBMITTED)
+    context.add_signal(state, pending=False)
+    engine._futures_client = AsyncMock()
+    historical_order = SimpleNamespace(
+        order_id=trade.entry_order_id,
+        status="PARTIALLY_CANCELED",
+        executed_qty=Decimal("56"),
+    )
+
+    activated = await engine._reconcile_pending_entry(
+        trade=trade,
+        history_orders=[historical_order],
+        open_orders=[],
+        symbol_user_trades=[],
+    )
+
+    assert activated is False
+    assert trade.status == "closed"
+    assert trade.close_reason == "partial_entry_position_missing_snapshot"
+    assert trade.signal_id not in engine._open_trades
+    assert state.status is SignalStatus.CLOSED
+    engine._futures_client.cancel_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exchange_sync_does_not_close_unfilled_pending_entry(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.LIMIT.value
+    trade.entry_order_id = "entry_pending"
+    trade.entry_order_type = "LIMIT"
+    trade.entry_order_status = "NEW"
+    trade.entry_order_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    engine._open_trades[trade.signal_id] = trade
+    pending_order = FuturesOrder(
+        {
+            "orderId": "entry_pending",
+            "clientOrderId": "triak_entry_trade_test",
+            "symbol": "BTC-SWAP-USDT",
+            "side": "BUY_OPEN",
+            "type": "LIMIT",
+            "status": "NEW",
+            "origQty": "10",
+            "executedQty": "0",
+            "avgPrice": "0",
+            "price": "50000",
+            "stopPrice": "0",
+            "leverage": "10",
+        }
+    )
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_order_history.return_value = [pending_order]
+    engine._futures_client.get_open_orders.side_effect = [[pending_order], []]
+    engine._futures_client.get_user_trades.return_value = []
+
+    await engine._sync_exchange_state()
+
+    assert trade.status == "waiting_entry"
+    assert trade.signal_id in engine._open_trades
+    assert trade.close_reason is None
+    assert trade.entry_order_status == "NEW"
 
 
 @pytest.mark.asyncio
@@ -1275,7 +1767,7 @@ async def test_real_open_position_falls_back_when_exchange_rejects_target_levera
 
 
 @pytest.mark.asyncio
-async def test_real_open_position_promotes_small_quantity_to_support_five_targets(
+async def test_real_open_position_keeps_risk_sized_quantity_and_uses_feasible_targets(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -1332,14 +1824,14 @@ async def test_real_open_position_promotes_small_quantity_to_support_five_target
         order_id="ord_btc_5tp",
         exchange_symbol="TBV_BTC-SWAP-TBV_USDT",
         avg_price=Decimal("60118.3"),
-        executed_qty=Decimal("0.6"),
+        executed_qty=Decimal("0.1"),
     )
     engine._futures_client.wait_for_order_fill.return_value = (
         SimpleNamespace(
             order_id="ord_btc_5tp",
             exchange_symbol="TBV_BTC-SWAP-TBV_USDT",
             status="FILLED",
-            executed_qty=Decimal("0.6"),
+            executed_qty=Decimal("0.1"),
             avg_price=Decimal("60118.3"),
         ),
         [],
@@ -1374,13 +1866,9 @@ async def test_real_open_position_promotes_small_quantity_to_support_five_target
         )
 
     engine._strategy.get_target_hit_action.side_effect = _target_hit_action
-    engine._futures_client.place_order.side_effect = [
-        SimpleNamespace(order_id="tp_btc_1"),
-        SimpleNamespace(order_id="tp_btc_2"),
-        SimpleNamespace(order_id="tp_btc_3"),
-        SimpleNamespace(order_id="tp_btc_4"),
-        SimpleNamespace(order_id="tp_btc_5"),
-    ]
+    engine._futures_client.place_order.return_value = SimpleNamespace(
+        order_id="tp_btc_1"
+    )
     engine._futures_client.set_trading_stop.return_value = {"ok": True}
     engine._futures_client.get_open_orders.side_effect = [
         [],
@@ -1391,34 +1879,6 @@ async def test_real_open_position_promotes_small_quantity_to_support_five_target
                 order_type="LIMIT",
                 side="BUY_CLOSE",
                 client_order_id="triak_tp_trade_test_1",
-                stop_price=Decimal("0"),
-            ),
-            SimpleNamespace(
-                order_id="tp_btc_2",
-                order_type="LIMIT",
-                side="BUY_CLOSE",
-                client_order_id="triak_tp_trade_test_2",
-                stop_price=Decimal("0"),
-            ),
-            SimpleNamespace(
-                order_id="tp_btc_3",
-                order_type="LIMIT",
-                side="BUY_CLOSE",
-                client_order_id="triak_tp_trade_test_3",
-                stop_price=Decimal("0"),
-            ),
-            SimpleNamespace(
-                order_id="tp_btc_4",
-                order_type="LIMIT",
-                side="BUY_CLOSE",
-                client_order_id="triak_tp_trade_test_4",
-                stop_price=Decimal("0"),
-            ),
-            SimpleNamespace(
-                order_id="tp_btc_5",
-                order_type="LIMIT",
-                side="BUY_CLOSE",
-                client_order_id="triak_tp_trade_test_5",
                 stop_price=Decimal("0"),
             ),
         ],
@@ -1438,32 +1898,24 @@ async def test_real_open_position_promotes_small_quantity_to_support_five_target
 
     engine._futures_client.open_short.assert_awaited_once_with(
         symbol="BTCUSDT",
-        quantity=Decimal("0.00060000"),
+        quantity=Decimal("0.0001"),
         leverage=85,
         use_demo_symbol=True,
     )
-    assert trade.quantity == Decimal("0.00060000")
-    assert trade.tp_order_ids == [
-        "tp_btc_1",
-        "tp_btc_2",
-        "tp_btc_3",
-        "tp_btc_4",
-        "tp_btc_5",
-    ]
+    assert trade.quantity == Decimal("0.0001")
+    assert trade.tp_order_ids == ["tp_btc_1"]
     assert not any(
         note.startswith("exchange_entry_quantity_promoted=")
         for note in trade.message_history[-1].notes
     )
-    assert any(
-        note == "exchange_tp_ladder_quantity_promoted=0.0001->0.00060000"
-        for note in trade.message_history[-1].notes
+    assert "exchange_tp_ladder_partial=1/5_due_to_current_quantity" in (
+        trade.message_history[-1].notes
     )
 
 
 @pytest.mark.asyncio
-async def test_real_open_position_defers_minimum_entry_balance_rejection_to_exchange(
+async def test_real_open_position_rejects_below_minimum_without_increasing_volume(
     tmp_path: Path,
-    caplog,
 ) -> None:
     engine = _engine(tmp_path)
     engine.session.account_info = LiveAccountInfo(
@@ -1509,31 +1961,13 @@ async def test_real_open_position_defers_minimum_entry_balance_rejection_to_exch
         }
     )
     engine._futures_client.set_leverage.return_value = {"code": 200}
-    engine._futures_client.open_short.side_effect = ToobitAPIError(
-        "Toobit API HTTP error: 400: Insufficient available balance"
-    )
-
-    with caplog.at_level(logging.INFO), pytest.raises(ToobitAPIError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         await engine._real_open_position(trade)
 
-    assert "Insufficient available balance" in str(excinfo.value)
-    engine._futures_client.open_short.assert_awaited_once_with(
-        symbol="SOLUSDT",
-        quantity=Decimal("1.00000000"),
-        leverage=20,
-        use_demo_symbol=True,
-    )
-    warning = next(
-        rec
-        for rec in caplog.records
-        if rec.msg == "live_trading.exchange_quantity_promotion_local_limit_exceeded"
-    )
-    assert warning.reason == "insufficient_balance"
-    assert warning.exchange_will_decide is True
-    assert trade.message_history[-1].notes == [
-        "exchange_entry_quantity_promoted_local_limit=insufficient_balance",
-        "exchange_entry_quantity_promoted=0.03434287->1.00000000",
-    ]
+    assert "refusing to increase volume" in str(excinfo.value)
+    engine._futures_client.open_short.assert_not_awaited()
+    assert trade.quantity == Decimal("0.03434287")
+    assert trade.message_history[-1].notes == []
 
 
 @pytest.mark.asyncio
@@ -1561,7 +1995,36 @@ async def test_sync_trade_protection_normalizes_trade_levels_before_exchange_sub
         SimpleNamespace(order_id="tp_doge_1"),
         SimpleNamespace(order_id="tp_doge_2"),
     ]
-    engine._futures_client.get_open_orders.side_effect = [[], [], [], []]
+    engine._futures_client.get_open_orders.side_effect = [
+        [],
+        [],
+        [
+            SimpleNamespace(
+                order_id="tp_doge_1",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_1_existing",
+                stop_price=Decimal("0"),
+                price=Decimal("0.07209"),
+            ),
+            SimpleNamespace(
+                order_id="tp_doge_2",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_2_existing",
+                stop_price=Decimal("0"),
+                price=Decimal("0.07062"),
+            ),
+        ],
+        [
+            SimpleNamespace(
+                order_id="sl_doge_1",
+                order_type="STOP_LONG_LOSS",
+                side="SELL_CLOSE",
+                stop_price=Decimal("0.07656"),
+            ),
+        ],
+    ]
     engine._futures_client.set_trading_stop.return_value = {"ok": True}
 
     await engine._sync_trade_protection(trade)
@@ -1592,6 +2055,125 @@ async def test_sync_trade_protection_normalizes_trade_levels_before_exchange_sub
         sl_quantity=trade.remaining_quantity,
         use_demo_symbol=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_trade_protection_places_all_eight_executable_targets(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_price = Decimal("100")
+    trade.stop_loss = Decimal("95")
+    trade.take_profits = [Decimal(str(price)) for price in range(101, 109)]
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_by_remaining
+    engine._futures_client = AsyncMock()
+    engine._futures_client.normalize_trade_protection.return_value = (
+        trade.stop_loss,
+        list(trade.take_profits),
+    )
+    engine._futures_client.get_contract_spec.return_value = None
+    engine._futures_client.place_order.side_effect = [
+        SimpleNamespace(order_id=f"tp_{index}") for index in range(1, 9)
+    ]
+    exchange_tp_orders = [
+        SimpleNamespace(
+            order_id=f"tp_{index}",
+            order_type="LIMIT",
+            side="SELL_CLOSE",
+            client_order_id=f"triak_tp_trade_test_{index}_existing",
+            stop_price=Decimal("0"),
+            price=Decimal(str(100 + index)),
+        )
+        for index in range(1, 9)
+    ]
+    engine._futures_client.get_open_orders.side_effect = [
+        [],
+        [],
+        exchange_tp_orders,
+        [
+            SimpleNamespace(
+                order_id="sl_all_targets",
+                order_type="STOP_LONG_LOSS",
+                side="SELL_CLOSE",
+                stop_price=Decimal("95"),
+            )
+        ],
+    ]
+    engine._futures_client.set_trading_stop.return_value = {"ok": True}
+
+    await engine._sync_trade_protection(trade)
+
+    assert engine._futures_client.place_order.await_count == 8
+    submitted_prices = [
+        call.kwargs["price"]
+        for call in engine._futures_client.place_order.await_args_list
+    ]
+    assert submitted_prices == [
+        Decimal(str(price)) for price in range(101, 109)
+    ]
+    assert trade.take_profits == [Decimal(str(price)) for price in range(101, 109)]
+    assert trade.required_tp_order_count == 8
+    assert len(trade.tp_order_ids) == 8
+
+
+@pytest.mark.asyncio
+async def test_sync_trade_protection_rejects_stop_rewrite_over_risk_budget(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_price = Decimal("100")
+    trade.quantity = Decimal("12")
+    trade.remaining_quantity = Decimal("12")
+    trade.balance_at_entry = Decimal("1000")
+    trade.stop_loss = Decimal("95")
+    trade.take_profits = [Decimal("110")]
+    trade.tp_order_ids = ["tp_existing"]
+    trade.required_tp_order_count = 1
+    trade.message_history = [
+        MessageAttribution(
+            message_id=1,
+            channel_id="@testchan",
+            channel_label="@testchan",
+            message_preview="open",
+            message_date=datetime.now(timezone.utc),
+            action="opened",
+        )
+    ]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.normalize_trade_protection.return_value = (
+        Decimal("90"),
+        [Decimal("110")],
+    )
+    engine._futures_client.get_open_orders.side_effect = [
+        [],
+        [
+            SimpleNamespace(
+                order_id="tp_existing",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_1_existing",
+                stop_price=Decimal("0"),
+                price=Decimal("110"),
+            ),
+        ],
+        [
+            SimpleNamespace(
+                order_id="sl_live_new",
+                order_type="STOP_LONG_LOSS",
+                side="SELL_CLOSE",
+                stop_price=Decimal("95"),
+            ),
+        ],
+    ]
+    engine._futures_client.set_trading_stop.return_value = {"ok": True}
+
+    with pytest.raises(ValueError, match="refusing to move the requested stop"):
+        await engine._sync_trade_protection(trade, refresh_take_profits=False)
+
+    assert trade.stop_loss == Decimal("95")
+    engine._futures_client.set_trading_stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1677,7 +2259,9 @@ async def test_sync_trade_protection_retries_without_quantity_on_position_limit(
     trade = _trade(engine.session.session_id)
     trade.symbol = "DOGEUSDT"
     trade.stop_loss = Decimal("0.07656")
-    trade.take_profits = []
+    trade.take_profits = [Decimal("0.09")]
+    trade.tp_order_ids = ["tp_existing"]
+    trade.required_tp_order_count = 1
     trade.message_history = [
         MessageAttribution(
             message_id=1,
@@ -1692,11 +2276,20 @@ async def test_sync_trade_protection_retries_without_quantity_on_position_limit(
     engine._futures_client = AsyncMock()
     engine._futures_client.normalize_trade_protection.return_value = (
         Decimal("0.07656"),
-        [],
+        [Decimal("0.09")],
     )
     engine._futures_client.get_open_orders.side_effect = [
         [],
-        [],
+        [
+            SimpleNamespace(
+                order_id="tp_existing",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_1_existing",
+                stop_price=Decimal("0"),
+                price=Decimal("0.09"),
+            ),
+        ],
         [
             SimpleNamespace(
                 order_id="sl_live_new",
@@ -1739,7 +2332,7 @@ async def test_sync_trade_protection_retries_without_quantity_on_position_limit(
 
 
 @pytest.mark.asyncio
-async def test_sync_trade_protection_compresses_tiny_tp_ladder_to_valid_exchange_order(
+async def test_sync_trade_protection_preserves_tiny_tp_ladder_and_places_valid_subset(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -1815,14 +2408,57 @@ async def test_sync_trade_protection_compresses_tiny_tp_ladder_to_valid_exchange
     assert engine._futures_client.place_order.await_count == 1
     assert engine._futures_client.place_order.await_args.kwargs["price"] == Decimal("58850")
     assert engine._futures_client.place_order.await_args.kwargs["quantity"] == Decimal("0.00010000")
+    assert trade.take_profits == [
+        Decimal("58850"),
+        Decimal("58200"),
+        Decimal("56980"),
+        Decimal("54600"),
+    ]
     assert any(
-        note == "exchange_tp_ladder_compressed=4->1_due_to_contract_size"
+        note == "exchange_tp_ladder_partial=1/4_due_to_contract_size"
         for note in trade.message_history[-1].notes
     )
-    assert any(
-        note == "exchange_tp_ladder_rebalanced=nearest_target_singleton_v1"
-        for note in trade.message_history[-1].notes
+
+
+@pytest.mark.asyncio
+async def test_sync_trade_protection_preflight_leaves_existing_orders_when_no_tp_is_executable(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.remaining_quantity = Decimal("0.00001")
+    trade.sl_order_id = "sl_existing"
+    trade.tp_order_ids = ["tp_existing"]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.normalize_trade_protection.return_value = (
+        trade.stop_loss,
+        list(trade.take_profits),
     )
+    engine._futures_client.get_contract_spec.return_value = FuturesContractSpec(
+        {
+            "symbol": "BTC-SWAP-USDT",
+            "status": "TRADING",
+            "apiStatus": "TRADING",
+            "contractMultiplier": "1",
+            "filters": [
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "1",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
+                }
+            ],
+        }
+    )
+    engine._strategy.get_target_hit_action.side_effect = _target_hit_action_by_remaining
+    engine._cancel_existing_trade_protection = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="existing protection was left untouched"):
+        await engine._sync_trade_protection(trade)
+
+    engine._cancel_existing_trade_protection.assert_not_awaited()
+    assert trade.sl_order_id == "sl_existing"
+    assert trade.tp_order_ids == ["tp_existing"]
 
 
 @pytest.mark.asyncio
@@ -1982,6 +2618,151 @@ async def test_reconcile_exchange_trade_protection_applies_multiple_tp_fills_bef
 
 
 @pytest.mark.asyncio
+async def test_missing_exchange_position_reconciles_stop_fill_and_real_pnl(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(
+        _open_signal().model_copy(
+            update={"symbol": "BANKUSDT", "side": TradeSide.SHORT}
+        )
+    )
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "symbol": "BANKUSDT",
+            "side": "short",
+            "entry_price": Decimal("0.19514"),
+            "quantity": Decimal("511"),
+            "remaining_quantity": Decimal("511"),
+            "stop_loss": Decimal("0.209736"),
+            "take_profits": [Decimal("0.19334"), Decimal("0.19160")],
+        }
+    )
+    context.add_signal(state, pending=False)
+    engine._open_trades[trade.signal_id] = trade
+    engine.session.open_positions_count = 1
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        tick_size=Decimal("0.00001"),
+    )
+    fill = SimpleNamespace(
+        trade_id="bank_stop_fill",
+        order_id="bank_market_close",
+        time=int(datetime.now(timezone.utc).timestamp() * 1000),
+        side="BUY_CLOSE",
+        order_type="MARKET",
+        qty=Decimal("511"),
+        price=Decimal("0.19993"),
+        realized_pnl=Decimal("-2.44769"),
+        commission=Decimal("0.100"),
+    )
+
+    reconciled = await engine._reconcile_missing_exchange_position_fills(
+        trade=trade,
+        symbol_user_trades=[fill],
+    )
+
+    assert reconciled is True
+    assert trade.status == "closed"
+    assert trade.close_reason == "sl_hit"
+    assert trade.remaining_quantity == Decimal("0")
+    assert trade.realized_pnl == Decimal("-2.44769")
+    assert trade.fees == Decimal("0.100")
+    assert trade.exit_price == Decimal("0.19993")
+    assert trade.processed_exchange_fill_ids == ["trade:bank_stop_fill"]
+    assert trade.signal_id not in engine._open_trades
+    assert engine.session.losses == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_exchange_position_reconciles_tp_then_stop_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(
+        _open_signal().model_copy(
+            update={"symbol": "BANKUSDT", "side": TradeSide.SHORT}
+        )
+    )
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "symbol": "BANKUSDT",
+            "side": "short",
+            "entry_price": Decimal("0.19523"),
+            "quantity": Decimal("511"),
+            "remaining_quantity": Decimal("511"),
+            "take_profits": [Decimal("0.19334"), Decimal("0.19160")],
+            "tp_order_ids": ["bank_tp_1"],
+            "tp_order_plan": [
+                LiveTakeProfitOrderPlan(
+                    target_index=0,
+                    price=Decimal("0.19334"),
+                    quantity=Decimal("278"),
+                    order_id="bank_tp_1",
+                )
+            ],
+        }
+    )
+    context.add_signal(state, pending=False)
+    engine._open_trades[trade.signal_id] = trade
+    engine.session.open_positions_count = 1
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        tick_size=Decimal("0.00001"),
+    )
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    fills = [
+        SimpleNamespace(
+            trade_id="bank_tp_fill",
+            order_id="bank_tp_1",
+            time=now_ms,
+            side="BUY_CLOSE",
+            order_type="LIMIT",
+            qty=Decimal("278"),
+            price=Decimal("0.19334"),
+            realized_pnl=Decimal("0.52542"),
+            commission=Decimal("0.020"),
+        ),
+        SimpleNamespace(
+            trade_id="bank_stop_after_tp",
+            order_id="bank_market_close",
+            time=now_ms + 1,
+            side="BUY_CLOSE",
+            order_type="MARKET",
+            qty=Decimal("233"),
+            price=Decimal("0.19983"),
+            realized_pnl=Decimal("-1.07180"),
+            commission=Decimal("0.025"),
+        ),
+    ]
+
+    reconciled = await engine._reconcile_missing_exchange_position_fills(
+        trade=trade,
+        symbol_user_trades=fills,
+    )
+    repeated = await engine._reconcile_missing_exchange_position_fills(
+        trade=trade,
+        symbol_user_trades=fills,
+    )
+
+    assert reconciled is True
+    assert repeated is False
+    assert trade.status == "closed"
+    assert trade.close_reason == "sl_hit"
+    assert trade.targets_hit == 1
+    assert trade.realized_pnl == Decimal("-0.54638")
+    assert trade.fees == Decimal("0.045")
+    assert trade.exit_price == Decimal("0.19983")
+    assert len(trade.processed_exchange_fill_ids) == 2
+    assert engine.session.total_realized_pnl == Decimal("-0.54638")
+    assert engine.session.total_fees == Decimal("0.045")
+
+
+@pytest.mark.asyncio
 async def test_cancel_existing_trade_protection_discovers_exchange_tp_orders_when_state_is_empty(
     tmp_path: Path,
 ) -> None:
@@ -2103,7 +2884,7 @@ def _target_hit_action_for_promoted_ladder(**kwargs: object) -> SimpleNamespace:
     )
 
 
-def test_plan_exchange_take_profit_ladder_compresses_seven_targets_to_five_with_rebalanced_prices(
+def test_plan_exchange_take_profit_ladder_preserves_prices_when_five_orders_fit(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -2148,13 +2929,7 @@ def test_plan_exchange_take_profit_ladder_compresses_seven_targets_to_five_with_
     assert plan is not None
     assert plan.original_count == 7
     assert plan.target_count == 5
-    assert plan.pending_take_profits == [
-        Decimal("4180.00000000"),
-        Decimal("4175.40000000"),
-        Decimal("4171.00000000"),
-        Decimal("4166.42857143"),
-        Decimal("4162.00000000"),
-    ]
+    assert plan.pending_take_profits == trade.take_profits
     assert plan.required_quantity == Decimal("6.00000000")
 
 
@@ -2207,39 +2982,38 @@ def test_plan_exchange_take_profit_ladder_falls_back_to_three_then_one_when_need
 
     assert plan_three is not None
     assert plan_three.target_count == 3
-    assert plan_three.pending_take_profits == [
-        Decimal("4178.38461538"),
-        Decimal("4170.77777778"),
-        Decimal("4163.43478261"),
-    ]
+    assert plan_three.pending_take_profits == trade.take_profits
     assert plan_three.required_quantity == Decimal("3.00000000")
 
     assert plan_one is not None
     assert plan_one.target_count == 1
-    assert plan_one.pending_take_profits == [Decimal("4180.00000000")]
+    assert plan_one.pending_take_profits == trade.take_profits
     assert plan_one.required_quantity == Decimal("1.00000000")
 
 
-def test_ensure_exchange_quantity_supports_take_profit_ladder_promotes_open_quantity() -> None:
+def test_bank_tp_ladder_uses_dynamic_subset_without_increasing_quantity() -> None:
     engine = _engine(Path("/tmp"))
     engine.session.account_info = LiveAccountInfo(
         wallet_balance=Decimal("100"),
         available_balance=Decimal("100"),
     )
     trade = _trade(engine.session.session_id)
-    trade.symbol = "BTCUSDT"
+    trade.symbol = "BANKUSDT"
     trade.side = "short"
-    trade.entry_price = Decimal("60118.3")
-    trade.leverage = 85
-    trade.quantity = Decimal("0.0001")
-    trade.remaining_quantity = Decimal("0.0001")
-    trade.margin = Decimal("0.07072741")
+    trade.entry_price = Decimal("0.19953")
+    trade.leverage = 20
+    trade.quantity = Decimal("138")
+    trade.remaining_quantity = Decimal("138")
+    trade.margin = Decimal("1.376757")
     trade.take_profits = [
-        Decimal("58915.934"),
-        Decimal("57713.568"),
-        Decimal("56511.202"),
-        Decimal("55308.836"),
-        Decimal("54106.470"),
+        Decimal("0.19323"),
+        Decimal("0.19226"),
+        Decimal("0.19032"),
+        Decimal("0.18838"),
+        Decimal("0.18644"),
+        Decimal("0.18449"),
+        Decimal("0.18255"),
+        Decimal("0.18061"),
     ]
     trade.message_history = [
         MessageAttribution(
@@ -2255,16 +3029,16 @@ def test_ensure_exchange_quantity_supports_take_profit_ladder_promotes_open_quan
     engine._strategy.get_target_hit_action.side_effect = _target_hit_action_for_promoted_ladder
     spec = FuturesContractSpec(
         {
-            "symbol": "BTC-SWAP-USDT",
+            "symbol": "BANK-SWAP-USDT",
             "status": "TRADING",
             "apiStatus": "TRADING",
-            "contractMultiplier": "0.001",
+            "contractMultiplier": "1",
             "filters": [
                 {
                     "filterType": "LOT_SIZE",
-                    "minQty": "0.0001",
-                    "maxQty": "120",
-                    "stepSize": "0.0001",
+                    "minQty": "100",
+                    "maxQty": "1000000",
+                    "stepSize": "1",
                 }
             ],
         }
@@ -2272,16 +3046,26 @@ def test_ensure_exchange_quantity_supports_take_profit_ladder_promotes_open_quan
 
     engine._ensure_exchange_quantity_supports_take_profit_ladder(trade, spec)
 
-    assert trade.quantity == Decimal("0.00060000")
-    assert trade.remaining_quantity == Decimal("0.00060000")
-    assert trade.margin == Decimal("0.42436447")
-    assert any(
-        note == "exchange_tp_ladder_quantity_promoted=0.0001->0.00060000"
-        for note in trade.message_history[-1].notes
+    assert trade.quantity == Decimal("138")
+    assert trade.remaining_quantity == Decimal("138")
+    assert trade.margin == Decimal("1.376757")
+    assert trade.required_tp_order_count == 1
+    assert trade.take_profits == [
+        Decimal("0.19323"),
+        Decimal("0.19226"),
+        Decimal("0.19032"),
+        Decimal("0.18838"),
+        Decimal("0.18644"),
+        Decimal("0.18449"),
+        Decimal("0.18255"),
+        Decimal("0.18061"),
+    ]
+    assert "exchange_tp_ladder_partial=1/8_due_to_current_quantity" in (
+        trade.message_history[-1].notes
     )
 
 
-def test_ensure_exchange_quantity_supports_market_entry_promotes_open_quantity() -> None:
+def test_market_entry_at_exact_minimum_keeps_risk_sized_quantity() -> None:
     engine = _engine(Path("/tmp"))
     engine.session.account_info = LiveAccountInfo(
         wallet_balance=Decimal("10"),
@@ -2331,9 +3115,7 @@ def test_ensure_exchange_quantity_supports_market_entry_promotes_open_quantity()
     assert trade.message_history[-1].notes == []
 
 
-def test_market_entry_minimum_promotes_and_defers_allocation_cap_rejection_to_exchange(
-    caplog,
-) -> None:
+def test_market_entry_below_minimum_is_rejected_without_volume_change() -> None:
     engine = _engine(Path("/tmp"))
     engine.session.account_info = LiveAccountInfo(
         wallet_balance=Decimal("5.00"),
@@ -2375,36 +3157,16 @@ def test_market_entry_minimum_promotes_and_defers_allocation_cap_rejection_to_ex
         }
     )
 
-    with caplog.at_level(logging.INFO):
+    with pytest.raises(ValueError, match="refusing to increase volume"):
         engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
 
-    warning = next(
-        rec
-        for rec in caplog.records
-        if rec.msg == "live_trading.exchange_quantity_promotion_local_limit_exceeded"
-    )
-    promoted = next(
-        rec for rec in caplog.records if rec.msg == "live_trading.exchange_quantity_promoted"
-    )
-
-    assert warning.reason == "allocation_limit"
-    assert warning.symbol == "SOLUSDT"
-    assert warning.required_quantity == "1.00000000"
-    assert warning.max_margin_budget == "1.00000000"
-    assert warning.exchange_will_decide is True
-    assert promoted.reason == "allocation_limit"
-    assert trade.quantity == Decimal("1.00000000")
-    assert trade.remaining_quantity == Decimal("1.00000000")
-    assert trade.margin == Decimal("4.08727500")
-    assert trade.message_history[-1].notes == [
-        "exchange_entry_quantity_promoted_local_limit=allocation_limit",
-        "exchange_entry_quantity_promoted=0.03434287->1.00000000",
-    ]
+    assert trade.quantity == Decimal("0.03434287")
+    assert trade.remaining_quantity == Decimal("0.03434287")
+    assert trade.margin == Decimal("0.14036331")
+    assert trade.message_history[-1].notes == []
 
 
-def test_market_entry_minimum_promotes_and_defers_balance_rejection_to_exchange(
-    caplog,
-) -> None:
+def test_market_entry_below_minimum_does_not_defer_rejection_to_exchange() -> None:
     engine = _engine(Path("/tmp"))
     engine.session.account_info = LiveAccountInfo(
         wallet_balance=Decimal("4.00"),
@@ -2446,31 +3208,13 @@ def test_market_entry_minimum_promotes_and_defers_balance_rejection_to_exchange(
         }
     )
 
-    with caplog.at_level(logging.INFO):
+    with pytest.raises(ValueError, match="refusing to increase volume"):
         engine._ensure_exchange_quantity_supports_market_entry(trade, spec)
 
-    warning = next(
-        rec
-        for rec in caplog.records
-        if rec.msg == "live_trading.exchange_quantity_promotion_local_limit_exceeded"
-    )
-    promoted = next(
-        rec for rec in caplog.records if rec.msg == "live_trading.exchange_quantity_promoted"
-    )
-
-    assert warning.reason == "insufficient_balance"
-    assert warning.symbol == "SOLUSDT"
-    assert warning.required_quantity == "1.00000000"
-    assert warning.current_balance == "4.00"
-    assert warning.exchange_will_decide is True
-    assert promoted.reason == "insufficient_balance"
-    assert trade.quantity == Decimal("1.00000000")
-    assert trade.remaining_quantity == Decimal("1.00000000")
-    assert trade.margin == Decimal("4.08727500")
-    assert trade.message_history[-1].notes == [
-        "exchange_entry_quantity_promoted_local_limit=insufficient_balance",
-        "exchange_entry_quantity_promoted=0.03434287->1.00000000",
-    ]
+    assert trade.quantity == Decimal("0.03434287")
+    assert trade.remaining_quantity == Decimal("0.03434287")
+    assert trade.margin == Decimal("0.14036331")
+    assert trade.message_history[-1].notes == []
 
 
 @pytest.mark.asyncio
@@ -2646,7 +3390,43 @@ async def test_handle_followup_updates_take_profits_and_signal_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_handle_followup_update_tp_enforces_min_first_profit_floor(
+async def test_handle_followup_invalid_tp_update_keeps_existing_targets(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    original_targets = list(trade.take_profits)
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+
+    parsed = _open_signal(action=SignalAction.UPDATE_TP).model_copy(
+        update={"stop_loss": None, "take_profits": [Decimal("40"), Decimal("80")]}
+    )
+    trace = LiveMessageTrace(
+        session_id=engine.session.session_id,
+        message_id=24,
+        channel_id="@testchan",
+        channel_label="@testchan",
+        message_date=datetime.now(timezone.utc),
+    )
+
+    await engine._handle_followup(
+        signal_id="sig_test",
+        parsed=parsed,
+        message=_message(24, "tp 40% 80%"),
+        context=context,
+        trace=trace,
+    )
+
+    assert trace.final_status == "invalid_tp_update_ignored"
+    assert trade.take_profits == original_targets
+    assert "TP update ignored: no valid price targets" in trade.message_history[-1].notes
+
+
+@pytest.mark.asyncio
+async def test_handle_followup_update_tp_preserves_explicit_targets_below_synthetic_floor(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -2680,11 +3460,11 @@ async def test_handle_followup_update_tp_enforces_min_first_profit_floor(
 
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     assert trace.final_status == "updated_tp"
-    assert trade.take_profits == [Decimal("50750.00000000")]
-    assert trace.effect_summary == "SL=49000 · TPs=['50750.00000000']"
+    assert trade.take_profits == [Decimal("50100"), Decimal("50500")]
+    assert trace.effect_summary == "SL=49000 · TPs=['50100', '50500']"
     assert signal is not None
-    assert signal.take_profits == [Decimal("50750.00000000")]
-    assert "tp1_min_profit_pct=1.5" in trade.message_history[-1].notes
+    assert signal.take_profits == [Decimal("50100"), Decimal("50500")]
+    assert "tp1_min_profit_pct=1.5" not in trade.message_history[-1].notes
 
 
 @pytest.mark.asyncio
@@ -2865,7 +3645,7 @@ async def test_handle_followup_update_sl_rolls_back_local_stop_on_exchange_failu
 
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     assert trade.stop_loss == Decimal("49000")
-    assert trade.last_exchange_sync_error == "Duplicate clientOrderId"
+    assert trade.last_exchange_sync_error is None
     assert trace.final_status == "update_sl_failed"
     assert "Duplicate clientOrderId" in (trace.effect_summary or "")
     assert signal is not None
@@ -2874,10 +3654,7 @@ async def test_handle_followup_update_sl_rolls_back_local_stop_on_exchange_failu
         "refresh_take_profits": False,
         "refresh_stop_loss": True,
     }
-    assert engine._sync_trade_protection.await_args_list[1].kwargs == {
-        "refresh_take_profits": False,
-        "refresh_stop_loss": True,
-    }
+    assert engine._sync_trade_protection.await_args_list[1].kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -3250,7 +4027,7 @@ async def test_sync_exchange_state_marks_trade_closed_when_exchange_position_is_
 
 
 @pytest.mark.asyncio
-async def test_sync_exchange_state_keeps_trade_open_on_first_missing_snapshot(
+async def test_sync_exchange_state_closes_trade_on_first_missing_exchange_snapshot(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -3271,13 +4048,12 @@ async def test_sync_exchange_state_keeps_trade_open_on_first_missing_snapshot(
     trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     assert trade_reloaded is not None
-    assert trade_reloaded.status == "open"
-    assert trade_reloaded.exchange_position_missing_confirmations == 1
-    assert trade_reloaded.last_exchange_sync_error is None
+    assert trade_reloaded.status == "closed"
+    assert trade_reloaded.close_reason == "exchange_position_missing_snapshot"
+    assert trade_reloaded.last_exchange_sync_error == "exchange_position_missing_snapshot"
     assert signal is not None
-    assert signal.status == "open"
-    assert not any(note.startswith("exchange_error=") for note in signal.notes)
-    assert "sig_test" in engine._open_trades
+    assert signal.status == "closed"
+    assert "sig_test" not in engine._open_trades
 
 
 @pytest.mark.asyncio
@@ -3351,6 +4127,7 @@ async def test_ensure_trade_protection_after_open_keeps_trade_open_when_required
     engine = _engine(tmp_path)
     trade = _trade(engine.session.session_id)
     trade.stop_loss = Decimal("49000")
+    trade.required_tp_order_count = 1
     trade.message_history = [
         MessageAttribution(
             message_id=1,
@@ -3395,6 +4172,7 @@ async def test_ensure_trade_protection_after_open_raises_when_required_targets_n
     engine = _engine(tmp_path)
     trade = _trade(engine.session.session_id)
     trade.stop_loss = Decimal("49000")
+    trade.required_tp_order_count = 1
     engine._futures_client = AsyncMock()
     engine._sync_trade_protection = AsyncMock(  # type: ignore[method-assign]
         side_effect=ValueError("stop rejected")
@@ -3414,6 +4192,156 @@ async def test_ensure_trade_protection_after_open_raises_when_required_targets_n
     assert trade.sl_order_id == "sl_live_1"
     assert trade.tp_order_ids == []
     assert trade.protection_sync_failures == 3
+
+
+@pytest.mark.asyncio
+async def test_ensure_trade_protection_rejects_partial_target_tracking(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.take_profits = [Decimal(str(price)) for price in range(51000, 59000, 1000)]
+    trade.required_tp_order_count = 8
+    engine._futures_client = AsyncMock()
+    engine._sync_trade_protection = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ValueError("target placement interrupted")
+    )
+
+    async def _refresh_partial_ids(item: LiveTrade) -> None:
+        item.sl_order_id = "sl_live_1"
+        item.tp_order_ids = [f"tp_live_{index}" for index in range(1, 6)]
+
+    engine._refresh_trade_protection_ids = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_refresh_partial_ids
+    )
+
+    with pytest.raises(ValueError, match="target placement interrupted"):
+        await engine._ensure_trade_protection_after_open(trade)
+
+    assert engine._sync_trade_protection.await_count == 3
+    assert trade.sl_order_id == "sl_live_1"
+    assert len(trade.tp_order_ids) == 5
+    assert trade.required_tp_order_count == 8
+
+
+@pytest.mark.asyncio
+async def test_reconcile_missing_stop_and_targets_enforces_fail_closed_policy(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.sl_order_id = None
+    trade.tp_order_ids = []
+    trade.tp_order_plan = []
+    engine._futures_client = AsyncMock()
+    engine._exchange_trade_has_required_protection = AsyncMock(  # type: ignore[method-assign]
+        return_value=False
+    )
+    engine._enforce_trade_protection_or_flatten = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+
+    await engine._reconcile_exchange_trade_protection(
+        trade=trade,
+        open_regular_orders=[],
+        open_protection_orders=[],
+        symbol_user_trades=[],
+    )
+
+    engine._enforce_trade_protection_or_flatten.assert_awaited_once_with(
+        trade=trade,
+        reason="exchange_protection_gap",
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_unavailable_default_targets_enforces_fail_closed_policy(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.take_profits = []
+    engine._strategy.get_synthetic_take_profits.return_value = []
+    engine._futures_client = AsyncMock()
+    engine._enforce_trade_protection_or_flatten = AsyncMock(  # type: ignore[method-assign]
+        return_value=False
+    )
+
+    await engine._reconcile_exchange_trade_protection(
+        trade=trade,
+        open_regular_orders=[],
+        open_protection_orders=[],
+        symbol_user_trades=[],
+    )
+
+    engine._enforce_trade_protection_or_flatten.assert_awaited_once_with(
+        trade=trade,
+        reason="default_take_profits_unavailable",
+    )
+
+
+@pytest.mark.asyncio
+async def test_protection_enforcement_flattens_position_when_repair_fails(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    engine._ensure_trade_protection_after_open = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ValueError("protection unavailable")
+    )
+
+    async def _close_position(**kwargs: object) -> None:
+        closed_trade = kwargs["trade"]
+        assert isinstance(closed_trade, LiveTrade)
+        closed_trade.status = "closed"
+        closed_trade.remaining_quantity = Decimal("0")
+
+    engine._execute_exchange_close = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_close_position
+    )
+
+    protected = await engine._enforce_trade_protection_or_flatten(
+        trade=trade,
+        reason="test_gap",
+    )
+
+    assert protected is False
+    assert trade.status == "closed"
+    assert trade.remaining_quantity == Decimal("0")
+    engine._execute_exchange_close.assert_awaited_once_with(
+        trade=trade,
+        fraction=Decimal("1"),
+        reason="test_gap_fail_closed_flatten",
+    )
+
+
+@pytest.mark.asyncio
+async def test_protection_enforcement_persists_critical_error_when_flatten_fails(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    engine._ensure_trade_protection_after_open = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ValueError("protection unavailable")
+    )
+    engine._execute_exchange_close = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ToobitAPIError("close unavailable")
+    )
+
+    protected = await engine._enforce_trade_protection_or_flatten(
+        trade=trade,
+        reason="test_gap",
+    )
+
+    persisted = engine.store.load_trade(engine.session.session_id, trade.trade_id)
+    assert protected is False
+    assert trade.is_open
+    assert "protection_error=protection unavailable" in (
+        trade.last_exchange_sync_error or ""
+    )
+    assert "close_error=close unavailable" in (trade.last_exchange_sync_error or "")
+    assert persisted is not None
+    assert persisted.last_exchange_sync_error == trade.last_exchange_sync_error
 
 
 @pytest.mark.asyncio
@@ -3492,6 +4420,30 @@ async def test_reconcile_exchange_trade_protection_repairs_missing_targets(
     engine._sync_trade_protection.assert_awaited_once_with(trade)
 
 
+@pytest.mark.asyncio
+async def test_reconcile_restores_default_targets_when_trade_has_none(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.take_profits = []
+    trade.sl_order_id = "sl_live_1"
+    engine._futures_client = SimpleNamespace()
+    engine._strategy.get_synthetic_take_profits.return_value = [
+        Decimal("51000"),
+        Decimal("52000"),
+    ]
+    engine._sync_trade_protection = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._reconcile_exchange_trade_protection(
+        trade=trade,
+        open_regular_orders=[],
+        open_protection_orders=[],
+        symbol_user_trades=[],
+    )
+
+    assert trade.take_profits == [Decimal("51000"), Decimal("52000")]
+    engine._sync_trade_protection.assert_awaited_once_with(trade)
+
+
 def test_restore_runtime_state_rehydrates_contexts_and_open_trades(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     session_id = engine.session.session_id
@@ -3540,6 +4492,40 @@ def test_restore_runtime_state_rehydrates_contexts_and_open_trades(tmp_path: Pat
     context = restored._get_or_create_context("@restore")
     assert context.get_signal("sig_test") is not None
     assert context.get_message(77) is not None
+
+
+def test_restore_runtime_state_closes_stale_active_snapshot_without_open_trade(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    session_id = engine.session.session_id
+    engine.store.save_signal_snapshot(
+        session_id,
+        LiveSignalSnapshot(
+            signal_id="sig_dexe_stale",
+            channel_id="https://t.me/Scalping_300",
+            channel_label="@Scalping_300",
+            created_from_message_id=158516,
+            related_message_ids=[158516],
+            status="open",
+            status_group="active",
+            symbol="DEXEUSDT",
+            side="short",
+            updated_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    restored = _engine(tmp_path)
+    restored._restore_runtime_state()
+
+    context = restored._get_or_create_context("https://t.me/Scalping_300")
+    signal = context.get_signal("sig_dexe_stale")
+    persisted = restored.store.load_signal_snapshot(session_id, "sig_dexe_stale")
+    assert signal is not None
+    assert signal.status is SignalStatus.CLOSED
+    assert persisted is not None
+    assert persisted.status == "closed"
+    assert persisted.status_group == "inactive"
 
 
 def test_restore_runtime_state_normalizes_legacy_signal_snapshot_timestamps(

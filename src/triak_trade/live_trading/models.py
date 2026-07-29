@@ -120,6 +120,11 @@ class LiveTrade(BaseModel):
     side: str  # "long" or "short"
     leverage: int = 1
     entry_price: Decimal
+    entry_type: str = "market"
+    requested_entry_low: Decimal | None = None
+    requested_entry_high: Decimal | None = None
+    requested_stop_loss: Decimal | None = None
+    requested_take_profits: list[Decimal] = Field(default_factory=list)
     quantity: Decimal
     stop_loss: Decimal | None = None
     take_profits: list[Decimal] = Field(default_factory=list)
@@ -130,9 +135,16 @@ class LiveTrade(BaseModel):
 
     # Exchange order IDs (real mode)
     entry_order_id: str | None = None
+    entry_order_client_id: str | None = None
+    entry_order_type: str | None = None
+    entry_order_status: str | None = None
+    entry_submitted_at: datetime | None = None
+    entry_filled_at: datetime | None = None
+    entry_order_expires_at: datetime | None = None
     sl_order_id: str | None = None
     tp_order_ids: list[str] = Field(default_factory=list)
     tp_order_plan: list[LiveTakeProfitOrderPlan] = Field(default_factory=list)
+    required_tp_order_count: int = 0
     exchange_position: LiveExchangePositionSnapshot | None = None
     exchange_order_history: list[LiveExchangeOrderSnapshot] = Field(default_factory=list)
     last_exchange_sync_at: datetime | None = None
@@ -141,6 +153,7 @@ class LiveTrade(BaseModel):
     exchange_position_missing_confirmations: int = 0
     protection_sync_failures: int = 0
     last_protection_sync_error_at: datetime | None = None
+    processed_exchange_fill_ids: list[str] = Field(default_factory=list)
 
     # Attribution - every message that affected this trade
     message_history: list[MessageAttribution] = Field(default_factory=list)
@@ -189,6 +202,10 @@ class LiveTrade(BaseModel):
     @property
     def is_open(self) -> bool:
         return self.status in ("waiting_entry", "open", "partial_close")
+
+    @property
+    def is_waiting_entry(self) -> bool:
+        return self.status == "waiting_entry"
 
     def add_attribution(self, attribution: MessageAttribution) -> None:
         self.message_history.append(attribution)
@@ -360,6 +377,7 @@ class LiveSignalSnapshot(BaseModel):
     symbol: str | None = None
     exchange_symbol: str | None = None
     side: str | None = None
+    entry_type: str | None = None
     entry_low: Decimal | None = None
     entry_high: Decimal | None = None
     entry_zone: dict[str, str] | None = None

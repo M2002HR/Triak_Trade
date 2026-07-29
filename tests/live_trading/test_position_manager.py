@@ -17,6 +17,7 @@ from triak_trade.live_trading.position_manager import (
     _resolve_entry_price,
     _synthetic_stop,
 )
+from triak_trade.risk.stop_loss import clamp_stop_loss_to_risk_budget
 
 
 def _make_settings() -> MagicMock:
@@ -27,6 +28,7 @@ def _make_settings() -> MagicMock:
     s.LIVE_TRADING_MAX_ALLOCATION_PCT = Decimal("20")
     s.LIVE_TRADING_DEFAULT_STOP_PCT = Decimal("5")
     s.LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT = Decimal("5")
+    s.LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE = Decimal("5")
     s.LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT = Decimal("1.5")
     s.LIVE_TRADING_FEE_RATE_PCT = Decimal("0.04")
     return s
@@ -167,6 +169,43 @@ class TestPnlCalculations:
 
 
 class TestPositionSizing:
+    def test_explicit_stop_is_preserved_and_quantity_is_risk_capped(self) -> None:
+        settings = _make_settings()
+        settings.LIVE_TRADING_MIN_ALLOCATION_PCT = Decimal("0")
+        pm = LivePositionManager(settings)
+        session = _make_session(Decimal("1000"))
+        signal = _make_long_signal(
+            entry=Decimal("100"),
+            sl=Decimal("90"),
+            tps=[Decimal("110"), Decimal("120")],
+            leverage=10,
+        )
+        strategy = MagicMock()
+
+        result = pm.compute_position_sizing(
+            session=session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+        capped = clamp_stop_loss_to_risk_budget(
+            side=TradeSide.LONG,
+            entry_price=result.entry_price,
+            stop_loss=result.stop_loss or Decimal("0"),
+            quantity=result.quantity,
+            balance_at_entry=result.balance_at_entry,
+            fee_rate_pct=settings.LIVE_TRADING_FEE_RATE_PCT,
+            max_loss_pct_of_balance=settings.LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE,
+        )
+
+        assert result.stop_loss == Decimal("90")
+        assert result.quantity < Decimal("5")
+        assert capped.risk_amount <= Decimal("50")
+        assert any(
+            note.startswith("quantity_risk_capped_to_preserve_stop=")
+            for note in result.notes
+        )
+
     def test_basic_long_sizing(self, caplog) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
@@ -184,6 +223,10 @@ class TestPositionSizing:
         assert result.quantity > 0
         assert result.entry_price == Decimal("50000")
         assert result.stop_loss == Decimal("47500")
+        assert any(
+            note.startswith("quantity_risk_capped_to_preserve_stop=")
+            for note in result.notes
+        )
         record = next(
             rec for rec in caplog.records if rec.msg == "live_trading.position_sized"
         )
@@ -267,7 +310,7 @@ class TestPositionSizing:
             == result.entry_price * result.quantity
         )
 
-    def test_explicit_take_profits_replace_all_below_min_first_profit_floor(self) -> None:
+    def test_explicit_take_profits_are_not_removed_by_synthetic_profit_floor(self) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
         session = _make_session(Decimal("1000"))
@@ -285,9 +328,32 @@ class TestPositionSizing:
             strategy=strategy,
         )
 
-        assert result.take_profits == [Decimal("50750.00000000")]
-        assert "tp1_min_profit_pct=1.5" in result.notes
-        assert "tp1_min_profit_floor=50750.00000000" in result.notes
+        assert result.take_profits == [Decimal("50300"), Decimal("50500")]
+        assert not any(note.startswith("tp1_min_profit_") for note in result.notes)
+
+    def test_all_eight_explicit_take_profits_are_preserved(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        session = _make_session(Decimal("1000"))
+        targets = [Decimal(str(price)) for price in range(101, 109)]
+        signal = _make_long_signal(
+            entry=Decimal("100"),
+            sl=Decimal("95"),
+            tps=targets,
+            leverage=10,
+        )
+        strategy = MagicMock()
+
+        result = pm.compute_position_sizing(
+            session=session,
+            signal=signal,
+            current_balance=Decimal("1000"),
+            strategy=strategy,
+        )
+
+        assert result.take_profits == targets
+        assert len(result.take_profits) == 8
+        assert not any(note.startswith("tp1_min_profit_") for note in result.notes)
 
     def test_strategy_take_profits_drop_subthreshold_first_target(self) -> None:
         settings = _make_settings()
@@ -448,6 +514,30 @@ class TestPositionOperations:
         assert record.previous_stop_loss == "48000"
         assert record.new_stop_loss == "49000"
 
+    def test_update_stop_loss_rejects_unsafe_channel_value_without_rewriting_it(
+        self,
+    ) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        trade = self._make_trade()
+        attr = MessageAttribution(
+            message_id=4,
+            channel_id="c",
+            channel_label="@c",
+            message_preview="move SL lower",
+            message_date=datetime.now(timezone.utc),
+            action="updated_sl",
+        )
+
+        result = pm.update_stop_loss(trade=trade, new_sl=Decimal("40000"), message=attr)
+
+        assert result is not None
+        assert result.was_capped is True
+        assert trade.stop_loss == Decimal("48000")
+        assert result.risk_amount <= Decimal("50")
+        assert attr.action == "ignored"
+        assert any("SL update rejected" in note for note in attr.notes)
+
     def test_move_sl_to_entry(self, caplog) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
@@ -487,7 +577,7 @@ class TestPositionOperations:
         assert record.previous_leverage == 10
         assert record.new_leverage == 20
 
-    def test_update_take_profits_enforces_min_first_profit_floor(self) -> None:
+    def test_update_take_profits_preserves_explicit_targets_below_synthetic_floor(self) -> None:
         settings = _make_settings()
         pm = LivePositionManager(settings)
         trade = self._make_trade()
@@ -506,6 +596,56 @@ class TestPositionOperations:
             message=attr,
         )
 
-        assert trade.take_profits == [Decimal("50750.00000000")]
-        assert "tp1_min_profit_pct=1.5" in trade.message_history[-1].notes
-        assert "TPs updated: ['50750.00000000']" in trade.message_history[-1].notes
+        assert trade.take_profits == [Decimal("50100"), Decimal("50500")]
+        assert "tp1_min_profit_pct=1.5" not in trade.message_history[-1].notes
+        assert "TPs updated: ['50100', '50500']" in trade.message_history[-1].notes
+
+    def test_invalid_take_profit_update_preserves_existing_targets(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        trade = self._make_trade()
+        original_targets = list(trade.take_profits)
+        attr = MessageAttribution(
+            message_id=5,
+            channel_id="c",
+            channel_label="@c",
+            message_preview="tp 40% 80%",
+            message_date=datetime.now(timezone.utc),
+            action="updated_tp",
+        )
+
+        updated = pm.update_take_profits(
+            trade=trade,
+            new_tps=[Decimal("40"), Decimal("80")],
+            message=attr,
+        )
+
+        assert updated is False
+        assert trade.take_profits == original_targets
+        assert "TP update ignored: no valid price targets" in trade.message_history[-1].notes
+
+    def test_entry_fill_rebases_protection_from_actual_fill_price(self) -> None:
+        settings = _make_settings()
+        pm = LivePositionManager(settings)
+        trade = self._make_trade()
+        trade.entry_price = Decimal("50500")
+        trade.requested_stop_loss = Decimal("49000")
+        trade.requested_take_profits = [Decimal("50100")]
+        strategy = MagicMock()
+        strategy.name = "test_strategy"
+        strategy.get_synthetic_take_profits.return_value = [
+            Decimal("51500"),
+            Decimal("52500"),
+        ]
+
+        notes = pm.rebase_trade_protection_after_entry_fill(
+            trade=trade,
+            strategy=strategy,
+        )
+
+        assert trade.stop_loss is not None
+        assert trade.stop_loss < trade.entry_price
+        assert trade.take_profits == [Decimal("51500"), Decimal("52500")]
+        assert all(target > trade.entry_price for target in trade.take_profits)
+        assert any(note.startswith("entry_fill_tp_direction_filtered=") for note in notes)
+        assert any(note.startswith("entry_fill_default_take_profits=") for note in notes)

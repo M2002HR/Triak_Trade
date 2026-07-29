@@ -531,6 +531,45 @@ class TestToobitFuturesClientAPI:
         assert params["price"] == "59999.9"
 
     @pytest.mark.asyncio
+    async def test_place_buy_open_stop_uses_trigger_price_and_market_execution(self) -> None:
+        response = {
+            "orderId": "ord_stop",
+            "side": "BUY_OPEN",
+            "type": "STOP",
+            "origQty": "1",
+            "executedQty": "0",
+            "avgPrice": "0",
+            "status": "NEW",
+        }
+        client = _make_client(signed_response=response)
+
+        await client.open_long(
+            symbol="BTCUSDT",
+            quantity=Decimal("0.01"),
+            order_type="STOP",
+            stop_price=Decimal("60000.01"),
+        )
+
+        params = client._client.signed_request.call_args[1]["params"]
+        assert params["side"] == "BUY_OPEN"
+        assert params["type"] == "STOP"
+        assert params["priceType"] == "MARKET"
+        assert params["stopPrice"] == "60000.1"
+        assert "price" not in params
+        assert "timeInForce" not in params
+
+    @pytest.mark.asyncio
+    async def test_place_stop_requires_stop_price(self) -> None:
+        client = _make_client()
+
+        with pytest.raises(ToobitAPIError, match="stop_price is required"):
+            await client.open_short(
+                symbol="BTCUSDT",
+                quantity=Decimal("0.01"),
+                order_type="STOP",
+            )
+
+    @pytest.mark.asyncio
     async def test_open_long_uses_buy_open(self) -> None:
         response = {"orderId": "long1", "side": "BUY_OPEN", "status": "FILLED",
                     "origQty": "1", "executedQty": "1", "avgPrice": "50000", "type": "MARKET"}

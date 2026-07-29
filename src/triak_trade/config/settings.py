@@ -328,6 +328,10 @@ class Settings(BaseSettings):
     LIVE_TRADING_MIN_FIRST_TAKE_PROFIT_PCT: Decimal = Decimal("1.5")
     LIVE_TRADING_DEFAULT_STOP_PCT: Decimal = Decimal("5")
     LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT: Decimal = Decimal("5")
+    # Hard account-level loss cap for every live/demo stop-loss: channel-provided,
+    # synthetic, and subsequently updated stops alike. Applied using the account
+    # balance and quantity captured when the position was opened, including fees.
+    LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE: Decimal = Decimal("5")
     LIVE_TRADING_MIN_ALLOCATION_PCT: Decimal = Decimal("2")
     LIVE_TRADING_MAX_ALLOCATION_PCT: Decimal = Decimal("20")
     LIVE_TRADING_TELEGRAM_POLL_SECONDS: int = 5
@@ -336,6 +340,11 @@ class Settings(BaseSettings):
     LIVE_TRADING_PRICE_REFRESH_SECONDS: int = 60
     LIVE_TRADING_ACCOUNT_REFRESH_SECONDS: int = 60
     LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS: int = 12
+    LIVE_TRADING_PENDING_ENTRY_POLL_SECONDS: int = 2
+    LIVE_TRADING_PENDING_ENTRY_TTL_SECONDS: int = 86400
+    LIVE_TRADING_STOP_COOLDOWN_BASE_SECONDS: int = 3600
+    LIVE_TRADING_STOP_COOLDOWN_MAX_SECONDS: int = 21600
+    LIVE_TRADING_MAX_TRIGGER_SLIPPAGE_PCT: Decimal = Decimal("0.5")
     LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS: int = 3
     LIVE_TRADING_PROTECTION_SYNC_RETRY_ATTEMPTS: int = 3
     LIVE_TRADING_PROTECTION_SYNC_RETRY_DELAY_SECONDS: float = 1.0
