@@ -78,6 +78,15 @@ class TestLiveTrade:
         t = self._make_trade()
         assert t.remaining_quantity == t.quantity
 
+    def test_closed_trade_preserves_zero_remaining_quantity_on_reload(self) -> None:
+        payload = self._make_trade().model_dump(mode="json")
+        payload["status"] = "closed"
+        payload["remaining_quantity"] = "0"
+
+        reloaded = LiveTrade.model_validate(payload)
+
+        assert reloaded.remaining_quantity == Decimal("0")
+
     def test_total_pnl_sums_realized_and_unrealized(self) -> None:
         t = self._make_trade()
         t.realized_pnl = Decimal("50")
@@ -189,10 +198,7 @@ class TestLiveSessionConfig:
 
 class TestBuildLiveSessionLabel:
     def test_builds_label_from_public_link(self) -> None:
-        assert (
-            build_live_session_label("https://t.me/Tofan_Trade", "live")
-            == "tofan_trade#live"
-        )
+        assert build_live_session_label("https://t.me/Tofan_Trade", "live") == "tofan_trade#live"
 
     def test_builds_label_from_handle(self) -> None:
         assert build_live_session_label("@Ghahr", "demo") == "ghahr#demo"
@@ -221,14 +227,32 @@ class TestLiveTradingSnapshot:
             interval="1m",
         )
         t1 = LiveTrade(
-            trade_id="t1", session_id="s", signal_id="sig1", channel_id="c", channel_input="c",
-            channel_label="c", symbol="BTC", side="long", leverage=1, entry_price=Decimal("100"),
-            quantity=Decimal("1"), unrealized_pnl=Decimal("5"),
+            trade_id="t1",
+            session_id="s",
+            signal_id="sig1",
+            channel_id="c",
+            channel_input="c",
+            channel_label="c",
+            symbol="BTC",
+            side="long",
+            leverage=1,
+            entry_price=Decimal("100"),
+            quantity=Decimal("1"),
+            unrealized_pnl=Decimal("5"),
         )
         t2 = LiveTrade(
-            trade_id="t2", session_id="s", signal_id="sig2", channel_id="c", channel_input="c",
-            channel_label="c", symbol="ETH", side="short", leverage=1, entry_price=Decimal("200"),
-            quantity=Decimal("1"), unrealized_pnl=Decimal("-3"),
+            trade_id="t2",
+            session_id="s",
+            signal_id="sig2",
+            channel_id="c",
+            channel_input="c",
+            channel_label="c",
+            symbol="ETH",
+            side="short",
+            leverage=1,
+            entry_price=Decimal("200"),
+            quantity=Decimal("1"),
+            unrealized_pnl=Decimal("-3"),
         )
         snap = LiveTradingSnapshot(session=session, open_trades=[t1, t2])
         assert snap.total_unrealized_pnl == Decimal("2")

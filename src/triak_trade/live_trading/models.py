@@ -186,7 +186,10 @@ class LiveTrade(BaseModel):
     margin: Decimal = Decimal("0")
 
     def model_post_init(self, __context: Any) -> None:
-        if self.remaining_quantity == Decimal("0"):
+        if (
+            self.remaining_quantity == Decimal("0")
+            and self.status in {"waiting_entry", "open", "partial_close"}
+        ):
             self.remaining_quantity = self.quantity
 
     @property
