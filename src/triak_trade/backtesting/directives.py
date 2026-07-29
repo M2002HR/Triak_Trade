@@ -182,6 +182,7 @@ def normalize_related_signal_action(parsed: ParsedSignal, *, is_related: bool) -
         or parsed.entry_type is EntryType.MARKET
         or parsed.entry_type is EntryType.LIMIT
         or parsed.entry_type is EntryType.RANGE
+        or parsed.entry_type is EntryType.TRIGGER
     )
     has_stop = parsed.stop_loss is not None
     has_tp = bool(parsed.take_profits)

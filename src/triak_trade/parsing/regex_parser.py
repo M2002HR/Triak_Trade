@@ -7,6 +7,7 @@ import re
 from decimal import Decimal
 
 from triak_trade.core.logging import log_event, safe_preview
+from triak_trade.core.symbols import canonical_market_symbol
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, TradeSide
 from triak_trade.domain.models import NormalizedMessage, ParsedSignal
 from triak_trade.parsing.side_inference import infer_trade_side_from_price_geometry
@@ -62,6 +63,32 @@ class RegexSignalParser:
             take_profits=take_profits,
         )
         side = explicit_side if explicit_side is not TradeSide.UNKNOWN else side_inference.side
+        if (
+            symbol is None
+            and side is not TradeSide.UNKNOWN
+            and (
+                entry_low is not None
+                or entry_high is not None
+                or stop_loss is not None
+                or take_profits
+            )
+        ):
+            bare_symbol = re.match(
+                r"^\s*([A-Za-z][A-Za-z0-9]{1,9})\b",
+                text,
+            )
+            if bare_symbol is not None:
+                candidate = bare_symbol.group(1).upper()
+                if candidate not in {
+                    "LONG",
+                    "SHORT",
+                    "BUY",
+                    "SELL",
+                    "ENTRY",
+                    "MARKET",
+                    "LIMIT",
+                }:
+                    symbol = canonical_market_symbol(candidate)
         if (
             action is SignalAction.UNKNOWN
             and side is not TradeSide.UNKNOWN
@@ -201,6 +228,17 @@ class RegexSignalParser:
         if any(marker in lower for marker in _MARKET_ENTRY_MARKERS):
             return EntryType.MARKET, None, None
 
+        trigger_match = re.search(
+            r"(?:trigger|activation|activate|breakout|stop[ -]?entry|"
+            r"\u0641\u0639\u0627\u0644[\u200c ]?\u0633\u0627\u0632\u06cc|"
+            r"\u062a\u0631\u06cc\u06af\u0631)"
+            r"[^\d]{0,24}(\d+(?:\.\d+)?)",
+            lower,
+        )
+        if trigger_match:
+            price = Decimal(trigger_match.group(1))
+            return EntryType.TRIGGER, price, price
+
         range_match = re.search(
             r"(?:entry|entries|zone|buy zone|entry zone|\u0648\u0631\u0648\u062f)"
             r"[^\d]{0,20}(\d+(?:\.\d+)?)\s*(?:-|to|/)\s*[^\d]{0,10}(\d+(?:\.\d+)?)",
@@ -213,7 +251,10 @@ class RegexSignalParser:
             return EntryType.RANGE, entry_low, entry_high
 
         single_match = re.search(
-            r"(?:entry|entries|zone|\u0648\u0631\u0648\u062f)[^\d]{0,20}(\d+(?:\.\d+)?)",
+            r"(?:entry|entries|zone|\u0648\u0631\u0648\u062f|"
+            r"\u0642\u06cc\u0645\u062a \u0648\u0631\u0648\u062f|"
+            r"\u062f\u0631 \u0642\u06cc\u0645\u062a)"
+            r"[^\d]{0,20}(\d+(?:\.\d+)?)",
             lower,
         )
         if single_match:

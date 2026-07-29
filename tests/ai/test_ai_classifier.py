@@ -116,7 +116,7 @@ def test_ai_classifier_maps_ambiguous_to_unknown() -> None:
 
 def test_ai_classifier_skips_analysis_messages_before_ai_logic() -> None:
     classifier = AIMessageClassifier(
-        settings=Settings(),
+        settings=Settings(LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False),
         gateway_client=_client(_result_payload("GENERAL_ANALYSIS", "ignore")),
     )
     result = classifier.classify(_raw("Analysis\nXLM / 4H"), _context())
@@ -126,7 +126,7 @@ def test_ai_classifier_skips_analysis_messages_before_ai_logic() -> None:
 
 def test_ai_classifier_skips_hashtag_analysis_messages_before_ai_logic() -> None:
     classifier = AIMessageClassifier(
-        settings=Settings(),
+        settings=Settings(LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False),
         gateway_client=_client(_result_payload("GENERAL_ANALYSIS", "ignore")),
     )
     result = classifier.classify(_raw("#Analysis\nBTC LONG update"), _context())
@@ -140,6 +140,7 @@ def test_ai_classifier_skip_keywords_are_case_insensitive_and_win_over_include()
             _env_file=None,
             AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS=["entry", "long"],
             AI_CLASSIFIER_SKIP_KEYWORDS=["AnALySis"],
+            LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False,
         ),
         gateway_client=_client(_result_payload("NEW_SIGNAL", "open")),
     )
@@ -157,6 +158,7 @@ def test_ai_classifier_requires_force_include_keyword_outside_test_bypass() -> N
             APP_ENV="dev",
             AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS=["entry", "target"],
             AI_CLASSIFIER_SKIP_KEYWORDS=[],
+            LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False,
         ),
         gateway_client=_client(_result_payload("NEW_SIGNAL", "open")),
     )
@@ -168,6 +170,28 @@ def test_ai_classifier_requires_force_include_keyword_outside_test_bypass() -> N
             sys.modules["pytest"] = pytest_module
     assert result.parsed_signal.action is SignalAction.IGNORE
     assert "classification_skipped=missing_force_include_keyword" in result.debug_notes
+
+
+def test_ai_required_classifies_message_even_without_include_keyword() -> None:
+    classifier = AIMessageClassifier(
+        settings=Settings(
+            _env_file=None,
+            LIVE_TRADING_REQUIRE_AI_CLASSIFIER=True,
+            AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS=["entry", "target"],
+            AI_CLASSIFIER_SKIP_KEYWORDS=["analysis"],
+        ),
+        gateway_client=_client(_result_payload("GENERAL_ANALYSIS", "ignore")),
+    )
+
+    result = classifier.classify(
+        _raw("Analysis without configured include keywords"),
+        _context(),
+    )
+
+    assert result.parsed_signal.action is SignalAction.IGNORE
+    assert "classifier=ai" in result.debug_notes
+    assert "ai_required=true" in result.debug_notes
+    assert not any(note.startswith("classification_skipped=") for note in result.debug_notes)
 
 
 def test_ai_classifier_downgrades_inconsistent_new_signal_to_unknown() -> None:
@@ -212,7 +236,10 @@ def test_ai_classifier_fallback_to_regex_on_failure() -> None:
         timeout_seconds=10,
         transport=httpx.MockTransport(lambda _: httpx.Response(500, json={"error": "x"})),
     )
-    settings = Settings(AI_CLASSIFIER_USE_REGEX_FALLBACK=True)
+    settings = Settings(
+        AI_CLASSIFIER_USE_REGEX_FALLBACK=True,
+        LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False,
+    )
     classifier = AIMessageClassifier(
         settings=settings,
         gateway_client=failing,
@@ -236,10 +263,32 @@ def test_ai_classifier_no_fallback_returns_safe_unknown() -> None:
     assert result.parsed_signal.action is SignalAction.UNKNOWN
 
 
+def test_ai_required_never_uses_regex_fallback_on_gateway_failure() -> None:
+    failing = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(500, json={"error": "x"})),
+    )
+    classifier = AIMessageClassifier(
+        settings=Settings(
+            AI_CLASSIFIER_USE_REGEX_FALLBACK=True,
+            LIVE_TRADING_REQUIRE_AI_CLASSIFIER=True,
+        ),
+        gateway_client=failing,
+        regex_fallback=RegexMessageClassifier(),
+    )
+
+    result = classifier.classify(_raw("cancel BTC signal"), _context())
+
+    assert result.parsed_signal.action is SignalAction.UNKNOWN
+    assert "classifier=regex" not in result.debug_notes
+    assert any(note.startswith("ai-error=") for note in result.debug_notes)
+
+
 def test_ai_classifier_emits_skip_and_fallback_logs(caplog) -> None:
     caplog.set_level(logging.INFO, logger="triak_trade.ai.classifier")
     skipped = AIMessageClassifier(
-        settings=Settings(),
+        settings=Settings(LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False),
         gateway_client=_client(_result_payload("GENERAL_ANALYSIS", "ignore")),
     )
     skipped.classify(_raw("Analysis BTC"), _context())
@@ -250,7 +299,10 @@ def test_ai_classifier_emits_skip_and_fallback_logs(caplog) -> None:
         transport=httpx.MockTransport(lambda _: httpx.Response(500, json={"error": "x"})),
     )
     fallback = AIMessageClassifier(
-        settings=Settings(AI_CLASSIFIER_USE_REGEX_FALLBACK=True),
+        settings=Settings(
+            AI_CLASSIFIER_USE_REGEX_FALLBACK=True,
+            LIVE_TRADING_REQUIRE_AI_CLASSIFIER=False,
+        ),
         gateway_client=failing,
         regex_fallback=RegexMessageClassifier(),
     )

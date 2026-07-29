@@ -410,7 +410,7 @@ class AjilGatewayClient:
                 ],
                 "market": ["futures", "spot", "unknown"],
                 "side": ["long", "short", "buy", "sell", "unknown"],
-                "entry_type": ["market", "limit", "range", "unknown"],
+                "entry_type": ["market", "limit", "range", "trigger", "unknown"],
                 "leverage_mode": ["cross", "isolated", "unknown"],
             },
             "price_string_fields": [
@@ -700,7 +700,9 @@ class AjilGatewayClient:
     @staticmethod
     def _normalize_entry_type(raw: Any, *, entry_low: Any, entry_high: Any) -> str:
         value = str(raw or "").strip().lower()
-        if value in {"market", "limit", "range"}:
+        if value in {"market", "limit", "range", "trigger", "stop"}:
+            if value == "stop":
+                return "trigger"
             return value
         if entry_low is not None and entry_high is not None and str(entry_low) != str(entry_high):
             return "range"

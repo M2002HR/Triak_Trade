@@ -13,6 +13,7 @@ from triak_trade.ai.gateway_client import (
     AjilGatewayClient,
 )
 from triak_trade.ai.schemas import AIMessageContext
+from triak_trade.config.settings import Settings
 
 
 @pytest.fixture
@@ -488,10 +489,26 @@ def test_gateway_client_splits_take_profit_string(context: AIMessageContext) -> 
     reason="AI gateway integration test is explicitly guarded",
 )
 def test_optional_gateway_integration_guarded(context: AIMessageContext) -> None:
+    settings = Settings()
     client = AjilGatewayClient(
-        base_url=os.environ["AI_GATEWAY_BASE_URL"],
-        timeout_seconds=10,
-        auth_token=os.getenv("AI_GATEWAY_AUTH_TOKEN", ""),
+        base_url=settings.AI_GATEWAY_BASE_URL,
+        timeout_seconds=settings.AI_GATEWAY_TIMEOUT_SECONDS,
+        classify_path=settings.AI_GATEWAY_CLASSIFY_PATH,
+        auth_header_name=settings.AI_GATEWAY_AUTH_HEADER_NAME,
+        auth_token=settings.AI_GATEWAY_AUTH_TOKEN.get_secret_value(),
+        default_model=settings.AI_GATEWAY_DEFAULT_MODEL,
+        provider_priority=tuple(
+            item.strip()
+            for item in settings.AI_GATEWAY_PROVIDER_PRIORITY.split(",")
+            if item.strip()
+        ),
+        text_provider=settings.AI_CLASSIFIER_TEXT_PROVIDER,
+        text_model=settings.AI_CLASSIFIER_TEXT_MODEL,
+        vision_provider=settings.AI_CLASSIFIER_VISION_PROVIDER,
+        vision_model=settings.AI_CLASSIFIER_VISION_MODEL,
+        trust_env=settings.AI_GATEWAY_TRUST_ENV,
+        retry_attempts=settings.AI_GATEWAY_RETRY_ATTEMPTS,
+        retry_backoff_seconds=settings.AI_GATEWAY_RETRY_BACKOFF_SECONDS,
     )
     result = client.classify_message(context)
     assert result.confidence >= 0

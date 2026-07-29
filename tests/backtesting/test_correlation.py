@@ -161,6 +161,25 @@ def test_resolve_ai_empty_close_falls_back_to_symbol() -> None:
     assert result.method == "symbol_single"
 
 
+def test_new_open_does_not_correlate_to_opposite_side_same_symbol() -> None:
+    existing_long = _signal("sig_dexe_old", "DEXEUSDT", 10, _NOW)
+    ctx = _ctx(existing_long)
+    new_short = _parsed("DEXEUSDT", SignalAction.OPEN).model_copy(
+        update={"side": TradeSide.SHORT}
+    )
+
+    result = resolve_related_signal_id(
+        context=ctx,
+        parsed=new_short,
+        raw_related_id=None,
+        message=_msg(11, text="DEXEUSDT Direction: SHORT"),
+        action=SignalAction.OPEN,
+    )
+
+    assert result.signal_id is None
+    assert result.method == "unattached"
+
+
 def test_resolve_reply_to_correlation() -> None:
     # No symbol on the follow-up, but it replies to the signal's message.
     sig = _signal("sig_btc", "BTCUSDT", 10, _NOW)

@@ -104,6 +104,29 @@ def test_extract_persian_market_tag_as_market_entry() -> None:
     assert parsed.leverage == 70
 
 
+def test_extract_persian_activation_price_as_trigger_entry() -> None:
+    parsed = _parse(
+        "BANKUSDT LONG\nقیمت فعال‌سازی 0.2941\nاستاپ 0.276\nتارگت 0.31"  # noqa: RUF001
+    )
+
+    assert parsed.action is SignalAction.OPEN
+    assert parsed.entry_type is EntryType.TRIGGER
+    assert parsed.entry_low == Decimal("0.2941")
+    assert parsed.entry_high == Decimal("0.2941")
+
+
+def test_extract_persian_order_at_price_as_limit_entry() -> None:
+    parsed = _parse(
+        "BANK\nاردر لانگ در قیمت\n0.2941\nلورج 20\nاستاپ\n0.276"  # noqa: RUF001
+    )
+
+    assert parsed.action is SignalAction.OPEN
+    assert parsed.symbol == "BANKUSDT"
+    assert parsed.side is TradeSide.LONG
+    assert parsed.entry_type is EntryType.LIMIT
+    assert parsed.entry_low == Decimal("0.2941")
+
+
 def test_extract_signal_with_numeric_token_prefix_symbol() -> None:
     parsed = _parse(
         "1000SHIB/USDT BUY Entry zone: 0.005979 SL: 0.005680 TP1 0.006054 TP2 0.006128 TP3 0.006278"

@@ -51,6 +51,7 @@ class EntryType(str, Enum):
     MARKET = "market"
     LIMIT = "limit"
     RANGE = "range"
+    TRIGGER = "trigger"
     UNKNOWN = "unknown"
 
 

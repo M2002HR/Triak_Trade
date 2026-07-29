@@ -38,6 +38,7 @@ class AIMessageClassifier(MessageClassifier):
         settings: Settings,
         gateway_client: AjilGatewayClient,
         regex_fallback: MessageClassifier | None = None,
+        require_gateway_for_all_messages: bool | None = None,
     ) -> None:
         self.settings = settings
         self.gateway_client = gateway_client
@@ -45,6 +46,11 @@ class AIMessageClassifier(MessageClassifier):
         self.validator = ParsedSignalValidator()
         self.normalizer = MessageNormalizer()
         self.regex_parser = RegexSignalParser()
+        self.require_gateway_for_all_messages = (
+            settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER
+            if require_gateway_for_all_messages is None
+            else require_gateway_for_all_messages
+        )
         self.force_include_keywords = self._normalize_keywords(
             settings.AI_CLASSIFIER_FORCE_INCLUDE_KEYWORDS
         )
@@ -72,34 +78,35 @@ class AIMessageClassifier(MessageClassifier):
 
     def classify(self, message: RawTelegramMessage, context: ChannelContext) -> ClassifiedMessage:
         text = message.text or ""
-        skip_keyword = self._matched_skip_keyword(text)
-        if skip_keyword is not None:
-            log_event(
-                _log,
-                logging.INFO,
-                "ai_classifier.skipped_by_keyword",
-                channel_id=message.channel_id,
-                message_id=message.message_id,
-                matched_skip_keyword=skip_keyword,
-                preview=safe_preview(text),
-            )
-            return self._safe_ignored(
-                message,
-                f"classification_skipped=skip_keyword:{skip_keyword}",
-            )
-        if not self._has_force_include_keyword(text):
-            log_event(
-                _log,
-                logging.INFO,
-                "ai_classifier.skipped_missing_include_keyword",
-                channel_id=message.channel_id,
-                message_id=message.message_id,
-                preview=safe_preview(text),
-            )
-            return self._safe_ignored(
-                message,
-                "classification_skipped=missing_force_include_keyword",
-            )
+        if not self.require_gateway_for_all_messages:
+            skip_keyword = self._matched_skip_keyword(text)
+            if skip_keyword is not None:
+                log_event(
+                    _log,
+                    logging.INFO,
+                    "ai_classifier.skipped_by_keyword",
+                    channel_id=message.channel_id,
+                    message_id=message.message_id,
+                    matched_skip_keyword=skip_keyword,
+                    preview=safe_preview(text),
+                )
+                return self._safe_ignored(
+                    message,
+                    f"classification_skipped=skip_keyword:{skip_keyword}",
+                )
+            if not self._has_force_include_keyword(text):
+                log_event(
+                    _log,
+                    logging.INFO,
+                    "ai_classifier.skipped_missing_include_keyword",
+                    channel_id=message.channel_id,
+                    message_id=message.message_id,
+                    preview=safe_preview(text),
+                )
+                return self._safe_ignored(
+                    message,
+                    "classification_skipped=missing_force_include_keyword",
+                )
 
         normalized = self.normalizer.normalize(message)
         ai_context = self._build_context(message, context)
@@ -126,7 +133,11 @@ class AIMessageClassifier(MessageClassifier):
             # single source of retries and never block the run with ad-hoc sleeps.
             result = self.gateway_client.classify_message(ai_context)
         except AIGatewayError as exc:
-            if self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK and self.regex_fallback is not None:
+            if (
+                not self.require_gateway_for_all_messages
+                and self.settings.AI_CLASSIFIER_USE_REGEX_FALLBACK
+                and self.regex_fallback is not None
+            ):
                 log_event(
                     _log,
                     logging.WARNING,
@@ -191,6 +202,7 @@ class AIMessageClassifier(MessageClassifier):
             confidence=result.confidence,
             debug_notes=[
                 "classifier=ai",
+                f"ai_required={str(self.require_gateway_for_all_messages).lower()}",
                 f"ai_gateway_path={self.gateway_client.classify_path}",
                 f"ai_route_provider={route.provider}",
                 f"ai_route_model={route.model}",
@@ -643,5 +655,7 @@ class AIMessageClassifier(MessageClassifier):
             "market": EntryType.MARKET,
             "limit": EntryType.LIMIT,
             "range": EntryType.RANGE,
+            "trigger": EntryType.TRIGGER,
+            "stop": EntryType.TRIGGER,
         }
         return mapping.get(value, EntryType.UNKNOWN)

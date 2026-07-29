@@ -178,6 +178,7 @@ def resolve_related_signal_id(
             )
             and signal.current_signal is not None
             and same_market_symbol(signal.current_signal.symbol, parsed.symbol)
+            and _matches_signal_identity(signal, parsed)
         ]
         if len(same_symbol) == 1:
             return CorrelationResult(
