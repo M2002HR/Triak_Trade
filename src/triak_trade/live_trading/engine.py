@@ -58,6 +58,10 @@ from triak_trade.live_trading.models import (
 )
 from triak_trade.live_trading.position_manager import LivePositionManager
 from triak_trade.live_trading.store import LiveTradingStore
+from triak_trade.live_trading.take_profit_planner import (
+    TakeProfitCandidate,
+    plan_maximum_take_profit_orders,
+)
 from triak_trade.parsing.side_inference import infer_trade_side_from_price_geometry
 from triak_trade.parsing.validator import ParsedSignalValidator
 from triak_trade.telegram.client import TelegramClientInterface
@@ -473,8 +477,7 @@ class LiveTradingEngine:
 
     def _restore_runtime_state(self) -> None:
         self._open_trades = {
-            trade.signal_id: trade
-            for trade in self.store.list_open_trades(self.session.session_id)
+            trade.signal_id: trade for trade in self.store.list_open_trades(self.session.session_id)
         }
         self.session.open_positions_count = len(self._open_trades)
         self._message_traces = list(
@@ -485,9 +488,7 @@ class LiveTradingEngine:
             channel: self.session.started_at for channel in self.session.channels
         }
 
-        traces = list(
-            reversed(self.store.list_message_traces(self.session.session_id, limit=5000))
-        )
+        traces = list(reversed(self.store.list_message_traces(self.session.session_id, limit=5000)))
         by_channel_messages: dict[str, list[RawTelegramMessage]] = {}
         for trace in traces:
             by_channel_messages.setdefault(trace.channel_id, []).append(
@@ -622,16 +623,8 @@ class LiveTradingEngine:
             latest_messages.sort(key=lambda item: (item.date, item.message_id))
             latest_message_id = max(item.message_id for item in latest_messages)
             self._last_seen_message_ids[channel] = latest_message_id
-            replayable_messages = [
-                item
-                for item in latest_messages
-                if item.date >= startup_cutoff
-            ]
-            backlog_only_messages = [
-                item
-                for item in latest_messages
-                if item.date < startup_cutoff
-            ]
+            replayable_messages = [item for item in latest_messages if item.date >= startup_cutoff]
+            backlog_only_messages = [item for item in latest_messages if item.date < startup_cutoff]
             replay_messages.extend(replayable_messages)
             backlog_messages.extend(backlog_only_messages)
             self._log_event(
@@ -783,8 +776,7 @@ class LiveTradingEngine:
             status=SignalStatus(snapshot.status),
             created_from_message_id=snapshot.created_from_message_id,
             related_message_ids=(
-                list(snapshot.related_message_ids)
-                or [snapshot.created_from_message_id]
+                list(snapshot.related_message_ids) or [snapshot.created_from_message_id]
             ),
             current_signal=parsed_signal,
             version=max(1, snapshot.message_count or 1),
@@ -871,9 +863,7 @@ class LiveTradingEngine:
             logging.INFO,
             "live_trading.message_classified",
             classification=(
-                classified.classification
-                if hasattr(classified, "classification")
-                else None
+                classified.classification if hasattr(classified, "classification") else None
             ),
             raw_related_signal_id=getattr(classified, "related_signal_id", None),
             **self._message_log_fields(message),
@@ -933,13 +923,8 @@ class LiveTradingEngine:
                 related_state is not None
                 and related_state.status is SignalStatus.PENDING_CONSOLIDATION
             )
-            if (
-                not is_pending_consolidation
-                and related_signal_id not in self._open_trades
-            ):
-                trace.debug_notes.append(
-                    f"stale_related_signal_detached={related_signal_id}"
-                )
+            if not is_pending_consolidation and related_signal_id not in self._open_trades:
+                trace.debug_notes.append(f"stale_related_signal_detached={related_signal_id}")
                 related_signal_id = None
                 trace.correlation_method = "new_signal"
                 trace.correlation_note = "stale_related_signal_without_open_trade"
@@ -978,10 +963,7 @@ class LiveTradingEngine:
             trace.debug_notes = [
                 note for note in trace.debug_notes if note != "no_signal_for_followup"
             ]
-            trace.debug_notes.append(
-                "promoted_visual_signal_from="
-                f"{promoted_from_action.value}"
-            )
+            trace.debug_notes.append(f"promoted_visual_signal_from={promoted_from_action.value}")
             self._log_event(
                 logging.INFO,
                 "live_trading.unmatched_visual_followup_promoted",
@@ -1231,8 +1213,8 @@ class LiveTradingEngine:
         trace: LiveMessageTrace,
     ) -> RawTelegramMessage:
         payload = message.raw_payload
-        needs_caption_media = (
-            bool(payload.get("has_media")) and bool(payload.get("caption_present"))
+        needs_caption_media = bool(payload.get("has_media")) and bool(
+            payload.get("caption_present")
         )
         if not needs_caption_media:
             return await self._maybe_attach_prior_captionless_media(
@@ -1245,10 +1227,7 @@ class LiveTradingEngine:
         try:
             hydrated = await self._telegram_client.ensure_media_payload(message)
         except Exception as exc:
-            trace.debug_notes.append(
-                "caption_media_download_failed="
-                f"{type(exc).__name__}"
-            )
+            trace.debug_notes.append(f"caption_media_download_failed={type(exc).__name__}")
             return message
         payload = hydrated.raw_payload
         if payload.get("media_downloaded") is True:
@@ -1287,15 +1266,10 @@ class LiveTradingEngine:
                 allow_captionless=True,
             )
         except Exception as exc:
-            trace.debug_notes.append(
-                "retro_media_download_failed="
-                f"{type(exc).__name__}"
-            )
+            trace.debug_notes.append(f"retro_media_download_failed={type(exc).__name__}")
             return message
         if not hydrated_prior.raw_payload.get("image_data_urls"):
-            trace.debug_notes.append(
-                f"retro_media_unavailable={prior.message_id}"
-            )
+            trace.debug_notes.append(f"retro_media_unavailable={prior.message_id}")
             return message
         return self._attach_context_images(message, hydrated_prior, trace)
 
@@ -1352,9 +1326,7 @@ class LiveTradingEngine:
                 ]
             )
         )
-        trace.debug_notes.append(
-            f"retro_media_context_from={prior_media.message_id}"
-        )
+        trace.debug_notes.append(f"retro_media_context_from={prior_media.message_id}")
         return message.model_copy(update={"raw_payload": message_payload})
 
     @staticmethod
@@ -1533,9 +1505,7 @@ class LiveTradingEngine:
             )
             if not trade_is_live:
                 trace.final_status = "no_open_trade"
-                trace.effect_summary = (
-                    f"Signal {signal_id} has no live exchange position to update"
-                )
+                trace.effect_summary = f"Signal {signal_id} has no live exchange position to update"
                 self._log_event(
                     logging.INFO,
                     "live_trading.followup_detached_missing_exchange_position",
@@ -1587,9 +1557,7 @@ class LiveTradingEngine:
                 trace.effect_summary = f"Pending entry update failed safely: {exc}"
             else:
                 trace.final_status = (
-                    "opened_trade"
-                    if not trade.is_waiting_entry
-                    else "updated_entry_order"
+                    "opened_trade" if not trade.is_waiting_entry else "updated_entry_order"
                 )
                 trace.effect_summary = replacement_result
         elif effective_action is SignalAction.CLOSE or close_all:
@@ -1606,9 +1574,7 @@ class LiveTradingEngine:
                     trace.effect_summary = f"Pending entry cancel failed: {exc}"
                 else:
                     trace.final_status = "cancelled_entry_order"
-                    trace.effect_summary = (
-                        f"Cancelled pending entry for {trade.symbol}"
-                    )
+                    trace.effect_summary = f"Cancelled pending entry for {trade.symbol}"
                 trace.trade_id = trade.trade_id
                 return
             if self._uses_exchange_execution():
@@ -1694,9 +1660,7 @@ class LiveTradingEngine:
                     trace.effect_summary = f"Pending entry cancel failed: {exc}"
                 else:
                     trace.final_status = "cancelled_entry_order"
-                    trace.effect_summary = (
-                        f"Cancelled pending entry for {trade.symbol}"
-                    )
+                    trace.effect_summary = f"Cancelled pending entry for {trade.symbol}"
                 trace.trade_id = trade.trade_id
                 return
             if self._uses_exchange_execution():
@@ -1816,8 +1780,7 @@ class LiveTradingEngine:
             if trace.final_status != "update_sl_failed":
                 trace.final_status = "updated_sl"
                 trace.effect_summary = (
-                    "SL moved to entry (breakeven)" if move_to_entry
-                    else f"SL updated to {new_sl}"
+                    "SL moved to entry (breakeven)" if move_to_entry else f"SL updated to {new_sl}"
                 )
 
         elif effective_action is SignalAction.UPDATE_TP:
@@ -1849,7 +1812,7 @@ class LiveTradingEngine:
                             context=context,
                             state=state,
                             trade=trade,
-                    )
+                        )
                     return
                 if trade.is_waiting_entry:
                     trade.requested_stop_loss = parsed.stop_loss
@@ -1864,8 +1827,7 @@ class LiveTradingEngine:
                     if trade.is_waiting_entry:
                         trade.requested_take_profits = list(new_tps)
                     tp_updates_applied.append(
-                        "TPs="
-                        + str([str(t) for t in trade.take_profits[trade.targets_hit :]])
+                        "TPs=" + str([str(t) for t in trade.take_profits[trade.targets_hit :]])
                     )
             if tp_updates_applied:
                 protection_update_failed = False
@@ -1900,9 +1862,7 @@ class LiveTradingEngine:
                         else:
                             protection_update_failed = True
                 trace.final_status = (
-                    "update_tp_failed_fail_closed"
-                    if protection_update_failed
-                    else "updated_tp"
+                    "update_tp_failed_fail_closed" if protection_update_failed else "updated_tp"
                 )
                 trace.effect_summary = (
                     "TP update failed; fail-closed protection handling executed"
@@ -1956,8 +1916,7 @@ class LiveTradingEngine:
                     message=attribution,
                 )
                 updates_applied.append(
-                    "TPs="
-                    + ",".join(str(item) for item in trade.take_profits[trade.targets_hit :])
+                    "TPs=" + ",".join(str(item) for item in trade.take_profits[trade.targets_hit :])
                 )
                 protection_needs_sync = True
             leverage_updated = self._pm.update_leverage(
@@ -2006,9 +1965,7 @@ class LiveTradingEngine:
             if not updates_applied:
                 updates_applied.append("entry replay ignored for already-open trade")
             trace.final_status = (
-                "update_entry_failed_fail_closed"
-                if protection_update_failed
-                else "updated_entry"
+                "update_entry_failed_fail_closed" if protection_update_failed else "updated_entry"
             )
             trace.effect_summary = (
                 "Entry update failed; fail-closed protection handling executed"
@@ -2140,13 +2097,12 @@ class LiveTradingEngine:
         # Get current mark price for MARKET entries
         mark_price = await self._get_mark_price(parsed.symbol)
         from triak_trade.domain.enums import EntryType
+
         if mark_price and (
             parsed.entry_type is EntryType.MARKET
             or (parsed.entry_low is None and parsed.entry_high is None)
         ):
-            parsed = parsed.model_copy(
-                update={"entry_low": mark_price, "entry_high": mark_price}
-            )
+            parsed = parsed.model_copy(update={"entry_low": mark_price, "entry_high": mark_price})
         parsed, geometry_error = self._normalize_or_reject_open_geometry(parsed)
         if geometry_error is not None:
             self._log_event(
@@ -2478,9 +2434,7 @@ class LiveTradingEngine:
                 context.add_signal(state, pending=False)
                 self._sync_signal_snapshot(context=context, state=state, trade=trade)
                 self.store.save_trade(trade)
-                self._emit_trace_update(
-                    signal_id=signal_id, status="order_failed", note=str(exc)
-                )
+                self._emit_trace_update(signal_id=signal_id, status="order_failed", note=str(exc))
                 return
         else:
             trade.status = "open"
@@ -2490,11 +2444,7 @@ class LiveTradingEngine:
 
         # Register trade
         self._open_trades[signal_id] = trade
-        state.status = (
-            SignalStatus.ORDER_SUBMITTED
-            if trade.is_waiting_entry
-            else SignalStatus.OPEN
-        )
+        state.status = SignalStatus.ORDER_SUBMITTED if trade.is_waiting_entry else SignalStatus.OPEN
         context.add_signal(state, pending=False)
         self._sync_signal_snapshot(context=context, state=state, trade=trade)
         self.session.total_signals_opened += 1
@@ -2507,11 +2457,7 @@ class LiveTradingEngine:
         self._emit_session_update()
         self._emit_trace_update(
             signal_id=signal_id,
-            status=(
-                "entry_order_submitted"
-                if trade.is_waiting_entry
-                else "opened_trade"
-            ),
+            status=("entry_order_submitted" if trade.is_waiting_entry else "opened_trade"),
             note=(
                 (
                     f"Entry {trade.entry_order_type} submitted for "
@@ -2587,8 +2533,10 @@ class LiveTradingEngine:
                 continue
 
             events = self._pm.check_sl_tp_hit(
-                trade=trade, mark_price=mark,
-                strategy=self._strategy, fee_rate_pct=fee_rate,
+                trade=trade,
+                mark_price=mark,
+                strategy=self._strategy,
+                fee_rate_pct=fee_rate,
             )
             for event in events:
                 if event.startswith("tp") and "_hit" in event:
@@ -2616,8 +2564,10 @@ class LiveTradingEngine:
                             break
                     else:
                         self._pm.close_trade(
-                            trade=trade, close_price=mark,
-                            reason="sl_hit", fee_rate_pct=fee_rate,
+                            trade=trade,
+                            close_price=mark,
+                            reason="sl_hit",
+                            fee_rate_pct=fee_rate,
                         )
                     self._finalize_closed_trade(trade)
                     context = self._contexts.get(trade.channel_id)
@@ -2797,9 +2747,7 @@ class LiveTradingEngine:
                 unrealized_pnl=str(self.session.account_info.unrealized_pnl),
             )
         except Exception as exc:
-            self.session.account_info = LiveAccountInfo(
-                error=f"account fetch failed: {exc}"
-            )
+            self.session.account_info = LiveAccountInfo(error=f"account fetch failed: {exc}")
             self.session.exchange_snapshot = None
             self.store.save_session(self.session)
             self._log_event(
@@ -2870,8 +2818,6 @@ class LiveTradingEngine:
         spec = await self._futures_client.get_contract_spec(trade.symbol)
         if spec is None:
             raise ValueError(f"Contract spec unavailable for {trade.symbol}")
-        self._ensure_exchange_quantity_supports_market_entry(trade, spec)
-        self._ensure_exchange_quantity_supports_take_profit_ladder(trade, spec)
         self._apply_exchange_risk_limit_to_open_trade(trade, spec)
         try:
             await self._ensure_supported_exchange_leverage(
@@ -2890,6 +2836,12 @@ class LiveTradingEngine:
                 **self._trade_log_fields(trade),
             )
             trade.last_exchange_sync_error = str(exc)
+
+        # Leverage/risk-tier negotiation can resize the position. Entry and
+        # take-profit feasibility must therefore be decided only after the
+        # final risk-sized exchange quantity is known.
+        self._ensure_exchange_quantity_supports_market_entry(trade, spec)
+        self._ensure_exchange_quantity_supports_take_profit_ladder(trade, spec)
 
         if current_mark_price is None and trade.entry_type == EntryType.TRIGGER.value:
             current_mark_price = await self._get_mark_price(trade.symbol)
@@ -2939,13 +2891,9 @@ class LiveTradingEngine:
 
         now = _utc_now()
         trade.entry_order_id = order.order_id
-        trade.entry_order_client_id = (
-            getattr(order, "client_order_id", None) or client_order_id
-        )
+        trade.entry_order_client_id = getattr(order, "client_order_id", None) or client_order_id
         trade.entry_order_type = entry_request.order_type
-        trade.entry_order_status = (
-            str(getattr(order, "status", "")).upper() or "SUBMITTED"
-        )
+        trade.entry_order_status = str(getattr(order, "status", "")).upper() or "SUBMITTED"
         trade.entry_submitted_at = now
         pending_ttl_seconds = max(
             1,
@@ -2958,9 +2906,7 @@ class LiveTradingEngine:
             ),
         )
         trade.entry_order_expires_at = now + timedelta(seconds=pending_ttl_seconds)
-        trade.exchange_symbol = (
-            getattr(order, "exchange_symbol", None) or trade.exchange_symbol
-        )
+        trade.exchange_symbol = getattr(order, "exchange_symbol", None) or trade.exchange_symbol
         if trade.message_history:
             trade.message_history[-1].notes[0:0] = [
                 f"entry_order_type={entry_request.order_type}",
@@ -2985,9 +2931,7 @@ class LiveTradingEngine:
                 timeout_seconds=float(self.settings.LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS),
             )
             if confirmed is None:
-                raise ValueError(
-                    f"Toobit did not return market entry {order.order_id} in history"
-                )
+                raise ValueError(f"Toobit did not return market entry {order.order_id} in history")
             confirmed_order = confirmed
             if confirmed_order.status.upper() in terminal_statuses:
                 raise ValueError(
@@ -3054,9 +2998,7 @@ class LiveTradingEngine:
                     reason="trigger_not_reached",
                 )
             slippage_pct = (
-                abs(current_mark_price - requested_price)
-                * Decimal("100")
-                / requested_price
+                abs(current_mark_price - requested_price) * Decimal("100") / requested_price
             )
             max_slippage_pct = max(
                 Decimal("0"),
@@ -3129,11 +3071,7 @@ class LiveTradingEngine:
         fills: list[Any],
     ) -> list[Any]:
         processed = set(trade.processed_exchange_fill_ids)
-        return [
-            fill
-            for fill in fills
-            if self._exchange_fill_key(fill) not in processed
-        ]
+        return [fill for fill in fills if self._exchange_fill_key(fill) not in processed]
 
     def _record_processed_exchange_fills(
         self,
@@ -3156,9 +3094,7 @@ class LiveTradingEngine:
         spec: Any,
     ) -> None:
         assert (
-            self._futures_client is not None
-            and self._pm is not None
-            and self._strategy is not None
+            self._futures_client is not None and self._pm is not None and self._strategy is not None
         )
         confirmed_status = confirmed_order.status.upper()
         if confirmed_status in {"PARTIALLY_FILLED", "PARTIAL_FILLED"}:
@@ -3194,9 +3130,7 @@ class LiveTradingEngine:
             if average_price and average_price > 0:
                 fill_price = average_price
         if fill_price <= Decimal("0"):
-            raise ValueError(
-                f"Entry order {confirmed_order.order_id} has no confirmed fill price"
-            )
+            raise ValueError(f"Entry order {confirmed_order.order_id} has no confirmed fill price")
         trade.quantity = executed_quantity
         trade.remaining_quantity = executed_quantity
         trade.entry_price = fill_price
@@ -3241,8 +3175,7 @@ class LiveTradingEngine:
                     f"{exc}; close_error={close_exc}"
                 ) from close_exc
             raise ValueError(
-                "Failed to set trading protection; position was flattened automatically: "
-                f"{exc}"
+                f"Failed to set trading protection; position was flattened automatically: {exc}"
             ) from exc
 
     async def _ensure_trade_protection_after_open(self, trade: LiveTrade) -> None:
@@ -3287,9 +3220,7 @@ class LiveTradingEngine:
                 )
                 if await self._exchange_trade_has_required_protection(trade):
                     if trade.message_history:
-                        trade.message_history[-1].notes.append(
-                            f"protection_sync_degraded={exc}"
-                        )
+                        trade.message_history[-1].notes.append(f"protection_sync_degraded={exc}")
                     return
                 if attempt >= attempts:
                     break
@@ -3397,9 +3328,7 @@ class LiveTradingEngine:
                 return False
             if spec is None:
                 return False
-            trade.required_tp_order_count = len(
-                self._exchange_take_profit_orders(trade, spec=spec)
-            )
+            trade.required_tp_order_count = len(self._exchange_take_profit_orders(trade, spec=spec))
             if trade.required_tp_order_count <= 0:
                 return False
         try:
@@ -3482,9 +3411,9 @@ class LiveTradingEngine:
                 )
             trade.quantity = normalized_quantity
             trade.remaining_quantity = min(trade.remaining_quantity, normalized_quantity)
-        trade.margin = (
-            trade.entry_price * trade.quantity / Decimal(str(trade.leverage))
-        ).quantize(Decimal("0.00000001"))
+        trade.margin = (trade.entry_price * trade.quantity / Decimal(str(trade.leverage))).quantize(
+            Decimal("0.00000001")
+        )
         clamp_note = (
             "exchange_leverage_clamped="
             f"{previous_leverage}x->{trade.leverage}x "
@@ -3514,24 +3443,23 @@ class LiveTradingEngine:
         self._apply_exchange_take_profit_ladder_plan(
             trade=trade,
             plan=plan,
-            reason="current_quantity",
+            reason="pre_entry_capacity",
         )
         trade.required_tp_order_count = plan.target_count
+        self._log_event(
+            logging.INFO,
+            "live_trading.exchange_tp_capacity_planned",
+            available_target_count=plan.original_count,
+            selected_target_count=plan.target_count,
+            fixed_position_quantity=str(trade.quantity),
+            minimum_contract_quantity=str(self._minimum_exchange_contract_quantity(spec)),
+            contract_step_size=str(
+                self._coerce_decimal(getattr(spec, "contract_step_size", Decimal("0")))
+            ),
+            **self._trade_log_fields(trade),
+        )
         if trade.quantity != original_quantity:
             raise AssertionError("TP planning must never change entry quantity")
-
-    def _plan_exchange_take_profit_ladder_for_open(
-        self,
-        *,
-        trade: LiveTrade,
-        spec: Any,
-    ) -> _TakeProfitLadderPlan | None:
-        max_supported_quantity = self._max_exchange_quantity_within_allocation_limits(trade)
-        return self._plan_exchange_take_profit_ladder(
-            trade=trade,
-            spec=spec,
-            max_supported_quantity=max_supported_quantity,
-        )
 
     def _plan_exchange_take_profit_ladder_for_current_quantity(
         self,
@@ -3542,7 +3470,6 @@ class LiveTradingEngine:
         return self._plan_exchange_take_profit_ladder(
             trade=trade,
             spec=spec,
-            max_supported_quantity=None,
         )
 
     def _plan_exchange_take_profit_ladder(
@@ -3550,44 +3477,17 @@ class LiveTradingEngine:
         *,
         trade: LiveTrade,
         spec: Any,
-        max_supported_quantity: Decimal | None,
     ) -> _TakeProfitLadderPlan | None:
         pending_targets = list(trade.take_profits[trade.targets_hit :])
         original_count = len(pending_targets)
         if original_count == 0:
             return None
-        if max_supported_quantity is None:
-            supported_count = len(
-                self._exchange_take_profit_orders(trade, spec=spec)
-            )
-            return _TakeProfitLadderPlan(
-                pending_take_profits=pending_targets,
-                required_quantity=trade.quantity.quantize(Decimal("0.00000001")),
-                original_count=original_count,
-                target_count=supported_count,
-            )
-
-        for target_count in self._take_profit_ladder_target_counts(original_count):
-            required_quantity = self._minimum_exchange_take_profit_ladder_quantity(
-                trade,
-                spec,
-                required_order_count=target_count,
-                max_supported_quantity=max_supported_quantity,
-            )
-            if required_quantity is None:
-                continue
-            if required_quantity <= max_supported_quantity:
-                return _TakeProfitLadderPlan(
-                    pending_take_profits=pending_targets,
-                    required_quantity=required_quantity,
-                    original_count=original_count,
-                    target_count=target_count,
-                )
+        supported_count = len(self._exchange_take_profit_orders(trade, spec=spec))
         return _TakeProfitLadderPlan(
             pending_take_profits=pending_targets,
-            required_quantity=trade.quantity.quantize(Decimal("0.00000001")),
+            required_quantity=trade.remaining_quantity.quantize(Decimal("0.00000001")),
             original_count=original_count,
-            target_count=0,
+            target_count=supported_count,
         )
 
     def _apply_exchange_take_profit_ladder_plan(
@@ -3604,74 +3504,6 @@ class LiveTradingEngine:
                 f"exchange_tp_ladder_partial={plan.target_count}/{plan.original_count}"
                 f"_due_to_{reason}"
             )
-
-    @staticmethod
-    def _take_profit_ladder_target_counts(original_count: int) -> list[int]:
-        if original_count <= 0:
-            return []
-        return list(range(original_count, 0, -1))
-
-    def _minimum_exchange_take_profit_ladder_quantity(
-        self,
-        trade: LiveTrade,
-        spec: Any,
-        *,
-        required_order_count: int | None = None,
-        max_supported_quantity: Decimal | None = None,
-    ) -> Decimal | None:
-        pending_targets = trade.take_profits[trade.targets_hit :]
-        if not pending_targets or self._strategy is None:
-            return None
-        required_count = (
-            len(pending_targets)
-            if required_order_count is None
-            else max(1, min(required_order_count, len(pending_targets)))
-        )
-        step = self._coerce_decimal(getattr(spec, "contract_step_size", Decimal("0")))
-        if step <= 0:
-            return None
-        minimum_contract_qty = self._minimum_exchange_contract_quantity(spec)
-        min_units = self._exchange_quantity_units_ceiling(minimum_contract_qty, step)
-        if min_units <= 0:
-            return None
-        entry_contract_step = step
-        if len(self._exchange_take_profit_orders(trade, spec=spec)) >= required_count:
-            return trade.quantity.quantize(Decimal("0.00000001"))
-
-        if max_supported_quantity is None:
-            max_supported_quantity = self._max_exchange_quantity_within_allocation_limits(trade)
-        max_exchange_qty = self._floor_exchange_contract_quantity(max_supported_quantity, spec)
-        max_units = self._exchange_quantity_units(max_exchange_qty, entry_contract_step)
-        if max_units <= 0:
-            return None
-
-        current_exchange_qty = self._floor_exchange_contract_quantity(trade.quantity, spec)
-        current_units = self._exchange_quantity_units_ceiling(
-            current_exchange_qty,
-            entry_contract_step,
-        )
-        search_start_units = max(
-            current_units,
-            self._exchange_quantity_units_ceiling(
-                minimum_contract_qty * Decimal(required_count),
-                entry_contract_step,
-            ),
-        )
-        for units in range(max(1, search_start_units), max_units + 1):
-            candidate_exchange_qty = Decimal(units) * entry_contract_step
-            candidate_quantity = _from_exchange_contract_quantity(
-                candidate_exchange_qty,
-                spec,
-            ).quantize(Decimal("0.00000001"))
-            candidate_trade = trade.model_copy(deep=True)
-            candidate_trade.quantity = candidate_quantity
-            candidate_trade.remaining_quantity = candidate_quantity
-            if (
-                len(self._exchange_take_profit_orders(candidate_trade, spec=spec))
-                >= required_count
-            ):
-                return candidate_quantity
-        return None
 
     def _ensure_exchange_quantity_supports_market_entry(
         self,
@@ -3692,115 +3524,6 @@ class LiveTradingEngine:
             f"minimum_quantity={minimum_entry_quantity})"
         )
 
-    def _promote_exchange_open_quantity_if_needed(
-        self,
-        *,
-        trade: LiveTrade,
-        required_quantity: Decimal,
-        note_prefix: str,
-        insufficient_balance_error: str,
-        allocation_limit_error: str,
-        reject_on_local_limit: bool = True,
-    ) -> None:
-        required_quantity = required_quantity.quantize(Decimal("0.00000001"))
-        if required_quantity <= 0 or trade.quantity >= required_quantity:
-            return
-
-        previous_quantity = trade.quantity
-        current_balance = self._current_balance_for_exchange_trade_sizing()
-        max_margin_budget = (
-            current_balance * self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT / Decimal("100")
-        ).quantize(Decimal("0.00000001"))
-        required_margin = (
-            trade.entry_price
-            * required_quantity
-            / Decimal(str(max(trade.leverage, 1)))
-        ).quantize(Decimal("0.00000001"))
-        local_limit_reason: str | None = None
-        local_limit_error: str | None = None
-        if required_margin > current_balance:
-            local_limit_reason = "insufficient_balance"
-            local_limit_error = insufficient_balance_error
-        elif max_margin_budget > 0 and required_margin > max_margin_budget:
-            local_limit_reason = "allocation_limit"
-            local_limit_error = allocation_limit_error
-
-        if local_limit_reason is not None:
-            error = self._format_exchange_quantity_promotion_error(
-                trade=trade,
-                base_error=local_limit_error or insufficient_balance_error,
-                required_quantity=required_quantity,
-                required_margin=required_margin,
-                current_balance=current_balance,
-                max_margin_budget=max_margin_budget,
-            )
-            event_name = (
-                "live_trading.exchange_quantity_promotion_rejected"
-                if reject_on_local_limit
-                else "live_trading.exchange_quantity_promotion_local_limit_exceeded"
-            )
-            self._log_event(
-                logging.WARNING,
-                event_name,
-                reason=local_limit_reason,
-                required_quantity=str(required_quantity),
-                required_margin=str(required_margin),
-                current_balance=str(current_balance),
-                max_margin_budget=str(max_margin_budget),
-                allocation_cap_pct=str(self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT),
-                previous_quantity=str(previous_quantity),
-                exchange_will_decide=not reject_on_local_limit,
-                **self._trade_log_fields(trade),
-            )
-            if reject_on_local_limit:
-                raise ValueError(error)
-            if trade.message_history:
-                trade.message_history[-1].notes.append(
-                    f"{note_prefix}_local_limit={local_limit_reason}"
-                )
-
-        trade.quantity = required_quantity
-        trade.remaining_quantity = required_quantity
-        trade.margin = required_margin
-        if trade.message_history:
-            trade.message_history[-1].notes.append(
-                f"{note_prefix}={previous_quantity}->{required_quantity}"
-            )
-        self._log_event(
-            logging.INFO,
-            "live_trading.exchange_quantity_promoted",
-            reason=local_limit_reason or "minimum_requirement",
-            required_quantity=str(required_quantity),
-            required_margin=str(required_margin),
-            current_balance=str(current_balance),
-            max_margin_budget=str(max_margin_budget),
-            previous_quantity=str(previous_quantity),
-            promoted_quantity=str(required_quantity),
-            allocation_cap_pct=str(self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT),
-            note_prefix=note_prefix,
-            exchange_will_decide=local_limit_reason is not None and not reject_on_local_limit,
-            **self._trade_log_fields(trade),
-        )
-
-    def _format_exchange_quantity_promotion_error(
-        self,
-        *,
-        trade: LiveTrade,
-        base_error: str,
-        required_quantity: Decimal,
-        required_margin: Decimal,
-        current_balance: Decimal,
-        max_margin_budget: Decimal,
-    ) -> str:
-        return (
-            f"{base_error} "
-            f"(symbol={trade.symbol}, required_quantity={required_quantity}, "
-            f"entry_price={trade.entry_price}, leverage={trade.leverage}x, "
-            f"required_margin={required_margin}, current_balance={current_balance}, "
-            f"max_margin_budget={max_margin_budget}, "
-            f"allocation_cap_pct={self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT})"
-        )
-
     @staticmethod
     def _minimum_exchange_contract_quantity(spec: Any) -> Decimal:
         min_contract_qty = LiveTradingEngine._coerce_decimal(
@@ -3808,33 +3531,10 @@ class LiveTradingEngine:
         )
         if min_contract_qty > 0:
             return min_contract_qty
-        step = LiveTradingEngine._coerce_decimal(
-            getattr(spec, "contract_step_size", Decimal("0"))
-        )
+        step = LiveTradingEngine._coerce_decimal(getattr(spec, "contract_step_size", Decimal("0")))
         if step > 0:
             return step
         return Decimal("0")
-
-    def _current_balance_for_exchange_trade_sizing(self) -> Decimal:
-        if self.session.trading_mode == "demo":
-            return self._demo_balance_for_sizing()
-        return self._live_balance_for_sizing()
-
-    def _max_exchange_quantity_within_allocation_limits(self, trade: LiveTrade) -> Decimal:
-        current_balance = self._current_balance_for_exchange_trade_sizing()
-        max_margin_budget = (
-            current_balance * self.settings.LIVE_TRADING_MAX_ALLOCATION_PCT / Decimal("100")
-        ).quantize(Decimal("0.00000001"))
-        usable_margin = (
-            min(current_balance, max_margin_budget)
-            if max_margin_budget > 0
-            else current_balance
-        )
-        if usable_margin <= 0 or trade.entry_price <= 0:
-            return Decimal("0")
-        return (
-            usable_margin * Decimal(str(max(trade.leverage, 1))) / trade.entry_price
-        ).quantize(Decimal("0.00000001"))
 
     async def _ensure_supported_exchange_leverage(
         self,
@@ -3922,8 +3622,7 @@ class LiveTradingEngine:
             if limit.max_leverage > 0 and limit.max_leverage < requested_leverage
         ]
         common_levels = [
-            level for level in [75, 50, 40, 25, 20, 10, 5, 3, 2, 1]
-            if level < requested_leverage
+            level for level in [75, 50, 40, 25, 20, 10, 5, 3, 2, 1] if level < requested_leverage
         ]
         for level in sorted(set(tier_levels + common_levels), reverse=True):
             if level not in candidates:
@@ -4056,19 +3755,18 @@ class LiveTradingEngine:
             else Decimal("0")
         )
         weighted_close_qty = (
-            executed_quantity
-            if avg_price > 0 and executed_quantity > 0
-            else Decimal("0")
+            executed_quantity if avg_price > 0 and executed_quantity > 0 else Decimal("0")
         )
         processed_close_fills = list(fills)
         exchange_position: Any | None = None
         exchange_remaining_quantity: Decimal | None = None
         if fraction >= Decimal("1"):
-            exchange_position, exchange_remaining_quantity = (
-                await self._fetch_trade_exchange_position_quantity(
-                    trade=trade,
-                    spec=spec,
-                )
+            (
+                exchange_position,
+                exchange_remaining_quantity,
+            ) = await self._fetch_trade_exchange_position_quantity(
+                trade=trade,
+                spec=spec,
             )
             reconcile_attempts = max(
                 1,
@@ -4084,15 +3782,14 @@ class LiveTradingEngine:
                     trade,
                     exchange_remaining_quantity,
                 )
-                residual_confirmed_order, residual_fills = (
-                    await self._futures_client.wait_for_order_fill(
-                        symbol=trade.symbol,
-                        order_id=residual_order.order_id,
-                        use_demo_symbol=self._use_demo_exchange_symbol(),
-                        timeout_seconds=float(
-                            self.settings.LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS
-                        ),
-                    )
+                (
+                    residual_confirmed_order,
+                    residual_fills,
+                ) = await self._futures_client.wait_for_order_fill(
+                    symbol=trade.symbol,
+                    order_id=residual_order.order_id,
+                    use_demo_symbol=self._use_demo_exchange_symbol(),
+                    timeout_seconds=float(self.settings.LIVE_TRADING_ORDER_FILL_TIMEOUT_SECONDS),
                 )
                 if residual_confirmed_order is None:
                     raise ValueError(
@@ -4145,11 +3842,12 @@ class LiveTradingEngine:
                 if residual_avg_price > 0 and residual_executed_quantity > 0:
                     weighted_close_notional += residual_avg_price * residual_executed_quantity
                     weighted_close_qty += residual_executed_quantity
-                exchange_position, exchange_remaining_quantity = (
-                    await self._fetch_trade_exchange_position_quantity(
-                        trade=trade,
-                        spec=spec,
-                    )
+                (
+                    exchange_position,
+                    exchange_remaining_quantity,
+                ) = await self._fetch_trade_exchange_position_quantity(
+                    trade=trade,
+                    spec=spec,
                 )
                 attempt += 1
             if exchange_remaining_quantity is not None:
@@ -4528,9 +4226,7 @@ class LiveTradingEngine:
                     logging.ERROR,
                     "live_trading.exchange_stop_loss_risk_rejected",
                     requested_stop_loss=self._decimal_text(stop_loss),
-                    would_be_capped_stop_loss=self._decimal_text(
-                        normalized_stop_risk.stop_loss
-                    ),
+                    would_be_capped_stop_loss=self._decimal_text(normalized_stop_risk.stop_loss),
                     risk_budget=self._decimal_text(normalized_stop_risk.risk_budget),
                     risk_amount=self._decimal_text(normalized_stop_risk.risk_amount),
                     **self._trade_log_fields(trade),
@@ -4654,9 +4350,7 @@ class LiveTradingEngine:
             )
         trade.stop_loss = default_stop
         if trade.message_history:
-            trade.message_history[-1].notes.append(
-                f"default_stop_loss_restored={default_stop}"
-            )
+            trade.message_history[-1].notes.append(f"default_stop_loss_restored={default_stop}")
         self._log_event(
             logging.WARNING,
             "live_trading.default_stop_loss_restored",
@@ -4878,8 +4572,7 @@ class LiveTradingEngine:
             trade.sl_order_id = None
         if cancellation_errors:
             raise ValueError(
-                "Exchange protection cancellation failed: "
-                + "; ".join(cancellation_errors)
+                "Exchange protection cancellation failed: " + "; ".join(cancellation_errors)
             )
         self._log_event(
             logging.INFO,
@@ -4968,10 +4661,7 @@ class LiveTradingEngine:
         trade.sl_order_id = sl_order_id
 
     def _trade_has_exchange_protection(self, trade: LiveTrade) -> bool:
-        return bool(
-            trade.sl_order_id
-            and (trade.tp_order_ids or trade.tp_order_plan)
-        )
+        return bool(trade.sl_order_id and (trade.tp_order_ids or trade.tp_order_plan))
 
     @staticmethod
     def _tracked_trade_has_required_protection(trade: LiveTrade) -> bool:
@@ -4982,13 +4672,9 @@ class LiveTradingEngine:
         if trade.sl_order_id is None:
             return False
         required_tp_orders = max(1, trade.required_tp_order_count)
-        tracked_order_ids = {
-            item for item in trade.tp_order_ids if item
-        }
+        tracked_order_ids = {item for item in trade.tp_order_ids if item}
         tracked_order_ids.update(
-            item.order_id
-            for item in trade.tp_order_plan
-            if item.order_id is not None
+            item.order_id for item in trade.tp_order_plan if item.order_id is not None
         )
         return len(tracked_order_ids) >= required_tp_orders
 
@@ -5232,7 +4918,7 @@ class LiveTradingEngine:
             getattr(spec, "contract_multiplier", Decimal("0"))
         )
         if contract_multiplier <= 0:
-            return desired_orders
+            return []
         step = self._coerce_decimal(getattr(spec, "contract_step_size", Decimal("0")))
         if step <= 0:
             step = Decimal("1")
@@ -5244,59 +4930,42 @@ class LiveTradingEngine:
         if total_exchange_qty <= 0:
             return []
 
-        step_units = self._exchange_quantity_units(total_exchange_qty, step)
-        if step_units <= 0:
-            return []
-
-        desired_units: list[Decimal] = []
-        for _, _, quantity in desired_orders:
-            exchange_qty = quantity / contract_multiplier
-            desired_units.append(exchange_qty / step)
-
-        floor_units = [
-            int(value.to_integral_value(rounding=ROUND_DOWN))
-            for value in desired_units
-        ]
-        remaining_units = step_units - sum(floor_units)
-        remainders = [
-            (desired_units[idx] - Decimal(floor_units[idx]), idx)
-            for idx in range(len(desired_units))
-        ]
-        for _, idx in sorted(remainders, key=lambda item: (-item[0], item[1])):
-            if remaining_units <= 0:
-                break
-            floor_units[idx] += 1
-            remaining_units -= 1
-
-        min_units = max(1, self._exchange_quantity_units_ceiling(min_contract_qty, step))
-        if min_units > 1:
-            pooled_units = 0
-            for idx, units in enumerate(floor_units):
-                if 0 < units < min_units:
-                    pooled_units += units
-                    floor_units[idx] = 0
-            if pooled_units > 0:
-                target_idx = next((idx for idx, units in enumerate(floor_units) if units > 0), 0)
-                floor_units[target_idx] += pooled_units
+        pending_targets = list(
+            enumerate(
+                trade.take_profits[trade.targets_hit :],
+                start=trade.targets_hit,
+            )
+        )
+        desired_quantity_by_target: dict[int, Decimal] = {}
+        for absolute_index, _, quantity in desired_orders:
+            desired_quantity_by_target[absolute_index] = quantity / contract_multiplier
+        capacity_plan = plan_maximum_take_profit_orders(
+            candidates=[
+                TakeProfitCandidate(
+                    target_index=absolute_index,
+                    price=tp_price,
+                    preferred_contract_quantity=desired_quantity_by_target.get(
+                        absolute_index,
+                        Decimal("0"),
+                    ),
+                )
+                for absolute_index, tp_price in pending_targets
+            ],
+            total_contract_quantity=total_exchange_qty,
+            minimum_contract_quantity=min_contract_qty,
+            contract_step_size=step,
+        )
 
         normalized_orders: list[tuple[int, Decimal, Decimal]] = []
-        for (absolute_index, tp_price, _), units in zip(desired_orders, floor_units, strict=False):
-            if units <= 0:
-                continue
-            exchange_qty = Decimal(units) * step
-            if min_contract_qty > 0 and exchange_qty < min_contract_qty:
-                continue
-            asset_qty = _from_exchange_contract_quantity(exchange_qty, spec).quantize(
-                Decimal("0.00000001")
-            )
+        for order in capacity_plan.orders:
+            asset_qty = _from_exchange_contract_quantity(
+                order.contract_quantity,
+                spec,
+            ).quantize(Decimal("0.00000001"))
             if asset_qty <= 0:
-                continue
-            normalized_orders.append((absolute_index, tp_price, asset_qty))
-
-        if normalized_orders:
-            return normalized_orders
-        first_index, first_price, _ = desired_orders[0]
-        return [(first_index, first_price, trade.remaining_quantity)]
+                raise AssertionError("TP planner produced a non-positive asset quantity")
+            normalized_orders.append((order.target_index, order.price, asset_qty))
+        return normalized_orders
 
     @staticmethod
     def _floor_exchange_contract_quantity(quantity: Decimal, spec: Any) -> Decimal:
@@ -5308,13 +4977,9 @@ class LiveTradingEngine:
         if contract_multiplier <= 0:
             return quantity
         exchange_qty = quantity / contract_multiplier
-        step = LiveTradingEngine._coerce_decimal(
-            getattr(spec, "contract_step_size", Decimal("0"))
-        )
+        step = LiveTradingEngine._coerce_decimal(getattr(spec, "contract_step_size", Decimal("0")))
         if step > 0:
-            exchange_qty = (exchange_qty / step).to_integral_value(
-                rounding=ROUND_DOWN
-            ) * step
+            exchange_qty = (exchange_qty / step).to_integral_value(rounding=ROUND_DOWN) * step
         return max(exchange_qty, Decimal("0"))
 
     @staticmethod
@@ -5350,7 +5015,8 @@ class LiveTradingEngine:
         assert self._futures_client is not None
         executed_order_id = protection_order.executed_order_id or protection_order.order_id
         matching_fills = [
-            fill for fill in symbol_user_trades
+            fill
+            for fill in symbol_user_trades
             if fill.order_id in {executed_order_id, protection_order.order_id}
         ]
         fills = self._unprocessed_exchange_fills(trade, matching_fills)
@@ -5376,9 +5042,7 @@ class LiveTradingEngine:
             )
         weighted_notional = sum((fill.price * fill.qty for fill in fills), Decimal("0"))
         avg_price = (
-            weighted_notional / executed_contract_qty
-            if executed_contract_qty > 0
-            else Decimal("0")
+            weighted_notional / executed_contract_qty if executed_contract_qty > 0 else Decimal("0")
         )
         realized_pnl = sum((fill.realized_pnl for fill in fills), Decimal("0"))
         fees = sum((fill.commission for fill in fills), Decimal("0"))
@@ -5394,9 +5058,7 @@ class LiveTradingEngine:
             message_id=0,
             channel_id=trade.channel_id,
             channel_label=trade.channel_label,
-            message_preview=(
-                "exchange take-profit fill" if is_tp else "exchange stop-loss fill"
-            ),
+            message_preview=("exchange take-profit fill" if is_tp else "exchange stop-loss fill"),
             message_date=_utc_now(),
             action="partial_close" if is_tp else "closed",
             notes=[
@@ -5470,10 +5132,12 @@ class LiveTradingEngine:
         self._open_trades.pop(trade.signal_id, None)
         self.store.save_trade(trade)
         self._emit_trade_update(trade)
-        log.info(
-            "Closed trade %s %s pnl=%.4f reason=%s",
-            trade.trade_id, trade.symbol,
-            float(trade.realized_pnl), trade.close_reason,
+        self._log_event(
+            logging.INFO,
+            "live_trading.trade_closed",
+            realized_pnl=str(trade.realized_pnl),
+            close_reason=trade.close_reason,
+            **self._trade_log_fields(trade),
         )
 
     def _channel_label(self, channel_id: str) -> str:
@@ -5506,10 +5170,12 @@ class LiveTradingEngine:
         self.store.save_message_trace(self.session.session_id, trace)
         if self.notifier:
             try:
-                self.notifier({
-                    "type": "live_message",
-                    "message": trace.model_dump(mode="json"),
-                })
+                self.notifier(
+                    {
+                        "type": "live_message",
+                        "message": trace.model_dump(mode="json"),
+                    }
+                )
             except Exception:
                 pass
 
@@ -5532,10 +5198,12 @@ class LiveTradingEngine:
                 self.store.save_message_trace(self.session.session_id, trace)
                 if self.notifier:
                     try:
-                        self.notifier({
-                            "type": "live_message",
-                            "message": trace.model_dump(mode="json"),
-                        })
+                        self.notifier(
+                            {
+                                "type": "live_message",
+                                "message": trace.model_dump(mode="json"),
+                            }
+                        )
                     except Exception:
                         pass
                 return
@@ -5544,10 +5212,12 @@ class LiveTradingEngine:
         if not self.notifier:
             return
         try:
-            self.notifier({
-                "type": "live_session",
-                "session": self.session.model_dump(mode="json"),
-            })
+            self.notifier(
+                {
+                    "type": "live_session",
+                    "session": self.session.model_dump(mode="json"),
+                }
+            )
         except Exception:
             pass
 
@@ -5555,10 +5225,12 @@ class LiveTradingEngine:
         if not self.notifier:
             return
         try:
-            self.notifier({
-                "type": "live_trade",
-                "trade": trade.model_dump(mode="json"),
-            })
+            self.notifier(
+                {
+                    "type": "live_trade",
+                    "trade": trade.model_dump(mode="json"),
+                }
+            )
         except Exception:
             pass
 
@@ -5585,8 +5257,7 @@ class LiveTradingEngine:
 
         now = _utc_now()
         entry_expired = (
-            trade.entry_order_expires_at is not None
-            and now >= trade.entry_order_expires_at
+            trade.entry_order_expires_at is not None and now >= trade.entry_order_expires_at
         )
         candidates = [*open_orders, *history_orders]
         order = next(
@@ -5602,9 +5273,7 @@ class LiveTradingEngine:
                 order = await self._futures_client.get_order(
                     symbol=trade.symbol,
                     order_id=trade.entry_order_id,
-                    order_type=(
-                        "STOP" if trade.entry_order_type == "STOP" else None
-                    ),
+                    order_type=("STOP" if trade.entry_order_type == "STOP" else None),
                     use_demo_symbol=self._use_demo_exchange_symbol(),
                 )
             except Exception as exc:
@@ -5628,14 +5297,10 @@ class LiveTradingEngine:
                 await self._finalize_waiting_entry_without_fill(
                     trade=trade,
                     reason=(
-                        "entry_order_expired"
-                        if entry_expired
-                        else f"entry_order_{status.lower()}"
+                        "entry_order_expired" if entry_expired else f"entry_order_{status.lower()}"
                     ),
                     signal_status=(
-                        SignalStatus.EXPIRED
-                        if entry_expired
-                        else SignalStatus.CANCELLED
+                        SignalStatus.EXPIRED if entry_expired else SignalStatus.CANCELLED
                     ),
                 )
                 return False
@@ -5661,9 +5326,7 @@ class LiveTradingEngine:
             await self._finalize_waiting_entry_without_fill(
                 trade=trade,
                 reason=(
-                    "entry_order_expired"
-                    if entry_expired
-                    else f"entry_order_{status.lower()}"
+                    "entry_order_expired" if entry_expired else f"entry_order_{status.lower()}"
                 ),
                 signal_status=(
                     SignalStatus.EXPIRED
@@ -5704,9 +5367,7 @@ class LiveTradingEngine:
         if executed_order_id:
             fill_order_ids.add(executed_order_id)
         fills = [
-            item
-            for item in symbol_user_trades
-            if getattr(item, "order_id", None) in fill_order_ids
+            item for item in symbol_user_trades if getattr(item, "order_id", None) in fill_order_ids
         ]
         try:
             await self._activate_filled_entry(
@@ -5787,17 +5448,13 @@ class LiveTradingEngine:
             await self._futures_client.cancel_order(
                 symbol=trade.symbol,
                 order_id=trade.entry_order_id,
-                order_type=(
-                    "STOP" if trade.entry_order_type == "STOP" else None
-                ),
+                order_type=("STOP" if trade.entry_order_type == "STOP" else None),
                 use_demo_symbol=self._use_demo_exchange_symbol(),
             )
             order = await self._futures_client.get_order(
                 symbol=trade.symbol,
                 order_id=trade.entry_order_id,
-                order_type=(
-                    "STOP" if trade.entry_order_type == "STOP" else None
-                ),
+                order_type=("STOP" if trade.entry_order_type == "STOP" else None),
                 use_demo_symbol=self._use_demo_exchange_symbol(),
             )
         except Exception as exc:
@@ -5844,11 +5501,7 @@ class LiveTradingEngine:
         await self._activate_filled_entry(
             trade=trade,
             confirmed_order=order,
-            fills=[
-                item
-                for item in fills
-                if getattr(item, "order_id", None) in fill_order_ids
-            ],
+            fills=[item for item in fills if getattr(item, "order_id", None) in fill_order_ids],
             spec=spec,
         )
         self._log_event(
@@ -5876,9 +5529,7 @@ class LiveTradingEngine:
             reason="replace_pending_entry",
         )
         if not order_was_unfilled:
-            return (
-                "Original entry filled during replacement; no duplicate order was submitted"
-            )
+            return "Original entry filled during replacement; no duplicate order was submitted"
 
         previous_price = trade.entry_price
         margin_budget = trade.margin
@@ -5901,9 +5552,7 @@ class LiveTradingEngine:
             )
         if margin_budget > Decimal("0"):
             trade.quantity = (
-                margin_budget
-                * Decimal(str(max(trade.leverage, 1)))
-                / trade.entry_price
+                margin_budget * Decimal(str(max(trade.leverage, 1))) / trade.entry_price
             ).quantize(Decimal("0.00000001"))
             trade.remaining_quantity = trade.quantity
         trade.entry_order_id = None
@@ -5936,9 +5585,7 @@ class LiveTradingEngine:
                 f"Pending {trade.entry_order_type} entry replaced "
                 f"{previous_price} → {trade.entry_price}"
             )
-        return (
-            f"Replacement entry filled at {trade.entry_price}; protection activated"
-        )
+        return f"Replacement entry filled at {trade.entry_price}; protection activated"
 
     async def _finalize_waiting_entry_without_fill(
         self,
@@ -5947,9 +5594,7 @@ class LiveTradingEngine:
         reason: str,
         signal_status: SignalStatus,
     ) -> None:
-        trade.status = (
-            "expired" if signal_status is SignalStatus.EXPIRED else "cancelled"
-        )
+        trade.status = "expired" if signal_status is SignalStatus.EXPIRED else "cancelled"
         trade.entry_order_status = signal_status.value.upper()
         trade.close_reason = reason
         trade.closed_at = _utc_now()
@@ -5998,9 +5643,7 @@ class LiveTradingEngine:
             return None
         if timestamp_ms <= 0:
             return None
-        return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
-            milliseconds=timestamp_ms
-        )
+        return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=timestamp_ms)
 
     @staticmethod
     def _matching_take_profit_index(
@@ -6012,9 +5655,7 @@ class LiveTradingEngine:
         tick_size: Decimal,
     ) -> int | None:
         tracked_indexes = {
-            item.order_id: item.target_index
-            for item in trade.tp_order_plan
-            if item.order_id
+            item.order_id: item.target_index for item in trade.tp_order_plan if item.order_id
         }
         if order_id in tracked_indexes:
             return tracked_indexes[order_id]
@@ -6043,11 +5684,7 @@ class LiveTradingEngine:
         """Apply close fills before treating a missing position as an unknown close."""
         if self._futures_client is None:
             return False
-        cutoff = self._as_utc(
-            trade.entry_filled_at
-            or trade.entry_submitted_at
-            or trade.opened_at
-        )
+        cutoff = self._as_utc(trade.entry_filled_at or trade.entry_submitted_at or trade.opened_at)
         processed_by_other_trades = {
             fill_id
             for stored_trade in self.store.list_trades(
@@ -6064,10 +5701,7 @@ class LiveTradingEngine:
             if not self._is_close_fill_for_trade(trade, fill):
                 continue
             fill_time = self._exchange_fill_datetime(fill)
-            if (
-                fill_time is not None
-                and fill_time < cutoff - timedelta(seconds=5)
-            ):
+            if fill_time is not None and fill_time < cutoff - timedelta(seconds=5):
                 continue
             eligible.append(fill)
         if not eligible:
@@ -6113,22 +5747,26 @@ class LiveTradingEngine:
                 Decimal("0"),
             )
             average_price = weighted_notional / contract_quantity
-            realized_pnl = sum(
-                (
-                    self._coerce_decimal(
-                        getattr(fill, "realized_pnl", Decimal("0"))
-                    )
-                    for fill in fills
-                ),
-                Decimal("0"),
-            ) * applied_ratio
-            fees = sum(
-                (
-                    self._coerce_decimal(getattr(fill, "commission", Decimal("0")))
-                    for fill in fills
-                ),
-                Decimal("0"),
-            ) * applied_ratio
+            realized_pnl = (
+                sum(
+                    (
+                        self._coerce_decimal(getattr(fill, "realized_pnl", Decimal("0")))
+                        for fill in fills
+                    ),
+                    Decimal("0"),
+                )
+                * applied_ratio
+            )
+            fees = (
+                sum(
+                    (
+                        self._coerce_decimal(getattr(fill, "commission", Decimal("0")))
+                        for fill in fills
+                    ),
+                    Decimal("0"),
+                )
+                * applied_ratio
+            )
             order_id = str(getattr(fills[0], "order_id", "") or group_key)
             order_type = str(getattr(fills[0], "order_type", "") or "")
             target_index = self._matching_take_profit_index(
@@ -6139,11 +5777,7 @@ class LiveTradingEngine:
                 tick_size=tick_size,
             )
             is_take_profit = target_index is not None
-            reason = (
-                f"tp{target_index + 1}_hit"
-                if target_index is not None
-                else "sl_hit"
-            )
+            reason = f"tp{target_index + 1}_hit" if target_index is not None else "sl_hit"
             attribution = MessageAttribution(
                 message_id=0,
                 channel_id=trade.channel_id,
@@ -6209,9 +5843,7 @@ class LiveTradingEngine:
         if self._futures_client is None:
             return
         use_demo_symbol = self._use_demo_exchange_symbol()
-        positions = await self._futures_client.get_open_positions(
-            use_demo_symbol=use_demo_symbol
-        )
+        positions = await self._futures_client.get_open_positions(use_demo_symbol=use_demo_symbol)
         order_symbols = {trade.symbol for trade in self._open_trades.values() if trade.symbol}
         recent_orders: list[LiveExchangeOrderSnapshot] = []
         by_symbol_orders: dict[str, list[LiveExchangeOrderSnapshot]] = {}
@@ -6393,12 +6025,15 @@ class LiveTradingEngine:
             created_from_message_id=state.created_from_message_id,
             related_message_ids=list(state.related_message_ids),
             status=state.status.value,
-            status_group="active" if state.status in {
+            status_group="active"
+            if state.status
+            in {
                 SignalStatus.PENDING_CONSOLIDATION,
                 SignalStatus.ORDER_PLANNED,
                 SignalStatus.ORDER_SUBMITTED,
                 SignalStatus.OPEN,
-            } else "inactive",
+            }
+            else "inactive",
             symbol=parsed.symbol if parsed else None,
             exchange_symbol=trade.exchange_symbol if trade is not None else None,
             side=parsed.side.value if parsed else None,
@@ -6411,9 +6046,7 @@ class LiveTradingEngine:
             entry_high=parsed.entry_high if parsed else None,
             entry_zone=entry_zone,
             stop_loss=(
-                trade.stop_loss
-                if trade is not None
-                else (parsed.stop_loss if parsed else None)
+                trade.stop_loss if trade is not None else (parsed.stop_loss if parsed else None)
             ),
             take_profits=(
                 list(trade.take_profits)
@@ -6500,6 +6133,7 @@ class LiveTradingEngine:
 
 # ── Factory ────────────────────────────────────────────────────────────────
 
+
 def build_engine_from_config(
     *,
     config: LiveSessionConfig,
@@ -6509,10 +6143,7 @@ def build_engine_from_config(
     telegram_client: TelegramClientInterface | None = None,
 ) -> tuple[LiveSession, LiveTradingEngine]:
     session_id = f"ls_{uuid.uuid4().hex[:12]}"
-    labels = [
-        f"@{ch.rsplit('/', 1)[-1]}" if "/" in ch else ch
-        for ch in config.channels
-    ]
+    labels = [f"@{ch.rsplit('/', 1)[-1]}" if "/" in ch else ch for ch in config.channels]
     session = LiveSession(
         session_id=session_id,
         channels=config.channels,
