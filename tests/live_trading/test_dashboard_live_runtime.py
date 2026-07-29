@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import tempfile
 from datetime import datetime, timezone
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from triak_trade.dashboard.live_runtime import DashboardLiveCoordinator
 from triak_trade.live_trading.models import (
@@ -104,6 +105,39 @@ class TestDashboardLiveReadiness:
 
 
 class TestDashboardLiveCoordinatorState:
+    def test_refresh_exchange_state_uses_active_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+            engine = MagicMock()
+            engine._loop = None
+            engine.refresh_exchange_state = AsyncMock(return_value=True)
+            coord._engines["ls_sync"] = engine
+
+            refreshed = asyncio.run(coord.refresh_exchange_state("ls_sync"))
+
+            assert refreshed is True
+            engine.refresh_exchange_state.assert_awaited_once()
+
+    def test_refresh_active_exchange_states_refreshes_every_running_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+            first = MagicMock()
+            first._loop = None
+            first.refresh_exchange_state = AsyncMock(return_value=True)
+            second = MagicMock()
+            second._loop = None
+            second.refresh_exchange_state = AsyncMock(return_value=True)
+            coord._engines = {"ls_one": first, "ls_two": second}
+
+            asyncio.run(coord.refresh_active_exchange_states())
+
+            first.refresh_exchange_state.assert_awaited_once()
+            second.refresh_exchange_state.assert_awaited_once()
+
     def test_is_running_false_when_no_engine(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
@@ -226,10 +260,34 @@ class TestDashboardLiveCoordinatorState:
             else:
                 raise AssertionError("Expected ValueError")
 
+    def test_start_session_requires_ai_for_demo_exchange_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings(live_enabled=True)
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER = True
+            settings.AI_GATEWAY_ENABLED = True
+            settings.AI_CLASSIFIER_ENABLED = True
+            coord = DashboardLiveCoordinator(settings=settings)
+
+            try:
+                coord.start_session(
+                    LiveSessionConfig(
+                        channels=["https://t.me/demo"],
+                        trading_mode="demo",
+                        use_ai=False,
+                    )
+                )
+            except ValueError as exc:
+                assert "requires use_ai=true" in str(exc)
+            else:
+                raise AssertionError("Expected ValueError")
+
     def test_start_session_allows_live_mode_when_flag_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=True, live_mode_enabled=True)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.AI_GATEWAY_ENABLED = True
+            settings.AI_CLASSIFIER_ENABLED = True
             coord = DashboardLiveCoordinator(settings=settings)
             fake_session = LiveSession(
                 session_id="ls_live_enabled",
@@ -267,6 +325,8 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=True)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.AI_GATEWAY_ENABLED = True
+            settings.AI_CLASSIFIER_ENABLED = True
             coord = DashboardLiveCoordinator(settings=settings)
             fake_session = LiveSession(
                 session_id="ls_shared_client",
@@ -367,6 +427,35 @@ class TestDashboardLiveCoordinatorState:
                 realized_pnl=Decimal("8"),
             )
             coord.store.save_trade(closed_trade)
+            stopped_session = LiveSession(
+                session_id="ls_stopped",
+                channels=["https://t.me/stopped"],
+                channel_labels=["@stopped"],
+                trading_mode="live",
+                initial_balance=Decimal("0"),
+                risk_per_trade_pct=Decimal("95"),
+                strategy_key="tp_trailing_risk_managed",
+                use_ai=False,
+                interval="1m",
+                status="stopped",
+            )
+            coord.store.save_session(stopped_session)
+            coord.store.save_trade(
+                LiveTrade(
+                    trade_id="trade_stale_stopped",
+                    session_id="ls_stopped",
+                    signal_id="sig-stale-stopped",
+                    channel_id="@stopped",
+                    channel_input="https://t.me/stopped",
+                    channel_label="@stopped",
+                    symbol="SOLUSDT",
+                    side="long",
+                    leverage=3,
+                    entry_price=Decimal("100"),
+                    quantity=Decimal("1"),
+                    status="open",
+                )
+            )
             coord.store.save_message_trace(
                 "ls_one",
                 LiveMessageTrace(
@@ -382,6 +471,8 @@ class TestDashboardLiveCoordinatorState:
             overview = coord.get_overview()
             assert len(overview.active_sessions) == 2
             assert len(overview.open_trades) == 1
+            assert overview.open_trades[0].trade_id == "trade_open"
+            assert overview.totals["open_positions"] == 1
             assert overview.recent_closed_trades[0].trade_id == "trade_closed"
             assert overview.totals["messages_processed"] == 10
             assert overview.totals["realized_pnl"] == "10.0"

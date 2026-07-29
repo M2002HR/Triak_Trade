@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from triak_trade.backtesting.real_runner import RealBacktestMessageTrace
 from triak_trade.config.settings import Settings
@@ -834,6 +835,21 @@ def test_live_overview_endpoint_returns_aggregate_payload(tmp_path: Path) -> Non
     payload = response.json()["overview"]
     assert payload["recent_sessions"][0]["session_id"] == "ls_one"
     assert payload["totals"]["messages_processed"] == 4
+
+
+def test_live_overview_refreshes_active_exchange_states(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+    refresh = AsyncMock()
+    monkeypatch.setattr(live_coordinator, "refresh_active_exchange_states", refresh)
+
+    response = client_obj.get("/api/live/overview", headers=headers())
+
+    assert response.status_code == 200
+    refresh.assert_awaited_once()
 
 
 def test_live_session_detail_endpoint_is_session_specific(tmp_path: Path, monkeypatch) -> None:

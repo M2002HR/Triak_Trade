@@ -678,6 +678,7 @@ def build_router(
     @router.get("/api/live/overview")
     async def get_live_overview(request: Request) -> JSONResponse:
         auth.require_api(request)
+        await live_coordinator.refresh_active_exchange_states()
         overview = live_coordinator.get_overview()
         return JSONResponse({"overview": overview.model_dump(mode="json")})
 
@@ -765,6 +766,7 @@ def build_router(
     @router.get("/api/live/sessions/{session_id}")
     async def get_live_session_detail(request: Request, session_id: str) -> JSONResponse:
         auth.require_api(request)
+        await live_coordinator.refresh_exchange_state(session_id)
         detail = live_coordinator.get_session_detail(session_id)
         if detail is None:
             return JSONResponse({"detail": "session_not_found"}, status_code=404)
@@ -811,6 +813,11 @@ def build_router(
     @router.get("/api/live/snapshot")
     async def get_live_snapshot(request: Request, session_id: str | None = None) -> JSONResponse:
         auth.require_api(request)
+        target_session_id = session_id or live_coordinator.get_current_session()
+        if isinstance(target_session_id, str):
+            await live_coordinator.refresh_exchange_state(target_session_id)
+        elif target_session_id is not None:
+            await live_coordinator.refresh_exchange_state(target_session_id.session_id)
         snap = live_coordinator.get_snapshot(session_id=session_id)
         if snap is None:
             return JSONResponse({"snapshot": None})

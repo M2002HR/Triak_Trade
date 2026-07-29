@@ -226,14 +226,16 @@ class DashboardLiveCoordinator:
             raise ValueError(
                 "Live mode requires LIVE_TRADING_LIVE_MODE_ENABLED=true in root .env.local"
             )
-        if (
-            config.trading_mode == "live"
-            and self.settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER
-            and not readiness.ai_ready
-        ):
-            raise ValueError("Live mode requires AI gateway and AI classifier to be enabled.")
-        if config.trading_mode == "live" and not config.use_ai:
-            raise ValueError("Live mode requires use_ai=true.")
+        ai_required = (
+            config.trading_mode in {"demo", "live"}
+            or self.settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER
+        )
+        if ai_required and not readiness.ai_ready:
+            raise ValueError(
+                "Live trading requires AI gateway and AI classifier to be enabled."
+            )
+        if ai_required and not config.use_ai:
+            raise ValueError("Live trading requires use_ai=true.")
         if config.risk_per_trade_pct > self.settings.LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT:
             raise ValueError(
                 "risk_per_trade_pct exceeds LIVE_TRADING_HARD_MAX_RISK_FACTOR_PCT="
@@ -344,6 +346,55 @@ class DashboardLiveCoordinator:
             account_info=session.account_info,
         )
 
+    async def refresh_exchange_state(self, session_id: str) -> bool:
+        """Run one Toobit state refresh on the owning live-engine event loop."""
+
+        with self._lock:
+            engine = self._engines.get(session_id)
+        if engine is None:
+            return False
+
+        engine_loop = engine._loop
+        if engine_loop is None or engine_loop.is_closed():
+            return await engine.refresh_exchange_state()
+        if engine_loop is asyncio.get_running_loop():
+            return await engine.refresh_exchange_state()
+
+        future = asyncio.run_coroutine_threadsafe(
+            engine.refresh_exchange_state(),
+            engine_loop,
+        )
+        try:
+            refreshed = await asyncio.wrap_future(future)
+        except Exception as exc:
+            log_event(
+                log,
+                logging.WARNING,
+                "dashboard.live_exchange_refresh_failed",
+                session_id=session_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return False
+        log_event(
+            log,
+            logging.INFO,
+            "dashboard.live_exchange_refreshed",
+            session_id=session_id,
+            refreshed=refreshed,
+        )
+        return refreshed
+
+    async def refresh_active_exchange_states(self) -> None:
+        """Refresh all running sessions before rendering aggregate positions."""
+
+        with self._lock:
+            session_ids = list(self._engines)
+        if session_ids:
+            await asyncio.gather(
+                *(self.refresh_exchange_state(session_id) for session_id in session_ids)
+            )
+
     def get_overview(
         self,
         *,
@@ -355,11 +406,17 @@ class DashboardLiveCoordinator:
         active_sessions = [
             item for item in recent_sessions if item.status in {"starting", "running"}
         ]
+        active_session_ids = {item.session_id for item in active_sessions}
         open_trades: list[LiveTrade] = []
         recent_closed_trades: list[LiveTrade] = []
         recent_messages: list[LiveMessageTrace] = []
         for session in recent_sessions:
-            open_trades.extend(self.store.list_open_trades(session.session_id))
+            # Aggregate Positions is an operational, exchange-synchronised
+            # view. A stopped session has no worker to refresh its Toobit
+            # state, so its retained records belong to historical session
+            # detail rather than the current open-position total.
+            if session.session_id in active_session_ids:
+                open_trades.extend(self.store.list_open_trades(session.session_id))
             recent_closed_trades.extend(
                 self.store.list_closed_trades(session.session_id, limit=12)
             )
