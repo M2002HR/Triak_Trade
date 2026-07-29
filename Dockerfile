@@ -38,8 +38,9 @@ COPY alembic ./alembic
 COPY scripts ./scripts
 COPY config ./config
 
-RUN pip install --no-cache-dir --no-deps --no-build-isolation . \
-    && python3 -c "import fastapi, httpx, redis, uvicorn, yaml; print('python_deps_ok')"
+RUN rm -rf build \
+    && pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && python3 -c "from triak_trade import __version__; import fastapi, httpx, redis, uvicorn, yaml; print('python_deps_ok', __version__)"
 
 RUN mkdir -p /app/runtime /app/.sessions
 
