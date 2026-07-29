@@ -7,7 +7,7 @@ import json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Literal, cast
 
 import httpx
@@ -67,6 +67,10 @@ from triak_trade.exchange.toobit.client import ToobitClient
 from triak_trade.exchange.toobit.demo_execution import DemoExecutionAdapter
 from triak_trade.exchange.toobit.errors import ToobitError
 from triak_trade.exchange.toobit.spot import ToobitSpotClient
+from triak_trade.live_trading.take_profit_planner import (
+    TakeProfitCandidate,
+    plan_maximum_take_profit_orders,
+)
 from triak_trade.market_data.binance_public import BinancePublicFuturesProvider
 from triak_trade.market_data.toobit import ToobitMarketDataProvider
 from triak_trade.observability.formatters import format_processing_audit_for_telegram
@@ -95,6 +99,29 @@ def _load_settings() -> Settings:
 
 def _dump_json(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def _parse_non_negative_decimal_option(
+    value: str,
+    *,
+    option_name: str,
+    allow_zero: bool,
+) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise typer.BadParameter(
+            f"{option_name} must be a decimal number",
+            param_hint=option_name,
+        ) from exc
+    minimum_is_valid = parsed >= Decimal("0") if allow_zero else parsed > Decimal("0")
+    if not parsed.is_finite() or not minimum_is_valid:
+        comparison = "non-negative" if allow_zero else "positive"
+        raise typer.BadParameter(
+            f"{option_name} must be a finite {comparison} decimal",
+            param_hint=option_name,
+        )
+    return parsed
 
 
 def _build_toobit_client(settings: Settings) -> ToobitClient:
@@ -211,6 +238,71 @@ def db_check_cmd() -> None:
     settings = _load_settings()
     engine = build_engine_from_settings(settings)
     typer.echo(f"DB engine configured (dialect={engine.dialect.name})")
+
+
+@app.command("tp-capacity-dry-run")
+def tp_capacity_dry_run_cmd(
+    quantity: str = typer.Option("350", help="Fixed contract quantity."),
+    minimum_quantity: str = typer.Option(
+        "100",
+        help="Minimum contract quantity per TP order.",
+    ),
+    step_size: str = typer.Option("1", help="Exchange contract quantity step."),
+    target_count: int = typer.Option(8, min=1, help="Available logical targets."),
+) -> None:
+    """Plan the maximum safe TP count without contacting an exchange."""
+    fixed_quantity = _parse_non_negative_decimal_option(
+        quantity,
+        option_name="--quantity",
+        allow_zero=False,
+    )
+    minimum_contract_quantity = _parse_non_negative_decimal_option(
+        minimum_quantity,
+        option_name="--minimum-quantity",
+        allow_zero=True,
+    )
+    contract_step_size = _parse_non_negative_decimal_option(
+        step_size,
+        option_name="--step-size",
+        allow_zero=False,
+    )
+    preferred_quantity = fixed_quantity / Decimal(target_count)
+    plan = plan_maximum_take_profit_orders(
+        candidates=[
+            TakeProfitCandidate(
+                target_index=index,
+                price=Decimal("1") + (Decimal(index) / Decimal("100")),
+                preferred_contract_quantity=preferred_quantity,
+            )
+            for index in range(target_count)
+        ],
+        total_contract_quantity=fixed_quantity,
+        minimum_contract_quantity=minimum_contract_quantity,
+        contract_step_size=contract_step_size,
+    )
+    typer.echo(
+        _dump_json(
+            {
+                "allocated_quantity": str(plan.allocated_contract_quantity),
+                "available_target_count": plan.original_target_count,
+                "fixed_quantity": str(fixed_quantity),
+                "orders": [
+                    {
+                        "quantity": str(order.contract_quantity),
+                        "target_index": order.target_index,
+                    }
+                    for order in plan.orders
+                ],
+                "selected_target_count": plan.target_count,
+                "unallocated_quantity": str(
+                    fixed_quantity - plan.allocated_contract_quantity
+                ),
+                "unexecutable_step_remainder": str(
+                    fixed_quantity - plan.total_contract_quantity
+                ),
+            }
+        )
+    )
 
 
 @app.command("parse-message")

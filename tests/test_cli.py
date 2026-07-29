@@ -32,6 +32,37 @@ def test_cli_db_check() -> None:
     assert "DB engine configured" in result.stdout
 
 
+def test_cli_tp_capacity_dry_run_uses_maximum_safe_target_count() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "tp-capacity-dry-run",
+            "--quantity",
+            "350",
+            "--minimum-quantity",
+            "100",
+            "--target-count",
+            "8",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"fixed_quantity": "350"' in result.stdout
+    assert '"selected_target_count": 3' in result.stdout
+    assert '"unallocated_quantity": "0"' in result.stdout
+    assert result.stdout.count('"target_index"') == 3
+
+
+def test_cli_tp_capacity_dry_run_rejects_invalid_step() -> None:
+    result = runner.invoke(
+        app,
+        ["tp-capacity-dry-run", "--step-size", "0"],
+    )
+
+    assert result.exit_code != 0
+    assert "--step-size must be a finite positive decimal" in result.output
+
+
 def test_cli_parse_message_valid() -> None:
     result = runner.invoke(
         app,
