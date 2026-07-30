@@ -911,11 +911,81 @@ class ToobitFuturesClient:
         )
         return [FuturesOrder(item) for item in (items if isinstance(items, list) else [])]
 
-    async def cancel_algo_order(self, order_id: str) -> dict[str, Any]:
+    async def place_owned_stop_market(
+        self,
+        *,
+        symbol: str,
+        position_side: str,
+        stop_price: Decimal,
+        quantity: Decimal,
+        client_order_id: str,
+        trigger_by: str = "CONTRACT_PRICE",
+        use_demo_symbol: bool = False,
+    ) -> FuturesOrder:
+        """Place a quantity-scoped v2 stop with explicit logical ownership."""
+
+        spec = await self._require_order_spec(symbol)
+        normalized_position_side = position_side.strip().upper()
+        if normalized_position_side not in {"LONG", "SHORT"}:
+            raise ToobitAPIError("position_side must be LONG or SHORT")
+        exchange_quantity = _to_exchange_contract_quantity(quantity, spec)
+        normalized_stop_price = _normalize_stop_loss_price(
+            stop_price,
+            spec,
+            position_side=normalized_position_side,
+        )
+        params: dict[str, object] = {
+            "side": "SELL" if normalized_position_side == "LONG" else "BUY",
+            "positionSide": normalized_position_side,
+            "type": "STOP_MARKET",
+            "stopPrice": _fmt_decimal(normalized_stop_price),
+            "newClientOrderId": client_order_id,
+            "quantity": _fmt_decimal(exchange_quantity),
+            "triggerBy": trigger_by.strip().upper(),
+        }
+        payload = await self._private_symbol_request(
+            "POST",
+            self.futures_v2_algo_order_path,
+            symbol=symbol,
+            use_demo_symbol=use_demo_symbol,
+            params=params,
+        )
+        return FuturesOrder(payload)
+
+    async def get_algo_order(
+        self,
+        *,
+        order_id: str | None = None,
+        orig_client_order_id: str | None = None,
+        use_demo_symbol: bool = False,
+    ) -> FuturesOrder:
+        params: dict[str, object] = {}
+        if order_id:
+            params["orderId"] = order_id
+        if orig_client_order_id:
+            params["origClientOrderId"] = orig_client_order_id
+        if not params:
+            raise ToobitAPIError("order_id or orig_client_order_id is required")
+        params.update(_demo_private_context_params(use_demo_symbol))
+        payload = await self._client.signed_request(
+            "GET",
+            self.futures_v2_algo_order_path,
+            params=params,
+        )
+        return FuturesOrder(payload)
+
+    async def cancel_algo_order(
+        self,
+        order_id: str,
+        *,
+        use_demo_symbol: bool = False,
+    ) -> dict[str, Any]:
+        params: dict[str, object] = {"orderId": order_id}
+        params.update(_demo_private_context_params(use_demo_symbol))
         payload = await self._client.signed_request(
             "DELETE",
             self.futures_v2_algo_order_path,
-            params={"orderId": order_id},
+            params=params,
         )
         return payload if isinstance(payload, dict) else {}
 

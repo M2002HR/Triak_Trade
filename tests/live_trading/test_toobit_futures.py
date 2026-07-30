@@ -808,6 +808,68 @@ class TestToobitFuturesClientAPI:
         assert params["business_type"] == "VIRTUAL"
 
     @pytest.mark.asyncio
+    async def test_place_owned_stop_market_uses_v2_position_side_and_client_id(self) -> None:
+        client = _make_client(
+            signed_response={
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "orderId": "sl-owned-1",
+                    "clientOrderId": "triak_sl_trade_1",
+                    "symbol": "BTC-SWAP-USDT",
+                    "side": "SELL",
+                    "positionSide": "LONG",
+                    "type": "STOP_MARKET",
+                    "origQty": "10",
+                    "stopPrice": "49000",
+                    "status": "ORDER_NEW",
+                },
+            }
+        )
+
+        order = await client.place_owned_stop_market(
+            symbol="BTCUSDT",
+            position_side="LONG",
+            stop_price=Decimal("49000.09"),
+            quantity=Decimal("0.01"),
+            client_order_id="triak_sl_trade_1",
+        )
+
+        assert order.order_id == "sl-owned-1"
+        assert order.client_order_id == "triak_sl_trade_1"
+        call = client._client.signed_request.call_args
+        assert call.args[:2] == ("POST", "/api/v2/futures/algo-order")
+        params = call.kwargs["params"]
+        assert params["symbol"] == "BTC-SWAP-USDT"
+        assert params["side"] == "SELL"
+        assert params["positionSide"] == "LONG"
+        assert params["type"] == "STOP_MARKET"
+        assert params["stopPrice"] == "49000.1"
+        assert params["quantity"] == "10"
+        assert params["newClientOrderId"] == "triak_sl_trade_1"
+
+    @pytest.mark.asyncio
+    async def test_get_algo_order_can_resolve_owned_stop_by_client_id(self) -> None:
+        client = _make_client(
+            signed_response={
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "orderId": "sl-owned-1",
+                    "clientOrderId": "triak_sl_trade_1",
+                    "type": "STOP_MARKET",
+                },
+            }
+        )
+
+        order = await client.get_algo_order(orig_client_order_id="triak_sl_trade_1")
+
+        assert order.order_id == "sl-owned-1"
+        call = client._client.signed_request.call_args
+        assert call.args[:2] == ("GET", "/api/v2/futures/algo-order")
+        assert call.kwargs["params"]["origClientOrderId"] == "triak_sl_trade_1"
+
+    @pytest.mark.asyncio
     async def test_cancel_algo_order_uses_v2_algo_order_endpoint(self) -> None:
         client = _make_client(signed_response={"code": 200, "msg": "success", "data": None})
         payload = await client.cancel_algo_order("12345")
