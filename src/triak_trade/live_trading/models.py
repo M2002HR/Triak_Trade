@@ -142,6 +142,8 @@ class LiveTrade(BaseModel):
     entry_filled_at: datetime | None = None
     entry_order_expires_at: datetime | None = None
     sl_order_id: str | None = None
+    sl_order_client_id: str | None = None
+    sl_order_api_version: str | None = None
     tp_order_ids: list[str] = Field(default_factory=list)
     tp_order_plan: list[LiveTakeProfitOrderPlan] = Field(default_factory=list)
     required_tp_order_count: int = 0
@@ -154,6 +156,10 @@ class LiveTrade(BaseModel):
     protection_sync_failures: int = 0
     last_protection_sync_error_at: datetime | None = None
     processed_exchange_fill_ids: list[str] = Field(default_factory=list)
+    account_coordination_action: str | None = None
+    account_coordination_notes: list[str] = Field(default_factory=list)
+    account_netted_quantity: Decimal = Decimal("0")
+    consensus_duplicate_trade_id: str | None = None
 
     # Attribution - every message that affected this trade
     message_history: list[MessageAttribution] = Field(default_factory=list)
