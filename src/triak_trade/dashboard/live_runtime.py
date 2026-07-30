@@ -28,6 +28,7 @@ from triak_trade.dashboard.schemas import (
     StrategyCatalogEntry,
 )
 from triak_trade.exchange.toobit.futures import build_futures_client_from_settings
+from triak_trade.live_trading.account_coordinator import AccountExecutionCoordinator
 from triak_trade.live_trading.engine import (
     LiveTradingEngine,
     build_engine_from_config,
@@ -90,6 +91,8 @@ class DashboardLiveCoordinator:
         self.state_dir = self.runtime_root / "state"
         self.saved_channels_file = self.state_dir / "saved_channels.json"
         self.telegram_client = SharedTelethonTelegramClient(settings)
+        self.account_coordinator = AccountExecutionCoordinator.from_settings(settings)
+        self.account_coordinator.restore_from_store(self.store)
         self._lock = threading.Lock()
         self._engines: dict[str, LiveTradingEngine] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -250,6 +253,7 @@ class DashboardLiveCoordinator:
             store=self.store,
             notifier=self.notifier,
             telegram_client=self.telegram_client,
+            account_coordinator=self.account_coordinator,
         )
         self.store.save_session(session)
         worker = threading.Thread(
@@ -760,6 +764,7 @@ class DashboardLiveCoordinator:
                 store=self.store,
                 notifier=self.notifier,
                 telegram_client=self.telegram_client,
+                account_coordinator=self.account_coordinator,
             )
             worker = threading.Thread(
                 target=self._run_engine,

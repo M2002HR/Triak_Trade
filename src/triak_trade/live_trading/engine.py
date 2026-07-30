@@ -40,6 +40,10 @@ from triak_trade.exchange.toobit.futures import (
     from_futures_symbol,
     to_exchange_futures_symbol,
 )
+from triak_trade.live_trading.account_coordinator import (
+    AccountExecutionConflictError,
+    AccountExecutionCoordinator,
+)
 from triak_trade.live_trading.models import (
     LiveAccountInfo,
     LiveExchangeOrderSnapshot,
@@ -154,11 +158,15 @@ class LiveTradingEngine:
         store: LiveTradingStore,
         notifier: Callable[[dict[str, Any]], None] | None = None,
         telegram_client: TelegramClientInterface | None = None,
+        account_coordinator: AccountExecutionCoordinator | None = None,
     ) -> None:
         self.settings = settings
         self.session = session
         self.store = store
         self.notifier = notifier
+        self._account_coordinator = (
+            account_coordinator or AccountExecutionCoordinator.from_settings(settings)
+        )
         self._owns_telegram_client = telegram_client is None
 
         self._running = False
@@ -480,6 +488,8 @@ class LiveTradingEngine:
             trade.signal_id: trade for trade in self.store.list_open_trades(self.session.session_id)
         }
         self.session.open_positions_count = len(self._open_trades)
+        for trade in self._open_trades.values():
+            self._register_account_trade(trade)
         self._message_traces = list(
             reversed(self.store.list_message_traces(self.session.session_id, limit=200))
         )
@@ -2418,6 +2428,7 @@ class LiveTradingEngine:
                     current_mark_price=current_mark_price,
                 )
             except Exception as exc:
+                self._account_coordinator.unregister_trade(trade.trade_id)
                 self._log_event(
                     logging.ERROR,
                     "live_trading.real_order_failed",
@@ -2442,8 +2453,31 @@ class LiveTradingEngine:
             trade.entry_order_status = "FILLED"
             trade.entry_filled_at = _utc_now()
 
+        if not trade.is_open:
+            state.status = SignalStatus.CLOSED
+            context.add_signal(state, pending=False)
+            self._sync_signal_snapshot(context=context, state=state, trade=trade)
+            self.store.save_trade(trade)
+            self._emit_trade_update(trade)
+            self._emit_trace_update(
+                signal_id=signal_id,
+                status=trade.account_coordination_action or "not_opened",
+                note=trade.close_reason or "Account coordination did not open exposure.",
+                trade_id=trade.trade_id,
+            )
+            self._log_event(
+                logging.INFO,
+                "live_trading.account_open_coordinated_without_new_exposure",
+                account_coordination_action=trade.account_coordination_action,
+                account_netted_quantity=str(trade.account_netted_quantity),
+                consensus_duplicate_trade_id=trade.consensus_duplicate_trade_id,
+                **self._trade_log_fields(trade),
+            )
+            return
+
         # Register trade
         self._open_trades[signal_id] = trade
+        self._register_account_trade(trade)
         state.status = SignalStatus.ORDER_SUBMITTED if trade.is_waiting_entry else SignalStatus.OPEN
         context.add_signal(state, pending=False)
         self._sync_signal_snapshot(context=context, state=state, trade=trade)
@@ -2797,7 +2831,75 @@ class LiveTradingEngine:
 
     # ── Real Exchange Execution ────────────────────────────────────────────
 
+    def _register_account_trade(self, trade: LiveTrade) -> None:
+        self._account_coordinator.register_trade(
+            trade,
+            trading_mode=self.session.trading_mode,
+            close_handler=self._dispatch_account_net_close,
+        )
+
+    async def _dispatch_account_net_close(
+        self,
+        trade_id: str,
+        quantity: Decimal,
+        reason: str,
+    ) -> Decimal:
+        async def close_owned_trade() -> Decimal:
+            trade = next(
+                (
+                    item
+                    for item in self._open_trades.values()
+                    if item.trade_id == trade_id
+                ),
+                None,
+            )
+            if trade is None or not trade.is_open:
+                return Decimal("0")
+            requested_quantity = min(quantity, trade.remaining_quantity)
+            if requested_quantity <= Decimal("0"):
+                return Decimal("0")
+            result = await self._execute_exchange_close_unlocked(
+                trade=trade,
+                fraction=requested_quantity / trade.remaining_quantity,
+                reason=reason,
+            )
+            if not trade.is_open:
+                self._finalize_closed_trade(trade)
+                context = self._contexts.get(trade.channel_id)
+                if context is not None:
+                    self._mark_signal_terminal(
+                        context=context,
+                        signal_id=trade.signal_id,
+                        status=SignalStatus.CLOSED,
+                        trade=trade,
+                    )
+            else:
+                self._persist_trade_runtime_state(trade)
+            return result.executed_quantity
+
+        owner_loop = self._loop
+        if owner_loop is None or owner_loop is asyncio.get_running_loop():
+            return await close_owned_trade()
+        if owner_loop.is_closed():
+            raise AccountExecutionConflictError(
+                f"owner engine loop is unavailable for trade {trade_id}"
+            )
+        future = asyncio.run_coroutine_threadsafe(close_owned_trade(), owner_loop)
+        return await asyncio.wrap_future(future)
+
     async def _real_open_position(
+        self,
+        trade: LiveTrade,
+        *,
+        current_mark_price: Decimal | None = None,
+    ) -> None:
+        async with self._account_coordinator.execution_guard():
+            await self._real_open_position_unlocked(
+                trade,
+                current_mark_price=current_mark_price,
+            )
+
+    async def _real_open_position_unlocked(
         self,
         trade: LiveTrade,
         *,
@@ -2818,6 +2920,48 @@ class LiveTradingEngine:
         spec = await self._futures_client.get_contract_spec(trade.symbol)
         if spec is None:
             raise ValueError(f"Contract spec unavailable for {trade.symbol}")
+        decision = await self._account_coordinator.coordinate_open(
+            trade,
+            trading_mode=self.session.trading_mode,
+        )
+        trade.account_coordination_action = decision.action
+        trade.account_coordination_notes = list(decision.notes)
+        trade.account_netted_quantity = decision.offset_quantity
+        trade.consensus_duplicate_trade_id = decision.duplicate_trade_id
+        if trade.message_history:
+            trade.message_history[-1].notes.extend(decision.notes)
+        self._log_event(
+            logging.INFO,
+            "live_trading.account_open_coordinated",
+            account_coordination_action=decision.action,
+            original_quantity=str(decision.original_quantity),
+            approved_quantity=str(decision.approved_quantity),
+            offset_quantity=str(decision.offset_quantity),
+            duplicate_trade_id=decision.duplicate_trade_id,
+            coordination_notes=list(decision.notes),
+            **self._trade_log_fields(trade),
+        )
+        if not decision.should_open:
+            trade.status = "closed"
+            trade.remaining_quantity = Decimal("0")
+            trade.margin = Decimal("0")
+            trade.closed_at = _utc_now()
+            trade.entry_order_type = (
+                "ACCOUNT_NET" if decision.action == "netted" else "CONSENSUS"
+            )
+            trade.entry_order_status = (
+                "NETTED" if decision.action == "netted" else "DEDUPLICATED"
+            )
+            trade.close_reason = (
+                "account_net_offset"
+                if decision.action == "netted"
+                else f"consensus_duplicate:{decision.duplicate_trade_id}"
+            )
+            return
+
+        # Do not mutate symbol leverage for a consensus-only or fully-netted
+        # signal. Exchange tier negotiation starts only when residual exposure
+        # really needs to be opened.
         self._apply_exchange_risk_limit_to_open_trade(trade, spec)
         try:
             await self._ensure_supported_exchange_leverage(
@@ -2837,11 +2981,14 @@ class LiveTradingEngine:
             )
             trade.last_exchange_sync_error = str(exc)
 
-        # Leverage/risk-tier negotiation can resize the position. Entry and
-        # take-profit feasibility must therefore be decided only after the
-        # final risk-sized exchange quantity is known.
+        # Account policy and exchange risk tiers can both reduce quantity. TP
+        # capacity and margin are calculated only from the final executable
+        # amount.
         self._ensure_exchange_quantity_supports_market_entry(trade, spec)
         self._ensure_exchange_quantity_supports_take_profit_ladder(trade, spec)
+        trade.margin = (
+            trade.entry_price * trade.quantity / Decimal(str(trade.leverage))
+        ).quantize(Decimal("0.00000001"))
 
         if current_mark_price is None and trade.entry_type == EntryType.TRIGGER.value:
             current_mark_price = await self._get_mark_price(trade.symbol)
@@ -2907,6 +3054,11 @@ class LiveTradingEngine:
         )
         trade.entry_order_expires_at = now + timedelta(seconds=pending_ttl_seconds)
         trade.exchange_symbol = getattr(order, "exchange_symbol", None) or trade.exchange_symbol
+        self._account_coordinator.mark_order_owner(
+            trade.entry_order_id,
+            trade,
+            trading_mode=self.session.trading_mode,
+        )
         if trade.message_history:
             trade.message_history[-1].notes[0:0] = [
                 f"entry_order_type={entry_request.order_type}",
@@ -2946,6 +3098,7 @@ class LiveTradingEngine:
 
         if not self._entry_order_has_fill(confirmed_order):
             trade.status = "waiting_entry"
+            self._register_account_trade(trade)
             trade.last_exchange_sync_error = None
             self._log_event(
                 logging.INFO,
@@ -3071,7 +3224,19 @@ class LiveTradingEngine:
         fills: list[Any],
     ) -> list[Any]:
         processed = set(trade.processed_exchange_fill_ids)
-        return [fill for fill in fills if self._exchange_fill_key(fill) not in processed]
+        return [
+            fill
+            for fill in fills
+            if self._exchange_fill_key(fill) not in processed
+            and self._account_coordinator.order_is_available(
+                str(getattr(fill, "order_id", "") or ""),
+                trade.trade_id,
+            )
+            and self._account_coordinator.fill_is_available(
+                self._exchange_fill_key(fill),
+                trade.trade_id,
+            )
+        ]
 
     def _record_processed_exchange_fills(
         self,
@@ -3082,6 +3247,14 @@ class LiveTradingEngine:
         for fill in fills:
             key = self._exchange_fill_key(fill)
             if key not in existing:
+                if not self._account_coordinator.mark_fill_owner(
+                    key,
+                    trade,
+                    trading_mode=self.session.trading_mode,
+                ):
+                    raise AccountExecutionConflictError(
+                        f"exchange fill {key} belongs to another logical trade"
+                    )
                 trade.processed_exchange_fill_ids.append(key)
                 existing.add(key)
 
@@ -3143,6 +3316,7 @@ class LiveTradingEngine:
         trade.opened_at = fill_time
         trade.entry_filled_at = fill_time
         trade.entry_order_expires_at = None
+        self._register_account_trade(trade)
         entry_fills = self._unprocessed_exchange_fills(trade, fills)
         if entry_fills:
             trade.fees += sum(
@@ -3698,6 +3872,22 @@ class LiveTradingEngine:
         reason: str,
         message: MessageAttribution | None = None,
     ) -> _ExchangeCloseResult:
+        async with self._account_coordinator.execution_guard():
+            return await self._execute_exchange_close_unlocked(
+                trade=trade,
+                fraction=fraction,
+                reason=reason,
+                message=message,
+            )
+
+    async def _execute_exchange_close_unlocked(
+        self,
+        *,
+        trade: LiveTrade,
+        fraction: Decimal,
+        reason: str,
+        message: MessageAttribution | None = None,
+    ) -> _ExchangeCloseResult:
         assert self._futures_client is not None
         self._log_event(
             logging.INFO,
@@ -3708,6 +3898,11 @@ class LiveTradingEngine:
         )
         await self._cancel_existing_trade_protection(trade)
         order, requested_quantity = await self._submit_exchange_close_order(trade, fraction)
+        self._account_coordinator.mark_order_owner(
+            order.order_id,
+            trade,
+            trading_mode=self.session.trading_mode,
+        )
         confirmed_order, fills = await self._futures_client.wait_for_order_fill(
             symbol=trade.symbol,
             order_id=order.order_id,
@@ -3760,7 +3955,11 @@ class LiveTradingEngine:
         processed_close_fills = list(fills)
         exchange_position: Any | None = None
         exchange_remaining_quantity: Decimal | None = None
-        if fraction >= Decimal("1"):
+        owns_entire_exchange_bucket = not self._account_coordinator.has_other_open_legs(
+            trade,
+            trading_mode=self.session.trading_mode,
+        )
+        if fraction >= Decimal("1") and owns_entire_exchange_bucket:
             (
                 exchange_position,
                 exchange_remaining_quantity,
@@ -3781,6 +3980,11 @@ class LiveTradingEngine:
                 residual_order, _ = await self._submit_exchange_close_quantity_order(
                     trade,
                     exchange_remaining_quantity,
+                )
+                self._account_coordinator.mark_order_owner(
+                    residual_order.order_id,
+                    trade,
+                    trading_mode=self.session.trading_mode,
                 )
                 (
                     residual_confirmed_order,
@@ -3959,8 +4163,10 @@ class LiveTradingEngine:
             trade.unrealized_pnl = Decimal("0")
             trade.close_reason = reason
             trade.closed_at = _utc_now()
+            self._account_coordinator.unregister_trade(trade.trade_id)
         else:
             trade.status = "partial_close"
+            self._register_account_trade(trade)
 
     def _book_trade_realized_totals(self, trade: LiveTrade) -> None:
         pnl_delta = trade.realized_pnl - trade.realized_pnl_booked
@@ -4041,6 +4247,36 @@ class LiveTradingEngine:
                 continue
             return position
         return None
+
+    def _allocate_exchange_position_to_trade(
+        self,
+        trade: LiveTrade,
+        position: LiveExchangePositionSnapshot | None,
+    ) -> LiveExchangePositionSnapshot | None:
+        """Allocate an aggregate exchange bucket to one logical channel leg."""
+
+        if position is None:
+            return None
+        logical_total = self._account_coordinator.bucket_logical_quantity(
+            trading_mode=self.session.trading_mode,
+            symbol=trade.symbol,
+            side=trade.side,
+        )
+        if logical_total <= Decimal("0") or trade.remaining_quantity <= Decimal("0"):
+            return position
+        ratio = min(
+            Decimal("1"),
+            max(Decimal("0"), trade.remaining_quantity / logical_total),
+        )
+        return position.model_copy(
+            update={
+                "quantity": position.quantity * ratio,
+                "available": position.available * ratio,
+                "margin": position.margin * ratio,
+                "unrealized_pnl": position.unrealized_pnl * ratio,
+                "realized_pnl": position.realized_pnl * ratio,
+            }
+        )
 
     async def _ensure_trade_still_open_on_exchange(
         self,
@@ -4173,6 +4409,7 @@ class LiveTradingEngine:
             )
         )
         self._open_trades.pop(trade.signal_id, None)
+        self._account_coordinator.unregister_trade(trade.trade_id)
         self.session.open_positions_count = max(0, self.session.open_positions_count - 1)
         self.session.closed_trades_count += 1
         self.store.save_trade(trade)
@@ -4192,6 +4429,20 @@ class LiveTradingEngine:
         )
 
     async def _sync_trade_protection(
+        self,
+        trade: LiveTrade,
+        *,
+        refresh_take_profits: bool = True,
+        refresh_stop_loss: bool = True,
+    ) -> None:
+        async with self._account_coordinator.execution_guard():
+            await self._sync_trade_protection_unlocked(
+                trade,
+                refresh_take_profits=refresh_take_profits,
+                refresh_stop_loss=refresh_stop_loss,
+            )
+
+    async def _sync_trade_protection_unlocked(
         self,
         trade: LiveTrade,
         *,
@@ -4305,6 +4556,11 @@ class LiveTradingEngine:
                     use_demo_symbol=self._use_demo_exchange_symbol(),
                 )
                 trade.tp_order_ids.append(order.order_id)
+                self._account_coordinator.mark_order_owner(
+                    order.order_id,
+                    trade,
+                    trading_mode=self.session.trading_mode,
+                )
                 trade.tp_order_plan.append(
                     LiveTakeProfitOrderPlan(
                         target_index=target_index,
@@ -4393,6 +4649,30 @@ class LiveTradingEngine:
         stop_loss: Decimal,
     ) -> None:
         assert self._futures_client is not None
+        if self._use_owned_v2_stop_orders():
+            client_order_id = f"triak_sl_{trade.trade_id}_{uuid.uuid4().hex[:10]}"
+            order = await self._futures_client.place_owned_stop_market(
+                symbol=trade.symbol,
+                position_side=side,
+                stop_price=stop_loss,
+                quantity=trade.remaining_quantity,
+                client_order_id=client_order_id,
+                use_demo_symbol=self._use_demo_exchange_symbol(),
+            )
+            if not order.order_id:
+                raise ValueError("Toobit v2 stop order did not return an order id")
+            trade.sl_order_id = order.order_id
+            trade.sl_order_client_id = order.client_order_id or client_order_id
+            trade.sl_order_api_version = "v2"
+            self._account_coordinator.mark_order_owner(
+                trade.sl_order_id,
+                trade,
+                trading_mode=self.session.trading_mode,
+            )
+            return
+
+        trade.sl_order_client_id = None
+        trade.sl_order_api_version = "v1"
         try:
             await self._futures_client.set_trading_stop(
                 symbol=trade.symbol,
@@ -4432,6 +4712,16 @@ class LiveTradingEngine:
                 return True
         message = str(exc).lower()
         return "stopprofitloss order position limit" in message
+
+    def _use_owned_v2_stop_orders(self) -> bool:
+        return (
+            getattr(
+                self.settings,
+                "LIVE_TRADING_USE_OWNED_V2_STOP_ORDERS",
+                False,
+            )
+            is True
+        )
 
     def _make_tp_client_order_id(self, trade: LiveTrade, target_index: int) -> str:
         return f"triak_tp_{trade.trade_id}_{target_index + 1}_{uuid.uuid4().hex[:10]}"
@@ -4541,35 +4831,92 @@ class LiveTradingEngine:
             trade.tp_order_ids = []
             trade.tp_order_plan = []
         if cancel_stop_loss:
-            orders = await self._futures_client.get_open_orders(
-                trade.symbol,
-                order_type="STOP_PROFIT_LOSS",
-                use_demo_symbol=self._use_demo_exchange_symbol(),
-            )
-            target_order_prefix = "STOP_LONG_" if trade.side == "long" else "STOP_SHORT_"
-            for order in orders:
-                if order.side.upper() != target_close_side:
-                    continue
-                if not order.order_type.upper().startswith(target_order_prefix):
-                    continue
+            stop_order_ids = {trade.sl_order_id} if trade.sl_order_id else set()
+            if trade.sl_order_api_version == "v2" or trade.sl_order_client_id:
                 try:
-                    await self._futures_client.cancel_order(
-                        symbol=trade.symbol,
-                        order_id=order.order_id,
-                        order_type="STOP",
+                    algo_orders = await self._futures_client.get_open_algo_orders(
+                        trade.symbol,
                         use_demo_symbol=self._use_demo_exchange_symbol(),
                     )
                 except Exception as exc:
-                    cancellation_errors.append(f"sl:{order.order_id}:{exc}")
+                    algo_orders = []
                     self._log_event(
                         logging.DEBUG,
-                        "live_trading.exchange_stop_cancel_failed",
-                        order_id=order.order_id,
+                        "live_trading.exchange_owned_stop_query_before_cancel_failed",
                         error_type=type(exc).__name__,
                         error=str(exc),
                         **self._trade_log_fields(trade),
                     )
+                expected_client_id = trade.sl_order_client_id
+                expected_prefix = f"triak_sl_{trade.trade_id}_"
+                for order in algo_orders:
+                    if expected_client_id and order.client_order_id == expected_client_id:
+                        stop_order_ids.add(order.order_id)
+                    elif order.client_order_id.startswith(expected_prefix):
+                        stop_order_ids.add(order.order_id)
+                for order_id in sorted(item for item in stop_order_ids if item):
+                    try:
+                        await self._futures_client.cancel_algo_order(
+                            order_id,
+                            use_demo_symbol=self._use_demo_exchange_symbol(),
+                        )
+                    except Exception as exc:
+                        cancellation_errors.append(f"sl:{order_id}:{exc}")
+                        self._log_event(
+                            logging.DEBUG,
+                            "live_trading.exchange_owned_stop_cancel_failed",
+                            order_id=order_id,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                            **self._trade_log_fields(trade),
+                        )
+            elif trade.sl_order_id:
+                try:
+                    await self._futures_client.cancel_order(
+                        symbol=trade.symbol,
+                        order_id=trade.sl_order_id,
+                        order_type="STOP",
+                        use_demo_symbol=self._use_demo_exchange_symbol(),
+                    )
+                except Exception as exc:
+                    cancellation_errors.append(f"sl:{trade.sl_order_id}:{exc}")
+                    self._log_event(
+                        logging.DEBUG,
+                        "live_trading.exchange_legacy_stop_cancel_failed",
+                        order_id=trade.sl_order_id,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        **self._trade_log_fields(trade),
+                    )
+            elif not self._use_owned_v2_stop_orders():
+                # Compatibility-only path for explicitly disabled v2 owned
+                # stops. Production defaults to v2 and never enters this broad
+                # legacy discovery path.
+                orders = await self._futures_client.get_open_orders(
+                    trade.symbol,
+                    order_type="STOP_PROFIT_LOSS",
+                    use_demo_symbol=self._use_demo_exchange_symbol(),
+                )
+                target_order_prefix = (
+                    "STOP_LONG_" if trade.side == "long" else "STOP_SHORT_"
+                )
+                for order in orders:
+                    if order.side.upper() != target_close_side:
+                        continue
+                    if not order.order_type.upper().startswith(target_order_prefix):
+                        continue
+                    try:
+                        await self._futures_client.cancel_order(
+                            symbol=trade.symbol,
+                            order_id=order.order_id,
+                            order_type="STOP",
+                            use_demo_symbol=self._use_demo_exchange_symbol(),
+                        )
+                    except Exception as exc:
+                        cancellation_errors.append(f"sl:{order.order_id}:{exc}")
             trade.sl_order_id = None
+            trade.sl_order_client_id = None
+            trade.sl_order_api_version = None
         if cancellation_errors:
             raise ValueError(
                 "Exchange protection cancellation failed: " + "; ".join(cancellation_errors)
@@ -4583,15 +4930,27 @@ class LiveTradingEngine:
     async def _refresh_trade_protection_ids(self, trade: LiveTrade) -> None:
         if self._futures_client is None:
             return
+        tracked_sl_order_id = trade.sl_order_id
+        tracked_sl_client_id = trade.sl_order_client_id
+        tracked_sl_api_version = trade.sl_order_api_version
+        tracked_tp_order_plan = list(trade.tp_order_plan)
         regular_open_orders = await self._futures_client.get_open_orders(
             trade.symbol,
             use_demo_symbol=self._use_demo_exchange_symbol(),
         )
-        open_orders = await self._futures_client.get_open_orders(
-            trade.symbol,
-            order_type="STOP_PROFIT_LOSS",
-            use_demo_symbol=self._use_demo_exchange_symbol(),
-        )
+        owned_algo_orders: list[Any] = []
+        if self._use_owned_v2_stop_orders() or trade.sl_order_api_version == "v2":
+            owned_algo_orders = await self._futures_client.get_open_algo_orders(
+                trade.symbol,
+                use_demo_symbol=self._use_demo_exchange_symbol(),
+            )
+        legacy_open_orders: list[Any] = []
+        if trade.sl_order_api_version != "v2" and not trade.sl_order_client_id:
+            legacy_open_orders = await self._futures_client.get_open_orders(
+                trade.symbol,
+                order_type="STOP_PROFIT_LOSS",
+                use_demo_symbol=self._use_demo_exchange_symbol(),
+            )
         tp_order_ids = [
             order.order_id
             for order in regular_open_orders
@@ -4638,20 +4997,140 @@ class LiveTradingEngine:
                     client_order_id=order.client_order_id,
                 )
             )
+            self._account_coordinator.mark_order_owner(
+                order.order_id,
+                trade,
+                trading_mode=self.session.trading_mode,
+            )
+        discovered_tp_ids = {
+            item.order_id for item in tp_order_plan if item.order_id is not None
+        }
+        terminal_order_statuses = {
+            "ORDER_CANCELED",
+            "CANCELED",
+            "CANCELLED",
+            "ORDER_REJECTED",
+            "REJECTED",
+            "ORDER_FAILED",
+            "FAILED",
+            "EXPIRED",
+            "ORDER_FILLED",
+            "FILLED",
+        }
+        for tracked_tp_plan in tracked_tp_order_plan:
+            if (
+                tracked_tp_plan.order_id is None
+                or tracked_tp_plan.order_id in discovered_tp_ids
+            ):
+                continue
+            try:
+                confirmed_tp = await self._futures_client.get_order(
+                    symbol=trade.symbol,
+                    order_id=tracked_tp_plan.order_id,
+                    use_demo_symbol=self._use_demo_exchange_symbol(),
+                )
+            except Exception:
+                continue
+            if confirmed_tp.status.upper() in terminal_order_statuses:
+                continue
+            tp_order_plan.append(tracked_tp_plan)
+            discovered_tp_ids.add(tracked_tp_plan.order_id)
+            self._account_coordinator.mark_order_owner(
+                tracked_tp_plan.order_id,
+                trade,
+                trading_mode=self.session.trading_mode,
+            )
         tp_order_plan.sort(key=lambda item: item.target_index)
         sl_order_id: str | None = None
-        target_order_prefix = "STOP_LONG_" if trade.side == "long" else "STOP_SHORT_"
-        target_close_side = "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
-        for order in open_orders:
-            order_type = order.order_type.upper()
-            if order.stop_price <= 0 or "STOP_" not in order_type:
+        sl_order_client_id: str | None = None
+        expected_sl_prefix = f"triak_sl_{trade.trade_id}_"
+        for order in owned_algo_orders:
+            if not (
+                order.client_order_id.startswith(expected_sl_prefix)
+                or (
+                    trade.sl_order_client_id
+                    and order.client_order_id == trade.sl_order_client_id
+                )
+                or (trade.sl_order_id and order.order_id == trade.sl_order_id)
+            ):
                 continue
-            if order.side.upper() != target_close_side:
-                continue
-            if not order_type.startswith(target_order_prefix):
-                continue
-            if "LOSS" in order_type:
+            sl_order_id = order.order_id
+            sl_order_client_id = order.client_order_id or trade.sl_order_client_id
+            self._account_coordinator.mark_order_owner(
+                order.order_id,
+                trade,
+                trading_mode=self.session.trading_mode,
+            )
+            break
+        if sl_order_id is None and trade.sl_order_id:
+            for order in legacy_open_orders:
+                if order.order_id != trade.sl_order_id:
+                    continue
                 sl_order_id = order.order_id
+                self._account_coordinator.mark_order_owner(
+                    order.order_id,
+                    trade,
+                    trading_mode=self.session.trading_mode,
+                )
+                break
+        if (
+            sl_order_id is None
+            and not self._use_owned_v2_stop_orders()
+            and tracked_sl_order_id is None
+        ):
+            target_order_prefix = (
+                "STOP_LONG_" if trade.side == "long" else "STOP_SHORT_"
+            )
+            target_close_side = (
+                "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
+            )
+            for order in legacy_open_orders:
+                order_type = order.order_type.upper()
+                if order.stop_price <= 0 or "STOP_" not in order_type:
+                    continue
+                if order.side.upper() != target_close_side:
+                    continue
+                if not order_type.startswith(target_order_prefix):
+                    continue
+                if "LOSS" in order_type:
+                    sl_order_id = order.order_id
+                    self._account_coordinator.mark_order_owner(
+                        order.order_id,
+                        trade,
+                        trading_mode=self.session.trading_mode,
+                    )
+        if (
+            sl_order_id is None
+            and tracked_sl_order_id
+            and tracked_sl_api_version == "v2"
+        ):
+            try:
+                tracked_order = await self._futures_client.get_algo_order(
+                    order_id=tracked_sl_order_id,
+                    orig_client_order_id=tracked_sl_client_id,
+                    use_demo_symbol=self._use_demo_exchange_symbol(),
+                )
+            except Exception:
+                tracked_order = None
+            if tracked_order is not None and tracked_order.status.upper() not in {
+                "ORDER_CANCELED",
+                "CANCELED",
+                "CANCELLED",
+                "ORDER_REJECTED",
+                "REJECTED",
+                "ORDER_FAILED",
+                "FAILED",
+                "EXPIRED",
+            }:
+                sl_order_id = tracked_order.order_id or tracked_sl_order_id
+                sl_order_client_id = (
+                    tracked_order.client_order_id or tracked_sl_client_id
+                )
+                self._account_coordinator.mark_order_owner(
+                    sl_order_id,
+                    trade,
+                    trading_mode=self.session.trading_mode,
+                )
         trade.tp_order_ids = (
             [item.order_id for item in tp_order_plan if item.order_id is not None]
             if tp_order_plan
@@ -4659,6 +5138,12 @@ class LiveTradingEngine:
         )
         trade.tp_order_plan = tp_order_plan
         trade.sl_order_id = sl_order_id
+        trade.sl_order_client_id = sl_order_client_id
+        trade.sl_order_api_version = (
+            ("v2" if sl_order_client_id is not None else "v1")
+            if sl_order_id is not None
+            else None
+        )
 
     def _trade_has_exchange_protection(self, trade: LiveTrade) -> bool:
         return bool(trade.sl_order_id and (trade.tp_order_ids or trade.tp_order_plan))
@@ -4681,6 +5166,8 @@ class LiveTradingEngine:
     def _detach_trade_protection_order(self, trade: LiveTrade, order_id: str) -> None:
         if trade.sl_order_id == order_id:
             trade.sl_order_id = None
+            trade.sl_order_client_id = None
+            trade.sl_order_api_version = None
         if trade.tp_order_ids:
             trade.tp_order_ids = [item for item in trade.tp_order_ids if item != order_id]
         if trade.tp_order_plan:
@@ -4796,12 +5283,19 @@ class LiveTradingEngine:
                 if order_id in open_stop_ids:
                     continue
                 try:
-                    order = await self._futures_client.get_order(
-                        symbol=trade.symbol,
-                        order_id=order_id,
-                        order_type="STOP",
-                        use_demo_symbol=self._use_demo_exchange_symbol(),
-                    )
+                    if trade.sl_order_api_version == "v2":
+                        order = await self._futures_client.get_algo_order(
+                            order_id=order_id,
+                            orig_client_order_id=trade.sl_order_client_id,
+                            use_demo_symbol=self._use_demo_exchange_symbol(),
+                        )
+                    else:
+                        order = await self._futures_client.get_order(
+                            symbol=trade.symbol,
+                            order_id=order_id,
+                            order_type="STOP",
+                            use_demo_symbol=self._use_demo_exchange_symbol(),
+                        )
                 except Exception as exc:
                     trade.last_exchange_sync_error = str(exc)
                     log.debug(
@@ -5130,6 +5624,7 @@ class LiveTradingEngine:
         else:
             self.session.losses += 1
         self._open_trades.pop(trade.signal_id, None)
+        self._account_coordinator.unregister_trade(trade.trade_id)
         self.store.save_trade(trade)
         self._emit_trade_update(trade)
         self._log_event(
@@ -5601,6 +6096,7 @@ class LiveTradingEngine:
         trade.remaining_quantity = Decimal("0")
         trade.unrealized_pnl = Decimal("0")
         self._open_trades.pop(trade.signal_id, None)
+        self._account_coordinator.unregister_trade(trade.trade_id)
         self.session.open_positions_count = max(
             0,
             self.session.open_positions_count - 1,
@@ -5840,6 +6336,10 @@ class LiveTradingEngine:
         return True
 
     async def _sync_exchange_state(self) -> None:
+        async with self._account_coordinator.execution_guard():
+            await self._sync_exchange_state_unlocked()
+
+    async def _sync_exchange_state_unlocked(self) -> None:
         if self._futures_client is None:
             return
         use_demo_symbol = self._use_demo_exchange_symbol()
@@ -5881,6 +6381,15 @@ class LiveTradingEngine:
                 )
             except Exception:
                 protection_orders = []
+            try:
+                protection_orders.extend(
+                    await self._futures_client.get_open_algo_orders(
+                        symbol,
+                        use_demo_symbol=use_demo_symbol,
+                    )
+                )
+            except Exception:
+                pass
             by_symbol_open_protection_orders[symbol] = protection_orders
             recent_orders.extend(self._order_snapshot(item) for item in protection_orders[:5])
             try:
@@ -5901,9 +6410,12 @@ class LiveTradingEngine:
         )
 
         for trade in list(self._open_trades.values()):
-            trade.exchange_position = self._find_matching_exchange_position(
-                trade=trade,
-                positions=position_snapshots,
+            trade.exchange_position = self._allocate_exchange_position_to_trade(
+                trade,
+                self._find_matching_exchange_position(
+                    trade=trade,
+                    positions=position_snapshots,
+                ),
             )
             context = self._contexts.get(trade.channel_id)
             if trade.is_waiting_entry:
@@ -5915,9 +6427,12 @@ class LiveTradingEngine:
                 )
                 if not activated:
                     continue
-                trade.exchange_position = self._find_matching_exchange_position(
-                    trade=trade,
-                    positions=position_snapshots,
+                trade.exchange_position = self._allocate_exchange_position_to_trade(
+                    trade,
+                    self._find_matching_exchange_position(
+                        trade=trade,
+                        positions=position_snapshots,
+                    ),
                 )
                 if trade.exchange_position is None:
                     # Order history is authoritative for the fill. Give the
@@ -6141,6 +6656,7 @@ def build_engine_from_config(
     store: LiveTradingStore,
     notifier: Callable[[dict[str, Any]], None] | None = None,
     telegram_client: TelegramClientInterface | None = None,
+    account_coordinator: AccountExecutionCoordinator | None = None,
 ) -> tuple[LiveSession, LiveTradingEngine]:
     session_id = f"ls_{uuid.uuid4().hex[:12]}"
     labels = [f"@{ch.rsplit('/', 1)[-1]}" if "/" in ch else ch for ch in config.channels]
@@ -6162,6 +6678,7 @@ def build_engine_from_config(
         store=store,
         notifier=notifier,
         telegram_client=telegram_client,
+        account_coordinator=account_coordinator,
     )
     return session, engine
 
@@ -6173,6 +6690,7 @@ def build_engine_from_session(
     store: LiveTradingStore,
     notifier: Callable[[dict[str, Any]], None] | None = None,
     telegram_client: TelegramClientInterface | None = None,
+    account_coordinator: AccountExecutionCoordinator | None = None,
 ) -> tuple[LiveSession, LiveTradingEngine]:
     engine = LiveTradingEngine(
         settings=settings,
@@ -6180,5 +6698,6 @@ def build_engine_from_session(
         store=store,
         notifier=notifier,
         telegram_client=telegram_client,
+        account_coordinator=account_coordinator,
     )
     return session, engine

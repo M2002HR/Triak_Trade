@@ -17,6 +17,7 @@ from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
 from triak_trade.exchange.toobit.errors import ToobitAPIError
 from triak_trade.exchange.toobit.futures import FuturesContractSpec, FuturesOrder
+from triak_trade.live_trading.account_coordinator import AccountExecutionCoordinator
 from triak_trade.live_trading.engine import LiveTradingEngine
 from triak_trade.live_trading.models import (
     LiveAccountInfo,
@@ -2786,6 +2787,118 @@ async def test_cancel_existing_trade_protection_discovers_exchange_tp_orders_whe
     cancel_calls = engine._futures_client.cancel_order.await_args_list
     assert [call.kwargs["order_id"] for call in cancel_calls] == ["tp_live_1", "sl_live_1"]
     assert cancel_calls[1].kwargs["order_type"] == "STOP"
+
+
+@pytest.mark.asyncio
+async def test_owned_v2_stop_cancellation_only_cancels_trade_owned_stop(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine.settings.LIVE_TRADING_USE_OWNED_V2_STOP_ORDERS = True
+    trade = _trade(engine.session.session_id)
+    trade.sl_order_id = "sl_owned"
+    trade.sl_order_client_id = "triak_sl_trade_test_owned"
+    trade.sl_order_api_version = "v2"
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_orders.return_value = []
+    engine._futures_client.get_open_algo_orders.return_value = [
+        SimpleNamespace(
+            order_id="sl_other",
+            client_order_id="triak_sl_other_trade_owned",
+        ),
+        SimpleNamespace(
+            order_id="sl_owned",
+            client_order_id="triak_sl_trade_test_owned",
+        ),
+    ]
+
+    await engine._cancel_existing_trade_protection(trade)
+
+    engine._futures_client.cancel_algo_order.assert_awaited_once_with(
+        "sl_owned",
+        use_demo_symbol=True,
+    )
+    engine._futures_client.cancel_order.assert_not_awaited()
+    assert trade.sl_order_id is None
+    assert trade.sl_order_client_id is None
+    assert trade.sl_order_api_version is None
+
+
+@pytest.mark.asyncio
+async def test_full_logical_close_does_not_flatten_other_same_side_leg(
+    tmp_path: Path,
+) -> None:
+    coordinator = AccountExecutionCoordinator(symbol_risk_cap_pct=Decimal("0"))
+    settings = _settings()
+    engine = LiveTradingEngine(
+        settings=settings,
+        session=_session(),
+        store=LiveTradingStore(tmp_path),
+        account_coordinator=coordinator,
+    )
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "quantity": Decimal("1"),
+            "remaining_quantity": Decimal("1"),
+            "balance_at_entry": Decimal("1000"),
+        }
+    )
+    other = trade.model_copy(
+        update={
+            "trade_id": "trade_other",
+            "signal_id": "sig_other",
+            "channel_id": "@other",
+        }
+    )
+    coordinator.register_trade(trade, trading_mode="demo")
+    coordinator.register_trade(other, trading_mode="demo")
+    engine._futures_client = AsyncMock()
+    engine._cancel_existing_trade_protection = AsyncMock()  # type: ignore[method-assign]
+    engine._submit_exchange_close_order = AsyncMock(  # type: ignore[method-assign]
+        return_value=(SimpleNamespace(order_id="close_owned"), Decimal("1"))
+    )
+    fill = SimpleNamespace(
+        trade_id="fill_owned",
+        order_id="close_owned",
+        qty=Decimal("1"),
+        price=Decimal("51000"),
+        realized_pnl=Decimal("10"),
+        commission=Decimal("0.1"),
+        time=1,
+        side="SELL_CLOSE",
+    )
+    engine._futures_client.wait_for_order_fill.return_value = (
+        SimpleNamespace(
+            order_id="close_owned",
+            status="FILLED",
+            executed_qty=Decimal("1"),
+            avg_price=Decimal("51000"),
+        ),
+        [fill],
+    )
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1")
+    )
+    engine._fetch_trade_exchange_position_quantity = AsyncMock(  # type: ignore[method-assign]
+        return_value=(SimpleNamespace(), Decimal("1"))
+    )
+    engine._refresh_account = AsyncMock()  # type: ignore[method-assign]
+
+    result = await engine._execute_exchange_close(
+        trade=trade,
+        fraction=Decimal("1"),
+        reason="owned_logical_close",
+    )
+
+    assert result.executed_quantity == Decimal("1")
+    assert trade.status == "closed"
+    assert coordinator.bucket_logical_quantity(
+        trading_mode="demo",
+        symbol=other.symbol,
+        side=other.side,
+    ) == Decimal("1")
+    engine._fetch_trade_exchange_position_quantity.assert_not_awaited()
+    engine._submit_exchange_close_order.assert_awaited_once()
 
 
 def test_exchange_take_profit_orders_builds_partial_ladder_from_strategy() -> None:
