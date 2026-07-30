@@ -18,6 +18,7 @@ Scope:
 | [06-strategies.md](06-strategies.md) | Stateless trade-management strategies |
 | [07-data-and-config.md](07-data-and-config.md) | Market data, settings, and safety gates |
 | [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md) | Current risks, behavior gaps, and follow-up work |
+| [09-account-execution-coordination.md](09-account-execution-coordination.md) | Multi-channel account netting, ownership, protection, and recovery |
 
 ## Current Intent
 
@@ -36,6 +37,6 @@ Key architectural rules reflected in the docs:
 
 ## Notes About Accuracy
 
-- These docs were updated against the current repository state on `2026-07-02`.
+- These docs were updated against the current repository state on `2026-07-30`.
 - They intentionally prefer present behavior over aspirational behavior.
 - Known mismatches and open risks are tracked explicitly in [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md).

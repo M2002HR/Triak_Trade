@@ -127,6 +127,7 @@ triak-trade backtest-show-latest
 Observability and dashboard:
 
 ```bash
+triak-trade account-coordination-dry-run
 triak-trade log-channel-check
 triak-trade log-channel-format-dry-run
 triak-trade log-channel-send-test --real
@@ -189,6 +190,12 @@ Known behavior worth keeping in mind:
 - Auto Mode and Kill Switch are persisted as runtime state, not a replacement for live-execution gating.
 - Demo sessions use connected Toobit account state and demo/private symbol rules such as `TBV_...` depending on exchange support.
 - Live sessions remain blocked unless `LIVE_TRADING_LIVE_MODE_ENABLED=true`.
+- All dashboard sessions share one account execution coordinator. It serializes exchange mutations, nets opposite signals by default, deduplicates matching same-direction signals as consensus, and keeps distinct same-direction signals as separately owned logical legs in the aggregate exchange position.
+- Every exchange-executed logical leg must have an owned quantity-scoped stop and all feasible take-profit orders. Protection setup and repair fail closed by flattening the affected logical quantity when protection cannot be verified.
+- Run only one dashboard executor process per Toobit account; coordination is process-wide, not a distributed lock across multiple replicas.
+
+The full policy and recovery model is documented in
+[docs/09-account-execution-coordination.md](docs/09-account-execution-coordination.md).
 
 ## Ajil Gateway
 
