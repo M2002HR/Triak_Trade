@@ -67,6 +67,9 @@ from triak_trade.exchange.toobit.client import ToobitClient
 from triak_trade.exchange.toobit.demo_execution import DemoExecutionAdapter
 from triak_trade.exchange.toobit.errors import ToobitError
 from triak_trade.exchange.toobit.spot import ToobitSpotClient
+from triak_trade.live_trading.account_coordinator import (
+    run_account_coordination_dry_run,
+)
 from triak_trade.live_trading.take_profit_planner import (
     TakeProfitCandidate,
     plan_maximum_take_profit_orders,
@@ -1349,6 +1352,16 @@ def process_message_audit_dry_run_cmd() -> None:
         "formatted_message": result.formatted_message,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("account-coordination-dry-run")
+def account_coordination_dry_run_cmd() -> None:
+    """Verify multi-channel account decisions without external I/O."""
+
+    result = asyncio.run(run_account_coordination_dry_run())
+    typer.echo(_dump_json(result))
+    if result.get("ok") is not True:
+        raise typer.Exit(code=1)
 
 
 @app.command("dashboard-check")
