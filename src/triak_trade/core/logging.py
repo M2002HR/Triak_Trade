@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from collections.abc import MutableMapping
-from datetime import datetime
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, cast
 
 import structlog
@@ -15,6 +18,13 @@ from triak_trade.config.settings import Settings
 
 SENSITIVE_KEYWORDS = ("secret", "token", "password", "api_key", "hash")
 REDACTED = "***REDACTED***"
+SENSITIVE_PATTERNS = (
+    re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"signature=([a-fA-F0-9]{32,})"),
+    re.compile(r"X-BB-APIKEY[:=]\s*[^,\s]+", re.IGNORECASE),
+    re.compile(r"Authorization[:=]\s*[^,\s]+", re.IGNORECASE),
+)
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -22,12 +32,20 @@ def _is_sensitive_key(key: str) -> bool:
     return any(word in lowered for word in SENSITIVE_KEYWORDS)
 
 
+def redact_text(text: str) -> str:
+    """Redact credential-shaped substrings embedded in free-form messages."""
+    result = text
+    for pattern in SENSITIVE_PATTERNS:
+        result = pattern.sub(REDACTED, result)
+    return result
+
+
 def redact_value(value: Any) -> Any:
     """Recursively redact sensitive values while preserving useful structure."""
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return value
+        return redact_text(value)
     if isinstance(value, MutableMapping):
         return {
             key: (REDACTED if _is_sensitive_key(str(key)) else redact_value(item))
@@ -112,6 +130,28 @@ class RenameEventKey(JsonFormatter):
         super().add_fields(log_record, record, message_dict)
         if "message" in log_record and "event" not in log_record:
             log_record["event"] = log_record.pop("message")
+        log_record.setdefault(
+            "timestamp",
+            datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+        )
+        log_record.setdefault("level", record.levelname)
+        log_record.setdefault("module", record.name)
+        safe_record = redact_value(log_record)
+        log_record.clear()
+        log_record.update(safe_record)
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Redact credential-shaped substrings after JSON serialization."""
+        return redact_text(super().format(record))
+
+
+class ResilientStreamHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Follow the current stdout if a temporary capture stream was closed."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(self.stream, "closed", False):
+            self.stream = sys.stdout if not getattr(sys.stdout, "closed", False) else sys.__stdout__
+        super().emit(record)
 
 
 def configure_logging(settings: Settings) -> None:
@@ -125,15 +165,39 @@ def configure_logging(settings: Settings) -> None:
     ]
 
     root = logging.getLogger()
+    for existing_handler in root.handlers:
+        existing_handler.close()
     root.handlers.clear()
-    root.setLevel(settings.LOG_LEVEL.upper())
 
-    handler = logging.StreamHandler(sys.stdout)
+    console_level = logging._nameToLevel.get(settings.LOG_LEVEL.upper(), logging.INFO)
+    file_level = logging._nameToLevel.get(settings.DASHBOARD_LOG_LEVEL.upper(), logging.DEBUG)
+    root_level = (
+        min(console_level, file_level)
+        if settings.DASHBOARD_FILE_LOG_ENABLED
+        else console_level
+    )
+    root.setLevel(root_level)
+
+    handler = ResilientStreamHandler(sys.stdout)
+    handler.setLevel(console_level)
     if settings.LOG_FORMAT == "json":
         handler.setFormatter(RenameEventKey())
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     root.addHandler(handler)
+
+    if settings.DASHBOARD_FILE_LOG_ENABLED:
+        log_path = Path(settings.DASHBOARD_LOG_FILE)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=settings.DASHBOARD_LOG_MAX_BYTES,
+            backupCount=settings.DASHBOARD_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(file_level)
+        file_handler.setFormatter(RenameEventKey())
+        root.addHandler(file_handler)
 
     structlog.configure(
         processors=[

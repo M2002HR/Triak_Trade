@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from triak_trade.config.settings import Settings
 from triak_trade.verification.redaction import redact
+
+_WRITE_LOCK = threading.Lock()
 
 
 def append_dashboard_log(
@@ -20,6 +24,22 @@ def append_dashboard_log(
     module: str | None = None,
 ) -> None:
     path = Path(settings.DASHBOARD_LOG_FILE)
+    target = path.resolve()
+    root = logging.getLogger()
+    has_configured_file_handler = any(
+        isinstance(handler, logging.FileHandler)
+        and Path(handler.baseFilename).resolve() == target
+        for handler in root.handlers
+    )
+    if has_configured_file_handler:
+        logger = logging.getLogger(module or _module_from_event(event))
+        logger.log(
+            logging._nameToLevel.get(level.upper(), logging.INFO),
+            event,
+            extra={"payload": redact(payload)},
+        )
+        return
+
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(
         redact(
@@ -33,7 +53,7 @@ def append_dashboard_log(
         ),
         sort_keys=True,
     )
-    with path.open("a", encoding="utf-8") as handle:
+    with _WRITE_LOCK, path.open("a", encoding="utf-8") as handle:
         handle.write(f"{line}\n")
 
 
