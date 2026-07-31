@@ -16,6 +16,26 @@ _log = logging.getLogger(__name__)
 
 def build_backtest_market_data_provider(settings: Settings) -> MarketDataProvider:
     primary = _build_primary_provider(settings)
+    if settings.BACKTEST_MARKET_DATA_PROVIDER == "toobit":
+        if not settings.BACKTEST_MARKET_DATA_USE_BINANCE_FALLBACK:
+            log_event(
+                _log,
+                logging.INFO,
+                "market_data.backtest_provider_built",
+                primary_provider=primary.__class__.__name__,
+                fallback_enabled=False,
+            )
+            return primary
+        fallback: MarketDataProvider = _build_binance_provider(settings)
+        log_event(
+            _log,
+            logging.INFO,
+            "market_data.backtest_provider_built",
+            primary_provider=primary.__class__.__name__,
+            fallback_provider=fallback.__class__.__name__,
+            fallback_enabled=True,
+        )
+        return CompositeMarketDataProvider([primary, fallback])
     if not settings.BACKTEST_MARKET_DATA_USE_TOOBIT_FALLBACK:
         log_event(
             _log,
@@ -40,6 +60,10 @@ def build_backtest_market_data_provider(settings: Settings) -> MarketDataProvide
 def _build_primary_provider(settings: Settings) -> MarketDataProvider:
     if settings.BACKTEST_MARKET_DATA_PROVIDER == "toobit":
         return _build_toobit_provider(settings)
+    return _build_binance_provider(settings)
+
+
+def _build_binance_provider(settings: Settings) -> BinancePublicFuturesProvider:
     return BinancePublicFuturesProvider(
         base_url=settings.BINANCE_PUBLIC_DATA_BASE_URL,
         rest_base_url=settings.BINANCE_FUTURES_REST_BASE_URL,

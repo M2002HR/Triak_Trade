@@ -1,4 +1,4 @@
-"""Isolated per-signal real backtest runner."""
+"""Signal-first backtest runner."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from triak_trade.agents.classifier import MessageClassifier, RegexMessageClassifier
-from triak_trade.agents.context import ChannelContext
+from triak_trade.agents.context import ChannelContext, merge_parsed_signals
 from triak_trade.backtesting.correlation import resolve_related_signal_id
 from triak_trade.backtesting.directives import (
     apply_text_directive_action,
@@ -55,7 +55,7 @@ from triak_trade.market_data.intervals import interval_to_seconds
 
 log = logging.getLogger(__name__)
 
-_ISOLATED_WORKER_ASSIGNED_CPU_ID: int | None = None
+_BACKTEST_WORKER_ASSIGNED_CPU_ID: int | None = None
 
 _FOLLOW_UP_ACTIONS = {
     SignalAction.CLOSE,
@@ -66,10 +66,10 @@ _FOLLOW_UP_ACTIONS = {
     SignalAction.UPDATE_ENTRY,
 }
 
-_ISOLATED_MAX_CHART_CANDLES = 1200
+_BACKTEST_MAX_CHART_CANDLES = 1200
 
 
-def isolated_available_cpu_ids() -> tuple[int, ...]:
+def backtest_available_cpu_ids() -> tuple[int, ...]:
     if hasattr(os, "sched_getaffinity"):
         try:
             cpu_ids = sorted(int(item) for item in os.sched_getaffinity(0))
@@ -81,19 +81,19 @@ def isolated_available_cpu_ids() -> tuple[int, ...]:
     return tuple(range(max(1, cpu_count)))
 
 
-def default_isolated_parallel_workers() -> int:
-    return max(1, len(isolated_available_cpu_ids()))
+def default_backtest_parallel_workers() -> int:
+    return max(1, len(backtest_available_cpu_ids()))
 
 
-def _build_isolated_worker_cpu_assignments(worker_count: int) -> list[int]:
-    cpu_ids = isolated_available_cpu_ids()
+def _build_backtest_worker_cpu_assignments(worker_count: int) -> list[int]:
+    cpu_ids = backtest_available_cpu_ids()
     if not cpu_ids:
         return []
     safe_worker_count = max(1, min(worker_count, len(cpu_ids)))
     return list(cpu_ids[:safe_worker_count])
 
 
-def isolated_worker_multiprocessing_context() -> Any:
+def backtest_worker_multiprocessing_context() -> Any:
     try:
         return get_context("spawn")
     except ValueError:
@@ -111,7 +111,7 @@ def _write_candle_artifact(
     symbol: str,
     candles: list[Candle],
     artifact_key: str | None = None,
-) -> IsolatedCandleArtifact:
+) -> BacktestCandleArtifact:
     artifact_root.mkdir(parents=True, exist_ok=True)
     path = _artifact_path_for_symbol(artifact_root, artifact_key or symbol)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -131,40 +131,40 @@ def _write_candle_artifact(
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
-    return IsolatedCandleArtifact(
+    return BacktestCandleArtifact(
         symbol=symbol,
         path=str(path),
         candle_count=len(candles),
     )
 
 
-def _load_candle_artifact(artifact: IsolatedCandleArtifact) -> list[Candle]:
+def _load_candle_artifact(artifact: BacktestCandleArtifact) -> list[Candle]:
     with Path(artifact.path).open("rb") as handle:
         candle_count = pickle.load(handle)
         if not isinstance(candle_count, int) or candle_count < 0:
-            raise ValueError("Invalid isolated candle artifact header")
+            raise ValueError("Invalid backtest candle artifact header")
         return [Candle.model_validate(pickle.load(handle)) for _ in range(candle_count)]
 
 
-def _initialize_isolated_worker(cpu_id_queue: Any) -> None:
-    global _ISOLATED_WORKER_ASSIGNED_CPU_ID
+def _initialize_backtest_worker(cpu_id_queue: Any) -> None:
+    global _BACKTEST_WORKER_ASSIGNED_CPU_ID
     try:
         cpu_id = cpu_id_queue.get_nowait()
     except Exception:
         cpu_id = None
     if cpu_id is None:
-        _ISOLATED_WORKER_ASSIGNED_CPU_ID = None
+        _BACKTEST_WORKER_ASSIGNED_CPU_ID = None
         return
     if hasattr(os, "sched_setaffinity"):
         try:
             os.sched_setaffinity(0, {int(cpu_id)})
         except OSError:
-            _ISOLATED_WORKER_ASSIGNED_CPU_ID = None
+            _BACKTEST_WORKER_ASSIGNED_CPU_ID = None
             return
-    _ISOLATED_WORKER_ASSIGNED_CPU_ID = int(cpu_id)
+    _BACKTEST_WORKER_ASSIGNED_CPU_ID = int(cpu_id)
 
 
-def _probe_isolated_worker_cpu() -> dict[str, Any]:
+def _probe_backtest_worker_cpu() -> dict[str, Any]:
     affinity: list[int] = []
     if hasattr(os, "sched_getaffinity"):
         try:
@@ -173,12 +173,12 @@ def _probe_isolated_worker_cpu() -> dict[str, Any]:
             affinity = []
     return {
         "pid": os.getpid(),
-        "assigned_cpu_id": _ISOLATED_WORKER_ASSIGNED_CPU_ID,
+        "assigned_cpu_id": _BACKTEST_WORKER_ASSIGNED_CPU_ID,
         "affinity": affinity,
     }
 
 
-class IsolatedSignalRecord(BaseModel):
+class BacktestSignalRecord(BaseModel):
     signal_id: str
     channel_id: str
     symbol: str
@@ -191,13 +191,13 @@ class IsolatedSignalRecord(BaseModel):
     events: list[BacktestEvent] = Field(default_factory=list)
 
 
-class IsolatedCandleArtifact(BaseModel):
+class BacktestCandleArtifact(BaseModel):
     symbol: str
     path: str
     candle_count: int
 
 
-class IsolatedBacktestRunRequest(RealBacktestRunRequest):
+class BacktestRunRequest(RealBacktestRunRequest):
     capital_per_signal: Decimal = Decimal("100")
     fill_policy: BacktestFillPolicy = BacktestFillPolicy.CONSERVATIVE
     leverage_source: Literal["signal_or_default", "fixed"] = "signal_or_default"
@@ -208,10 +208,12 @@ class IsolatedBacktestRunRequest(RealBacktestRunRequest):
     max_allocation_pct: Decimal = Decimal("20")
     default_stop_pct: Decimal = Decimal("5")
     synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5")
-    fee_rate_pct: Decimal = Decimal("0")
-    close_open_positions_at_end: bool = True
+    max_stop_loss_pct_of_balance: Decimal = Decimal("5")
+    fee_rate_pct: Decimal = Decimal("0.04")
+    consolidation_seconds: int = 180
+    close_open_positions_at_end: bool = False
     lifecycle_refresh_interval: str = "30m"
-    max_parallel_signals: int = Field(default_factory=lambda: default_isolated_parallel_workers())
+    max_parallel_signals: int = Field(default_factory=lambda: default_backtest_parallel_workers())
     include_not_filled_signals: bool = True
 
     @field_validator("capital_per_signal", "max_effective_leverage", "default_signal_leverage")
@@ -228,7 +230,11 @@ class IsolatedBacktestRunRequest(RealBacktestRunRequest):
             raise ValueError("value must be non-negative")
         return value
 
-    @field_validator("synthetic_stop_max_loss_pct_of_balance", "fee_rate_pct")
+    @field_validator(
+        "synthetic_stop_max_loss_pct_of_balance",
+        "max_stop_loss_pct_of_balance",
+        "fee_rate_pct",
+    )
     @classmethod
     def _allow_zero_decimal(cls, value: Decimal) -> Decimal:
         if value < Decimal("0"):
@@ -242,6 +248,13 @@ class IsolatedBacktestRunRequest(RealBacktestRunRequest):
             raise ValueError("max_parallel_signals must be positive")
         return value
 
+    @field_validator("consolidation_seconds")
+    @classmethod
+    def _non_negative_consolidation_seconds(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("consolidation_seconds must be non-negative")
+        return value
+
     @field_validator("lifecycle_refresh_interval")
     @classmethod
     def _validate_lifecycle_interval(cls, value: str) -> str:
@@ -249,7 +262,7 @@ class IsolatedBacktestRunRequest(RealBacktestRunRequest):
         return value
 
     @model_validator(mode="after")
-    def _validate_isolated_values(self) -> IsolatedBacktestRunRequest:
+    def _validate_backtest_values(self) -> BacktestRunRequest:
         if self.max_allocation_pct < self.min_allocation_pct:
             raise ValueError("max_allocation_pct must be >= min_allocation_pct")
         if self.leverage_source == "fixed" and (
@@ -259,15 +272,15 @@ class IsolatedBacktestRunRequest(RealBacktestRunRequest):
         return self
 
 
-class IsolatedBacktestResult(RealBacktestResult):
-    run_type: Literal["isolated"] = "isolated"
+class BacktestResult(RealBacktestResult):
+    run_type: Literal["backtest"] = "backtest"
     signals: list[dict[str, Any]] = Field(default_factory=list)
     aggregate: dict[str, Any] = Field(default_factory=dict)
     report_payload: dict[str, Any] | None = None
 
 
-class IsolatedBacktestCheckpoint(BaseModel):
-    """Durable, non-secret state needed to restart an isolated pipeline phase."""
+class BacktestCheckpoint(BaseModel):
+    """Durable, non-secret state needed to restart a backtest pipeline phase."""
 
     resume_phase: Literal["classify_messages", "fetch_market_data", "simulate", "report"]
     messages: list[RawTelegramMessage] = Field(default_factory=list)
@@ -276,33 +289,33 @@ class IsolatedBacktestCheckpoint(BaseModel):
     traces: list[RealBacktestMessageTrace] = Field(default_factory=list)
     signal_trace_map: dict[str, int] = Field(default_factory=dict)
     symbol_trace_map: dict[str, list[int]] = Field(default_factory=dict)
-    records: list[IsolatedSignalRecord] = Field(default_factory=list)
+    records: list[BacktestSignalRecord] = Field(default_factory=list)
     counts: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     ai_used: bool = False
     regex_fallback_used: bool = False
 
 
-class IsolatedBacktestRunner(RealBacktestRunner):
-    checkpoint_callback: Callable[[IsolatedBacktestCheckpoint], None] | None = None
-    resume_checkpoint: IsolatedBacktestCheckpoint | None = None
+class BacktestRunner(RealBacktestRunner):
+    checkpoint_callback: Callable[[BacktestCheckpoint], None] | None = None
+    resume_checkpoint: BacktestCheckpoint | None = None
 
     async def run(
         self,
         request: RealBacktestRunRequest,
         *,
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None = None,
-    ) -> IsolatedBacktestResult:
-        isolated_request = (
+    ) -> BacktestResult:
+        backtest_request = (
             request
-            if isinstance(request, IsolatedBacktestRunRequest)
-            else IsolatedBacktestRunRequest.model_validate(request.model_dump(mode="python"))
+            if isinstance(request, BacktestRunRequest)
+            else BacktestRunRequest.model_validate(request.model_dump(mode="python"))
         )
         self._log_sending_disabled_for_run = False
         self._run_started_at = datetime.now(timezone.utc)
         self._reset_phase_tracking()
         readiness = self.readiness()
-        from_date, to_date = isolated_request.resolve_range()
+        from_date, to_date = backtest_request.resolve_range()
         warnings: list[str] = []
         checkpoint = self.resume_checkpoint
 
@@ -310,24 +323,24 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             progress_callback,
             phase="starting",
             status="running",
-            summary="Isolated backtest created and waiting for readiness checks.",
+            summary="Backtest created and waiting for readiness checks.",
         )
         if not readiness.ready:
-            return self._write_isolated_failure(
-                request=isolated_request,
+            return self._write_backtest_failure(
+                request=backtest_request,
                 from_date=from_date,
                 to_date=to_date,
                 errors=readiness.issues,
             )
 
-        selection = self._select_classifier(isolated_request.use_ai)
-        if isolated_request.use_ai and not selection.ai_configured:
-            return self._write_isolated_failure(
-                request=isolated_request,
+        selection = self._select_classifier(backtest_request.use_ai)
+        if backtest_request.use_ai and not selection.ai_configured:
+            return self._write_backtest_failure(
+                request=backtest_request,
                 from_date=from_date,
                 to_date=to_date,
                 errors=[
-                    "AI gateway is required for this isolated backtest run "
+                    "AI gateway is required for this backtest run "
                     "but is not enabled."
                 ],
             )
@@ -337,7 +350,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             phase="fetch_history",
             status="running",
             summary=(
-                "Restoring saved isolated checkpoint."
+                "Restoring saved backtest checkpoint."
                 if checkpoint
                 else "Fetching Telegram message history."
             ),
@@ -349,18 +362,18 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         else:
             try:
                 messages, fetch_result = await self.telegram_source.fetch(
-                    channel=isolated_request.channel,
+                    channel=backtest_request.channel,
                     start=from_date,
                     end=to_date,
                     limit=min(
-                        isolated_request.max_messages,
+                        backtest_request.max_messages,
                         self.settings.REAL_BACKTEST_MAX_MESSAGES,
                     ),
-                    start_message_id=isolated_request.start_message_id,
+                    start_message_id=backtest_request.start_message_id,
                 )
             except Exception as exc:
-                return self._write_isolated_failure(
-                    request=isolated_request,
+                return self._write_backtest_failure(
+                    request=backtest_request,
                     from_date=from_date,
                     to_date=to_date,
                     errors=[f"Telegram history fetch failed: {type(exc).__name__}"],
@@ -398,7 +411,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             progress_callback,
             phase="classify_messages",
             status="running",
-            summary="Building isolated signal records from channel history.",
+            summary="Building backtest signal records from channel history.",
             counts=counts,
         )
         (
@@ -408,8 +421,8 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             symbol_trace_map,
             records_by_signal_id,
             counts,
-        ) = await self._build_isolated_records(
-            request=isolated_request,
+        ) = await self._build_backtest_records(
+            request=backtest_request,
             classifier=selection.classifier,
             messages=messages,
             progress_callback=progress_callback,
@@ -430,7 +443,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         if selection.warning:
             self._append_warning(warnings, selection.warning)
         self._publish_checkpoint(
-            IsolatedBacktestCheckpoint(
+            BacktestCheckpoint(
                 resume_phase="fetch_market_data",
                 messages=messages,
                 real_telegram_used=fetch_result.used_real_telegram,
@@ -452,14 +465,14 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             status="completed",
             summary=(
                 f"Classification complete: {counts['classified_messages']} processed, "
-                f"{counts['valid_signals']} isolated records ready."
+                f"{counts['valid_signals']} signal records ready."
             ),
             counts=counts,
         )
 
         if not messages:
-            return self._write_isolated_failure(
-                request=isolated_request,
+            return self._write_backtest_failure(
+                request=backtest_request,
                 from_date=from_date,
                 to_date=to_date,
                 real_telegram_used=fetch_result.used_real_telegram,
@@ -471,19 +484,19 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             )
 
         if not records_by_signal_id:
-            return self._write_isolated_failure(
-                request=isolated_request,
+            return self._write_backtest_failure(
+                request=backtest_request,
                 from_date=from_date,
                 to_date=to_date,
                 real_telegram_used=fetch_result.used_real_telegram,
                 ai_used=ai_used,
                 regex_fallback_used=regex_fallback_used,
-                errors=["No structurally valid isolated signals were detected"],
+                errors=["No structurally valid signals were detected"],
                 counts=counts,
                 warnings=warnings,
             )
 
-        with tempfile.TemporaryDirectory(prefix="triak_isolated_candles_") as artifact_dir:
+        with tempfile.TemporaryDirectory(prefix="triak_backtest_candles_") as artifact_dir:
             artifact_root = Path(artifact_dir)
             self._emit_run_progress(
                 progress_callback,
@@ -494,7 +507,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             )
             prefetched_candles_by_symbol: dict[str, list[Candle]] = {}
             prefetched_candle_ranges_by_symbol: dict[str, Any] = {}
-            candle_artifacts_by_symbol: dict[str, list[IsolatedCandleArtifact]] = {}
+            candle_artifacts_by_symbol: dict[str, list[BacktestCandleArtifact]] = {}
             skipped_reasons: list[str] = []
             real_market_data_used = False
             total_candles_fetched = 0
@@ -504,7 +517,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             fetch_concurrency = max(
                 1,
                 min(
-                    self.settings.ISOLATED_BACKTEST_MARKET_DATA_MAX_CONCURRENCY,
+                    self.settings.BACKTEST_MARKET_DATA_MAX_CONCURRENCY,
                     len(symbol_trace_map) or 1,
                 ),
             )
@@ -515,7 +528,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                 message_ids: list[int],
             ) -> tuple[
                 str,
-                list[IsolatedCandleArtifact] | None,
+                list[BacktestCandleArtifact] | None,
                 str | None,
                 list[str],
                 str | None,
@@ -524,36 +537,36 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                     return symbol, None, None, [], None
                 candidate_symbols = candidate_map.get(symbol, [symbol])
                 range_start, range_end = self._market_data_range_for_symbol(
-                    request=isolated_request,
+                    request=backtest_request,
                     message_ids=message_ids,
                     traces_by_message_id=traces_by_message_id,
                 )
                 requested_candles = self._estimated_candle_count(
                     start=range_start,
                     end=range_end,
-                    interval=isolated_request.interval,
+                    interval=backtest_request.interval,
                 )
-                candle_budget = self.settings.ISOLATED_BACKTEST_MAX_CANDLES_PER_SYMBOL
+                candle_budget = self.settings.BACKTEST_MAX_CANDLES_PER_SYMBOL
                 segments = self._market_data_segments(
                     start=range_start,
                     end=range_end,
-                    interval=isolated_request.interval,
+                    interval=backtest_request.interval,
                     max_candles=candle_budget,
                 )
                 started_at = datetime.now(timezone.utc)
                 self._log_event(
                     logging.INFO,
-                    "backtesting.isolated_market_data_fetch_started",
+                    "backtesting.backtest_market_data_fetch_started",
                     symbol=symbol,
-                    interval=isolated_request.interval,
+                    interval=backtest_request.interval,
                     requested_candles=requested_candles,
                     segment_count=len(segments),
                     candles_per_segment=candle_budget,
-                    timeout_seconds=self.settings.ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS,
+                    timeout_seconds=self.settings.BACKTEST_MARKET_DATA_TIMEOUT_SECONDS,
                     range_start=range_start.isoformat(),
                     range_end=range_end.isoformat(),
                 )
-                artifacts: list[IsolatedCandleArtifact] = []
+                artifacts: list[BacktestCandleArtifact] = []
                 for segment_index, (segment_start, segment_end) in enumerate(segments, start=1):
                     try:
                         async with semaphore:
@@ -565,7 +578,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                                 no_data_candidates,
                             ) = await asyncio.wait_for(
                                 self._ensure_prefetched_market_data(
-                                    request=isolated_request,
+                                    request=backtest_request,
                                     market_symbol=symbol,
                                     candidate_symbols=candidate_symbols,
                                     range_start=segment_start,
@@ -573,26 +586,26 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                                     prefetched_candles_by_symbol=prefetched_candles_by_symbol,
                                     prefetched_candle_ranges_by_symbol=prefetched_candle_ranges_by_symbol,
                                 ),
-                                timeout=self.settings.ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS,
+                                timeout=self.settings.BACKTEST_MARKET_DATA_TIMEOUT_SECONDS,
                             )
                     except TimeoutError:
                         self._log_event(
                             logging.WARNING,
-                            "backtesting.isolated_market_data_fetch_timed_out",
+                            "backtesting.backtest_market_data_fetch_timed_out",
                             symbol=symbol,
-                            interval=isolated_request.interval,
+                            interval=backtest_request.interval,
                             requested_candles=requested_candles,
                             segment_index=segment_index,
                             segment_count=len(segments),
-                            timeout_seconds=self.settings.ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS,
+                            timeout_seconds=self.settings.BACKTEST_MARKET_DATA_TIMEOUT_SECONDS,
                         )
                         return symbol, None, "MarketDataFetchDeadlineExceeded", [], None
                     except Exception as exc:
                         self._log_event(
                             logging.WARNING,
-                            "backtesting.isolated_market_data_fetch_failed",
+                            "backtesting.backtest_market_data_fetch_failed",
                             symbol=symbol,
-                            interval=isolated_request.interval,
+                            interval=backtest_request.interval,
                             error_type=type(exc).__name__,
                             requested_candles=requested_candles,
                             segment_index=segment_index,
@@ -621,9 +634,9 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                     prefetched_candle_ranges_by_symbol.pop(selected_symbol, None)
                 self._log_event(
                     logging.INFO,
-                    "backtesting.isolated_market_data_fetch_finished",
+                    "backtesting.backtest_market_data_fetch_finished",
                     symbol=symbol,
-                    interval=isolated_request.interval,
+                    interval=backtest_request.interval,
                     candle_count=sum(artifact.candle_count for artifact in artifacts),
                     segment_count=len(artifacts),
                     elapsed_ms=max(
@@ -683,15 +696,15 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                 counts=counts,
             )
             if not candle_artifacts_by_symbol:
-                return self._write_isolated_failure(
-                    request=isolated_request,
+                return self._write_backtest_failure(
+                    request=backtest_request,
                     from_date=from_date,
                     to_date=to_date,
                     real_telegram_used=fetch_result.used_real_telegram,
                     real_market_data_used=real_market_data_used,
                     ai_used=ai_used,
                     regex_fallback_used=regex_fallback_used,
-                    errors=["No candle data available for isolated signal simulation"],
+                    errors=["No candle data available for backtest signal simulation"],
                     counts=counts,
                     warnings=warnings,
                     skipped_reasons=skipped_reasons,
@@ -702,8 +715,8 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                 phase="simulate",
                 status="running",
                 summary=(
-                    f"Simulating {len(records_by_signal_id)} isolated signals "
-                    f"with up to {isolated_request.max_parallel_signals} workers."
+                    f"Simulating {len(records_by_signal_id)} signals "
+                    f"with up to {backtest_request.max_parallel_signals} workers."
                 ),
                 counts=counts,
             )
@@ -714,13 +727,13 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             )
             counts["simulation_targets_completed"] = 0
             signal_results = self._simulate_records_from_artifacts(
-                request=isolated_request,
+                request=backtest_request,
                 records=list(records_by_signal_id.values()),
                 candle_artifacts_by_symbol=candle_artifacts_by_symbol,
                 progress_callback=progress_callback,
                 counts=counts,
             )
-        if not isolated_request.include_not_filled_signals:
+        if not backtest_request.include_not_filled_signals:
             signal_results = [
                 item for item in signal_results if str(item.get("status") or "") != "not_filled"
             ]
@@ -735,7 +748,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                 continue
             trace.final_status = str(signal_result.get("status") or "no_trade")
             trace.result_summary = (
-                f"Isolated result={signal_result.get('status')} "
+                f"Backtest result={signal_result.get('status')} "
                 f"pnl={signal_result.get('total_pnl')}"
             )
             self._set_trace_stage(
@@ -753,21 +766,21 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             self._emit_message_progress(
                 progress_callback,
                 phase="simulate",
-                summary=f"Isolated simulation finalized for message {message_id}.",
+                summary=f"Backtest simulation finalized for message {message_id}.",
                 counts=counts,
                 trace=trace,
             )
 
-        aggregate = self._build_isolated_aggregate(
+        aggregate = self._build_backtest_aggregate(
             signals=signal_results,
-            capital_per_signal=isolated_request.capital_per_signal,
+            capital_per_signal=backtest_request.capital_per_signal,
         )
-        result = IsolatedBacktestResult(
+        result = BacktestResult(
             success=True,
-            channel=isolated_request.channel,
+            channel=backtest_request.channel,
             from_date=from_date,
             to_date=to_date,
-            interval=isolated_request.interval,
+            interval=backtest_request.interval,
             real_telegram_used=fetch_result.used_real_telegram,
             real_market_data_used=real_market_data_used,
             ai_used=ai_used,
@@ -811,9 +824,9 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             signals=signal_results,
             aggregate=aggregate,
         )
-        result.report_payload = self._build_isolated_payload(
+        result.report_payload = self._build_backtest_payload(
             result,
-            request=isolated_request,
+            request=backtest_request,
         )
         stored = self.report_store.write(result.report_payload)
         result.report_path = stored.json_path
@@ -829,7 +842,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             phase="simulate",
             status="completed",
             summary=(
-                f"Isolated simulation complete: {result.trades_simulated} signals, "
+                f"Backtest simulation complete: {result.trades_simulated} signals, "
                 f"{result.trades_filled} filled."
             ),
             counts=final_counts,
@@ -838,7 +851,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             progress_callback,
             phase="report",
             status="running",
-            summary="Writing isolated report artifacts.",
+            summary="Writing backtest report artifacts.",
             counts={**final_counts, "report_steps_completed": 0},
         )
         self._emit_run_progress(
@@ -861,9 +874,9 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             live_signals=signal_results,
         )
         result.phase_durations_ms = self._phase_durations_snapshot()
-        result.report_payload = self._build_isolated_payload(
+        result.report_payload = self._build_backtest_payload(
             result,
-            request=isolated_request,
+            request=backtest_request,
         )
         self.report_store.write(
             result.report_payload
@@ -874,7 +887,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         )
         self._log_event(
             logging.INFO,
-            "backtesting.isolated_run_completed",
+            "backtesting.backtest_run_completed",
             channel=request.channel,
             signal_count=result.trades_simulated,
             filled_count=result.trades_filled,
@@ -883,7 +896,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         )
         return result
 
-    def _publish_checkpoint(self, checkpoint: IsolatedBacktestCheckpoint) -> None:
+    def _publish_checkpoint(self, checkpoint: BacktestCheckpoint) -> None:
         callback = getattr(self, "checkpoint_callback", None)
         if callback is not None:
             callback(checkpoint)
@@ -913,10 +926,10 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             segment_start = segment_end
         return segments
 
-    async def _build_isolated_records(
+    async def _build_backtest_records(
         self,
         *,
-        request: IsolatedBacktestRunRequest,
+        request: BacktestRunRequest,
         classifier: MessageClassifier,
         messages: list[RawTelegramMessage],
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
@@ -927,7 +940,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         dict[int, RealBacktestMessageTrace],
         dict[str, int],
         dict[str, list[int]],
-        dict[str, IsolatedSignalRecord],
+        dict[str, BacktestSignalRecord],
         dict[str, int],
     ]:
         checkpoint = self.resume_checkpoint
@@ -957,7 +970,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         raw_by_message_id: dict[int, RawTelegramMessage] = {}
         tracked_signal_ids: set[str] = set()
         closed_signal_ids: set[str] = set()
-        records_by_signal_id: dict[str, IsolatedSignalRecord] = {}
+        records_by_signal_id: dict[str, BacktestSignalRecord] = {}
         sorted_messages = sorted(messages, key=lambda item: item.date)
         context.seed_message_catalog(sorted_messages)
 
@@ -1081,7 +1094,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                 classified.is_potential_new_signal
                 and reply_owner is not None
                 and self._message_matches_signal_identity(parsed_for_event, reply_owner)
-                and self._is_isolated_signal_eligible_for_follow_up(
+                and self._is_backtest_signal_eligible_for_follow_up(
                     signal=reply_owner,
                     method="reply_to",
                     tracked_signal_ids=tracked_signal_ids,
@@ -1097,7 +1110,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                 )
 
             if classified.is_potential_new_signal:
-                symbol_reuse_owner = self._find_reusable_isolated_signal_for_symbol(
+                symbol_reuse_owner = self._find_reusable_backtest_signal_for_symbol(
                     context=context,
                     parsed=parsed_for_event,
                     message=message,
@@ -1154,7 +1167,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                         f"normalized_follow_up_action={effective_action.value}"
                     )
 
-                promoted_parent_id = self._maybe_promote_reply_parent_isolated(
+                promoted_parent_id = self._maybe_promote_reply_parent_backtest(
                     message=message,
                     context=context,
                     parsed_by_message_id=parsed_by_message_id,
@@ -1179,7 +1192,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                     action=effective_action,
                     allow_last_resort=self.settings.REAL_BACKTEST_FOLLOWUP_LAST_RESORT_ATTACH,
                     signal_filter=lambda signal, method: (
-                        self._is_isolated_signal_eligible_for_follow_up(
+                        self._is_backtest_signal_eligible_for_follow_up(
                             signal=signal,
                             method=method,
                             tracked_signal_ids=tracked_signal_ids,
@@ -1201,7 +1214,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                     self._append_warning(
                         warnings,
                         f"Follow-up directive '{effective_action.value}' in message "
-                        f"{message.message_id} could not be attached to any isolated signal.",
+                        f"{message.message_id} could not be attached to any backtest signal.",
                     )
 
             trace.classification = self._classify_label(classified)
@@ -1221,7 +1234,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             )
 
             if signal_id is not None:
-                self._activate_isolated_signal(
+                self._activate_backtest_signal(
                     context=context,
                     signal_id=signal_id,
                     traces_by_message_id=traces_by_message_id,
@@ -1242,15 +1255,15 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                     trace.symbol = parsed_for_event.symbol
                     trace.side = parsed_for_event.side.value
                 if signal_id in tracked_signal_ids:
-                    trace.final_status = "isolated_tracking"
+                    trace.final_status = "backtest_tracking"
                     trace.result_summary = (
-                        "Signal validated and queued for isolated simulation."
+                        "Signal validated and queued for simulation."
                     )
                     self._set_trace_stage(
                         trace,
                         "validated",
                         status="completed",
-                        detail="Signal is structurally valid for isolated simulation.",
+                        detail="Signal is structurally valid for simulation.",
                     )
                     self._set_trace_stage(
                         trace,
@@ -1262,7 +1275,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                         trace,
                         "simulated",
                         status="pending",
-                        detail="Waiting for isolated simulation phase.",
+                        detail="Waiting for simulation phase.",
                     )
                 else:
                     counts["invalid_signals"] += 1
@@ -1366,6 +1379,15 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                 counts=counts,
                 trace=trace,
             )
+        self._apply_live_consolidation(
+            request=request,
+            events=events,
+            records_by_signal_id=records_by_signal_id,
+            traces_by_message_id=traces_by_message_id,
+            symbol_trace_map=symbol_trace_map,
+            tracked_signal_ids=tracked_signal_ids,
+            counts=counts,
+        )
         return (
             events,
             traces_by_message_id,
@@ -1391,7 +1413,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             "preview": (message.text or "")[:200],
         }
 
-    def _activate_isolated_signal(
+    def _activate_backtest_signal(
         self,
         *,
         context: ChannelContext,
@@ -1401,7 +1423,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         event_index_by_signal_id: dict[str, int],
         symbol_trace_map: dict[str, list[int]],
         tracked_signal_ids: set[str],
-        records_by_signal_id: dict[str, IsolatedSignalRecord],
+        records_by_signal_id: dict[str, BacktestSignalRecord],
         counts: dict[str, int],
     ) -> None:
         signal_state = context.get_signal(signal_id)
@@ -1410,7 +1432,10 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         merged_signal = signal_state.current_signal
         if merged_signal.action is not SignalAction.OPEN:
             merged_signal = merged_signal.model_copy(update={"action": SignalAction.OPEN})
-            signal_state.current_signal = merged_signal
+        merged_signal, geometry_error = self.validator.normalize_for_execution(
+            merged_signal
+        )
+        signal_state.current_signal = merged_signal
         base_message_id = signal_state.created_from_message_id
         base_trace = traces_by_message_id.get(base_message_id)
         if base_trace is None:
@@ -1425,7 +1450,9 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             if merged_signal.symbol
             else None
         )
-        if not valid_for_backtest or market_symbol is None:
+        if geometry_error is not None:
+            base_trace.debug_notes.append(f"execution_geometry_rejected={geometry_error}")
+        if geometry_error is not None or not valid_for_backtest or market_symbol is None:
             return
         if signal_id not in tracked_signal_ids:
             counts["valid_signals"] += 1
@@ -1436,7 +1463,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             symbol_trace_map[market_symbol].append(base_message_id)
         records_by_signal_id.setdefault(
             signal_id,
-            IsolatedSignalRecord(
+            BacktestSignalRecord(
                 signal_id=signal_id,
                 channel_id=signal_state.channel_id,
                 symbol=market_symbol,
@@ -1447,8 +1474,169 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             ),
         ).symbol = market_symbol
 
+    def _apply_live_consolidation(
+        self,
+        *,
+        request: BacktestRunRequest,
+        events: list[BacktestEvent],
+        records_by_signal_id: dict[str, BacktestSignalRecord],
+        traces_by_message_id: dict[int, RealBacktestMessageTrace],
+        symbol_trace_map: dict[str, list[int]],
+        tracked_signal_ids: set[str],
+        counts: dict[str, int],
+    ) -> None:
+        """Delay and merge pending signals exactly as the live consolidation phase does."""
+
+        mergeable_actions = {
+            SignalAction.OPEN,
+            SignalAction.UPDATE_SL,
+            SignalAction.UPDATE_TP,
+            SignalAction.UPDATE_LEVERAGE,
+            SignalAction.UPDATE_ENTRY,
+        }
+        invalid_signal_ids: set[str] = set()
+        global_open_replacements: dict[tuple[str, int], BacktestEvent] = {}
+        consolidated_followups: set[tuple[str, int]] = set()
+        for signal_id, record in records_by_signal_id.items():
+            open_index = next(
+                (
+                    index
+                    for index, event in enumerate(record.events)
+                    if event.action is SignalAction.OPEN
+                    and (event.signal_id == signal_id or event.related_signal_id is None)
+                ),
+                None,
+            )
+            if open_index is None:
+                continue
+            open_event = record.events[open_index]
+            deadline = open_event.timestamp + timedelta(
+                seconds=request.consolidation_seconds
+            )
+            merged_signal = open_event.parsed_signal
+            merged_message_ids: list[int] = []
+            for followup in sorted(record.events, key=lambda item: item.timestamp):
+                if followup is open_event or followup.timestamp > deadline:
+                    continue
+                if followup.action not in mergeable_actions:
+                    continue
+                merged_signal = merge_parsed_signals(
+                    merged_signal,
+                    followup.parsed_signal,
+                ).model_copy(update={"action": SignalAction.OPEN})
+                if followup.source_message_id is not None:
+                    merged_message_ids.append(followup.source_message_id)
+                    consolidated_followups.add(
+                        (signal_id, followup.source_message_id)
+                    )
+
+            normalized, geometry_error = self.validator.normalize_for_execution(
+                merged_signal.model_copy(update={"action": SignalAction.OPEN})
+            )
+            structurally_valid, validation_errors = (
+                self.validator.validate_for_backtest_open(normalized)
+            )
+            base_trace = traces_by_message_id.get(record.source_message_id)
+            if geometry_error is not None or not structurally_valid:
+                invalid_signal_ids.add(signal_id)
+                if base_trace is not None:
+                    detail = geometry_error or ", ".join(validation_errors)
+                    base_trace.final_status = "invalid_signal"
+                    base_trace.result_summary = (
+                        f"Signal rejected at live-style consolidation: {detail}"
+                    )
+                    base_trace.debug_notes.append(
+                        f"consolidation_rejected={detail}"
+                    )
+                continue
+
+            notes = [
+                *open_event.debug_notes,
+                f"live_consolidation_seconds={request.consolidation_seconds}",
+            ]
+            if merged_message_ids:
+                notes.append(
+                    "consolidated_update_message_ids="
+                    + ",".join(str(item) for item in merged_message_ids)
+                )
+            consolidated_open = open_event.model_copy(
+                update={
+                    "timestamp": deadline,
+                    "parsed_signal": normalized,
+                    "leverage": normalized.leverage,
+                    "debug_notes": notes,
+                }
+            )
+            record.events[open_index] = consolidated_open
+            record.events[:] = [
+                event
+                for event in record.events
+                if (
+                    event is consolidated_open
+                    or (
+                        signal_id,
+                        event.source_message_id or -1,
+                    )
+                    not in consolidated_followups
+                )
+            ]
+            record.symbol = normalize_market_symbol(normalized.symbol) or record.symbol
+            record.side = normalized.side.value
+            global_open_replacements[(signal_id, record.source_message_id)] = (
+                consolidated_open
+            )
+            if base_trace is not None:
+                base_trace.symbol = normalized.symbol
+                base_trace.side = normalized.side.value
+                base_trace.debug_notes.extend(
+                    note for note in notes if note not in base_trace.debug_notes
+                )
+
+        if invalid_signal_ids:
+            for signal_id in invalid_signal_ids:
+                removed_record = (
+                    records_by_signal_id.pop(signal_id)
+                    if signal_id in records_by_signal_id
+                    else None
+                )
+                tracked_signal_ids.discard(signal_id)
+                if removed_record is not None:
+                    message_ids = symbol_trace_map.get(removed_record.symbol, [])
+                    symbol_trace_map[removed_record.symbol] = [
+                        item
+                        for item in message_ids
+                        if item != removed_record.source_message_id
+                    ]
+                    if not symbol_trace_map[removed_record.symbol]:
+                        symbol_trace_map.pop(removed_record.symbol, None)
+            counts["valid_signals"] = max(
+                0,
+                counts["valid_signals"] - len(invalid_signal_ids),
+            )
+            counts["invalid_signals"] += len(invalid_signal_ids)
+
+        updated_events: list[BacktestEvent] = []
+        for event in events:
+            if (
+                event.signal_id in invalid_signal_ids
+                or event.related_signal_id in invalid_signal_ids
+            ):
+                continue
+            owner_signal_id = event.related_signal_id or event.signal_id or ""
+            if (
+                owner_signal_id,
+                event.source_message_id or -1,
+            ) in consolidated_followups:
+                continue
+            key = (
+                event.signal_id or "",
+                event.source_message_id or -1,
+            )
+            updated_events.append(global_open_replacements.get(key, event))
+        events[:] = updated_events
+
     @staticmethod
-    def _is_isolated_signal_eligible_for_follow_up(
+    def _is_backtest_signal_eligible_for_follow_up(
         *,
         signal: SignalState,
         method: str,
@@ -1462,7 +1650,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         return method in {"reply_to", "reply_chain"} and signal.current_signal is not None
 
     @staticmethod
-    def _find_reusable_isolated_signal_for_symbol(
+    def _find_reusable_backtest_signal_for_symbol(
         *,
         context: ChannelContext,
         parsed: ParsedSignal,
@@ -1484,7 +1672,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             return None
         return max(candidates, key=lambda signal: signal.updated_at)
 
-    def _maybe_promote_reply_parent_isolated(
+    def _maybe_promote_reply_parent_backtest(
         self,
         *,
         message: RawTelegramMessage,
@@ -1497,7 +1685,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         symbol_trace_map: dict[str, list[int]],
         signal_trace_map: dict[str, int],
         traces_by_message_id: dict[int, RealBacktestMessageTrace],
-        records_by_signal_id: dict[str, IsolatedSignalRecord],
+        records_by_signal_id: dict[str, BacktestSignalRecord],
         counts: dict[str, int],
     ) -> str | None:
         parent_id = message.reply_to_msg_id
@@ -1554,7 +1742,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         signal_trace_map[signal_id] = parent_id
         tracked_signal_ids.add(signal_id)
         symbol_trace_map.setdefault(market_symbol, []).append(parent_id)
-        records_by_signal_id[signal_id] = IsolatedSignalRecord(
+        records_by_signal_id[signal_id] = BacktestSignalRecord(
             signal_id=signal_id,
             channel_id=parent_raw.channel_id,
             symbol=market_symbol,
@@ -1575,15 +1763,15 @@ class IsolatedBacktestRunner(RealBacktestRunner):
     def _simulate_records_from_artifacts(
         self,
         *,
-        request: IsolatedBacktestRunRequest,
-        records: list[IsolatedSignalRecord],
-        candle_artifacts_by_symbol: dict[str, list[IsolatedCandleArtifact]],
+        request: BacktestRunRequest,
+        records: list[BacktestSignalRecord],
+        candle_artifacts_by_symbol: dict[str, list[BacktestCandleArtifact]],
         progress_callback: Callable[[RealBacktestProgressEvent], None] | None,
         counts: dict[str, int],
     ) -> list[dict[str, Any]]:
         if not records:
             return []
-        records_by_symbol: dict[str, list[IsolatedSignalRecord]] = defaultdict(list)
+        records_by_symbol: dict[str, list[BacktestSignalRecord]] = defaultdict(list)
         for record in records:
             if record.symbol in candle_artifacts_by_symbol:
                 records_by_symbol[record.symbol].append(record)
@@ -1603,7 +1791,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         total_records = sum(len(job["records"]) for job in jobs)
         counts["simulation_targets_total"] = total_records
         counts["simulation_targets_completed"] = 0
-        available_parallelism = default_isolated_parallel_workers()
+        available_parallelism = default_backtest_parallel_workers()
         worker_count = max(
             1,
             min(
@@ -1616,7 +1804,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             results: list[dict[str, Any]] = []
             completed = 0
             for job in jobs:
-                batch_results = _simulate_isolated_symbol_artifact_job(job)
+                batch_results = _simulate_backtest_symbol_artifact_job(job)
                 results.extend(batch_results)
                 completed += len(batch_results)
                 counts["trades_simulated"] = completed
@@ -1628,25 +1816,25 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                     progress_callback,
                     phase="simulate",
                     status="running",
-                    summary=f"Simulated {completed} of {total_records} isolated signals.",
+                    summary=f"Simulated {completed} of {total_records} signals.",
                     counts=counts,
                 )
             return _sort_signal_results(results)
 
         results_by_symbol: dict[int, list[dict[str, Any]]] = {}
-        cpu_assignments = _build_isolated_worker_cpu_assignments(worker_count)
-        mp_context = isolated_worker_multiprocessing_context()
+        cpu_assignments = _build_backtest_worker_cpu_assignments(worker_count)
+        mp_context = backtest_worker_multiprocessing_context()
         cpu_id_queue = mp_context.Queue()
         for cpu_id in cpu_assignments:
             cpu_id_queue.put(cpu_id)
         with ProcessPoolExecutor(
             max_workers=worker_count,
             mp_context=mp_context,
-            initializer=_initialize_isolated_worker,
+            initializer=_initialize_backtest_worker,
             initargs=(cpu_id_queue,),
         ) as executor:
             future_map = {
-                executor.submit(_simulate_isolated_symbol_artifact_job, job): index
+                executor.submit(_simulate_backtest_symbol_artifact_job, job): index
                 for index, job in enumerate(jobs)
             }
             completed = 0
@@ -1671,7 +1859,7 @@ class IsolatedBacktestRunner(RealBacktestRunner):
                     progress_callback,
                     phase="simulate",
                     status="running",
-                    summary=f"Simulated {completed} of {total_records} isolated signals.",
+                    summary=f"Simulated {completed} of {total_records} signals.",
                     counts=counts,
                 )
         ordered_results = [
@@ -1681,24 +1869,24 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         ]
         return _sort_signal_results(ordered_results)
 
-    def _build_isolated_payload(
+    def _build_backtest_payload(
         self,
-        result: IsolatedBacktestResult,
+        result: BacktestResult,
         *,
-        request: IsolatedBacktestRunRequest,
+        request: BacktestRunRequest,
     ) -> dict[str, Any]:
         payload = result.model_dump(mode="json")
         payload["strategy_key"] = self.strategy_key or "default_risk_managed"
         if self.strategy_key is not None:
             payload["strategy"] = describe_strategy_by_key(self.strategy_key)
         payload["request"] = request.model_dump(mode="json")
-        payload["score_reason"] = "isolated independent signal aggregation"
+        payload["score_reason"] = "backtest independent signal aggregation"
         return payload
 
-    def _write_isolated_failure(
+    def _write_backtest_failure(
         self,
         *,
-        request: IsolatedBacktestRunRequest,
+        request: BacktestRunRequest,
         from_date: datetime,
         to_date: datetime,
         errors: list[str],
@@ -1709,9 +1897,9 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         real_market_data_used: bool = False,
         ai_used: bool = False,
         regex_fallback_used: bool = False,
-    ) -> IsolatedBacktestResult:
+    ) -> BacktestResult:
         counts = counts or {}
-        result = IsolatedBacktestResult(
+        result = BacktestResult(
             success=False,
             channel=request.channel,
             from_date=from_date,
@@ -1749,19 +1937,19 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             runtime_duration_ms=self._elapsed_runtime_ms(),
             phase_durations_ms=self._phase_durations_snapshot(),
             signals=[],
-            aggregate=self._build_isolated_aggregate(
+            aggregate=self._build_backtest_aggregate(
                 signals=[],
                 capital_per_signal=request.capital_per_signal,
             ),
         )
-        result.report_payload = self._build_isolated_payload(result, request=request)
+        result.report_payload = self._build_backtest_payload(result, request=request)
         stored = self.report_store.write(result.report_payload)
         result.report_path = stored.json_path
         result.markdown_report_path = stored.markdown_path
         return result
 
     @staticmethod
-    def _build_isolated_aggregate(
+    def _build_backtest_aggregate(
         *,
         signals: list[dict[str, Any]],
         capital_per_signal: Decimal,
@@ -1790,11 +1978,11 @@ class IsolatedBacktestRunner(RealBacktestRunner):
         gross_loss = sum((value for value in pnls if value < 0), Decimal("0"))
         total_pnl = sum(pnls, Decimal("0"))
         final_balance = (capital_per_signal * Decimal(len(signals))) + total_pnl
-        equity_curve = _isolated_equity_curve(
+        equity_curve = _backtest_equity_curve(
             signals=signals,
             capital_per_signal=capital_per_signal,
         )
-        period_pnl = _isolated_period_pnl(signals)
+        period_pnl = _backtest_period_pnl(signals)
         return {
             "total_signals": len(signals),
             "filled_signals": len(filled),
@@ -1826,23 +2014,23 @@ class IsolatedBacktestRunner(RealBacktestRunner):
             or "0",
             "total_final_balance": decimal_to_plain_string(final_balance) or "0",
             "period_pnl": period_pnl,
-            "symbol_summary": _isolated_symbol_summary(signals),
+            "symbol_summary": _backtest_symbol_summary(signals),
             "equity_curve": equity_curve,
             "best_signals": _best_or_worst_signals(signals, reverse=True),
             "worst_signals": _best_or_worst_signals(signals, reverse=False),
         }
 
 
-def _simulate_isolated_symbol_artifact_job(job: dict[str, Any]) -> list[dict[str, Any]]:
+def _simulate_backtest_symbol_artifact_job(job: dict[str, Any]) -> list[dict[str, Any]]:
     records = [
-        IsolatedSignalRecord.model_validate(item)
+        BacktestSignalRecord.model_validate(item)
         for item in job["records"]
     ]
     artifacts = [
-        IsolatedCandleArtifact.model_validate(item)
+        BacktestCandleArtifact.model_validate(item)
         for item in job["artifacts"]
     ]
-    request = IsolatedBacktestRunRequest.model_validate(job["request"])
+    request = BacktestRunRequest.model_validate(job["request"])
     strategy_key = str(job["strategy_key"])
     simulator = BacktestSimulator()
     strategy = load_strategy(strategy_key)
@@ -1872,6 +2060,7 @@ def _simulate_isolated_symbol_artifact_job(job: dict[str, Any]) -> list[dict[str
                 max_allocation_pct=request.max_allocation_pct,
                 default_stop_pct=request.default_stop_pct,
                 synthetic_stop_max_loss_pct_of_balance=request.synthetic_stop_max_loss_pct_of_balance,
+                max_stop_loss_pct_of_balance=request.max_stop_loss_pct_of_balance,
                 strategy=strategy,
                 fee_rate_pct=request.fee_rate_pct,
                 default_signal_leverage=request.default_signal_leverage,
@@ -1885,7 +2074,7 @@ def _simulate_isolated_symbol_artifact_job(job: dict[str, Any]) -> list[dict[str
             signal_state = snapshots[-1].signal_states.get(record.signal_id)
         trade = next((item for item in trades if item.signal_id == record.signal_id), None)
         results.append(
-            _serialize_isolated_signal_result(
+            _serialize_backtest_signal_result(
                 record=record,
                 trade=trade,
                 signal_state=signal_state,
@@ -1897,9 +2086,9 @@ def _simulate_isolated_symbol_artifact_job(job: dict[str, Any]) -> list[dict[str
     return results
 
 
-def _serialize_isolated_signal_result(
+def _serialize_backtest_signal_result(
     *,
-    record: IsolatedSignalRecord,
+    record: BacktestSignalRecord,
     trade: Any | None,
     signal_state: Any | None,
     snapshots: list[Any],
@@ -1910,7 +2099,7 @@ def _serialize_isolated_signal_result(
         lifecycle = RealBacktestRunner._signal_lifecycle_events(signal_state)
         lifecycle.extend(record.lifecycle_messages)
         total_pnl = signal_state.realized_pnl + signal_state.unrealized_pnl
-        chart_payload = _build_isolated_chart_payload(signal_state)
+        chart_payload = _build_backtest_chart_payload(signal_state)
         return {
             "signal_id": signal_state.signal_id,
             "symbol": signal_state.symbol,
@@ -2037,16 +2226,16 @@ def _serialize_isolated_signal_result(
     }
 
 
-def _build_isolated_chart_payload(signal_state: Any) -> dict[str, Any]:
+def _build_backtest_chart_payload(signal_state: Any) -> dict[str, Any]:
     history = [
         point
         for point in (signal_state.price_history or [])
         if hasattr(point, "candle_open_time") and hasattr(point, "candle_close_time")
     ]
-    chart_candles = _compact_isolated_chart_candles(history)
+    chart_candles = _compact_backtest_chart_candles(history)
     return {
         "timezone": "Asia/Tehran",
-        "interval": _isolated_chart_interval(chart_candles),
+        "interval": _backtest_chart_interval(chart_candles),
         "candles": chart_candles,
         "visible_points": len(chart_candles),
         "source_points": len(history),
@@ -2060,15 +2249,15 @@ def _build_isolated_chart_payload(signal_state: Any) -> dict[str, Any]:
     }
 
 
-def _compact_isolated_chart_candles(history: list[Any]) -> list[dict[str, Any]]:
+def _compact_backtest_chart_candles(history: list[Any]) -> list[dict[str, Any]]:
     if not history:
         return []
-    if len(history) <= _ISOLATED_MAX_CHART_CANDLES:
+    if len(history) <= _BACKTEST_MAX_CHART_CANDLES:
         return [_signal_price_point_to_chart_candle(point) for point in history]
 
     bucket_size = max(
         1,
-        (len(history) + _ISOLATED_MAX_CHART_CANDLES - 1) // _ISOLATED_MAX_CHART_CANDLES,
+        (len(history) + _BACKTEST_MAX_CHART_CANDLES - 1) // _BACKTEST_MAX_CHART_CANDLES,
     )
     candles: list[dict[str, Any]] = []
     for index in range(0, len(history), bucket_size):
@@ -2127,7 +2316,7 @@ def _signal_price_point_to_chart_candle(point: Any) -> dict[str, Any]:
     }
 
 
-def _isolated_chart_interval(candles: list[dict[str, Any]]) -> str:
+def _backtest_chart_interval(candles: list[dict[str, Any]]) -> str:
     if len(candles) < 2:
         return "n/a"
     first = datetime.fromisoformat(str(candles[0]["timestamp"]))
@@ -2136,7 +2325,7 @@ def _isolated_chart_interval(candles: list[dict[str, Any]]) -> str:
     return f"{minutes}m" if minutes > 0 else "n/a"
 
 
-def _isolated_period_pnl(signals: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _backtest_period_pnl(signals: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     closed = [item for item in signals if item.get("exit_time")]
     return {
         "daily": _bucket_signal_pnl(closed, "%Y-%m-%d"),
@@ -2173,7 +2362,7 @@ def _bucket_signal_pnl(signals: list[dict[str, Any]], pattern: str) -> list[dict
     ]
 
 
-def _isolated_symbol_summary(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _backtest_symbol_summary(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for signal in signals:
         symbol = str(signal.get("symbol") or "unknown")
@@ -2214,7 +2403,7 @@ def _isolated_symbol_summary(signals: list[dict[str, Any]]) -> list[dict[str, An
     ]
 
 
-def _isolated_equity_curve(
+def _backtest_equity_curve(
     *,
     signals: list[dict[str, Any]],
     capital_per_signal: Decimal,

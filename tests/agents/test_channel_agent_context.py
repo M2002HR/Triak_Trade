@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from triak_trade.agents.context import ChannelContext
+from triak_trade.agents.context import ChannelContext, merge_parsed_signals
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, SignalStatus, TradeSide
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
 
@@ -233,3 +233,28 @@ def test_merge_signal_preserves_core_identity_fields() -> None:
     assert state.current_signal.side is TradeSide.LONG
     assert state.current_signal.market is MarketType.FUTURES
     assert state.current_signal.stop_loss == Decimal("96")
+
+
+def test_merge_parsed_signals_uses_same_pending_update_rules() -> None:
+    now = datetime.now(timezone.utc)
+    current = _signal("sig-1", "BTCUSDT", now).current_signal
+    assert current is not None
+    update = current.model_copy(
+        update={
+            "action": SignalAction.UPDATE_TP,
+            "entry_low": None,
+            "entry_high": None,
+            "stop_loss": Decimal("96"),
+            "take_profits": [Decimal("112")],
+            "leverage": 7,
+        }
+    )
+
+    merged = merge_parsed_signals(current, update)
+
+    assert merged.symbol == "BTCUSDT"
+    assert merged.entry_low == Decimal("100")
+    assert merged.entry_high == Decimal("101")
+    assert merged.stop_loss == Decimal("96")
+    assert merged.take_profits == [Decimal("112")]
+    assert merged.leverage == 7

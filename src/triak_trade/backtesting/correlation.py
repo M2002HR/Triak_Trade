@@ -1,4 +1,4 @@
-"""Deterministic follow-up correlation for the real backtest.
+"""Deterministic follow-up correlation for the backtest.
 
 The AI classifier proposes a ``related_signal_id`` for follow-up messages
 (close, cancel, stop/target updates, risk-free), but real-world data shows it

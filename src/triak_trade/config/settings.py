@@ -59,8 +59,9 @@ class Settings(BaseSettings):
     BINANCE_PUBLIC_DATA_TIMEOUT_SECONDS: int = 30
     BINANCE_PUBLIC_REAL_TEST_SYMBOL: str = "BTCUSDT"
     RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS: int = 0
-    BACKTEST_MARKET_DATA_PROVIDER: Literal["binance_public", "toobit"] = "binance_public"
+    BACKTEST_MARKET_DATA_PROVIDER: Literal["binance_public", "toobit"] = "toobit"
     BACKTEST_MARKET_DATA_USE_TOOBIT_FALLBACK: bool = True
+    BACKTEST_MARKET_DATA_USE_BINANCE_FALLBACK: bool = True
     TOOBIT_API_KEY: SecretStr = Field(default=SecretStr("replace_me"))
     TOOBIT_API_SECRET: SecretStr = Field(default=SecretStr("replace_me"))
     TELEGRAM_API_ID: int = 0
@@ -105,6 +106,10 @@ class Settings(BaseSettings):
     DASHBOARD_PID_FILE: str = "runtime/dashboard/dashboard.pid"
     DASHBOARD_STATUS_FILE: str = "runtime/dashboard/status.json"
     DASHBOARD_LOG_FILE: str = "runtime/dashboard/dashboard.log"
+    DASHBOARD_FILE_LOG_ENABLED: bool = True
+    DASHBOARD_LOG_LEVEL: str = "DEBUG"
+    DASHBOARD_LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
+    DASHBOARD_LOG_BACKUP_COUNT: int = Field(default=5, ge=0)
     DASHBOARD_AUTO_RELOAD: bool = False
     ROOT_ENV_FILE: str = ".env.local"
     AUTO_MODE_ENABLED: bool = False
@@ -227,27 +232,27 @@ class Settings(BaseSettings):
     REAL_BACKTEST_DEFAULT_INTERVAL: str = "1m"
     REAL_BACKTEST_MAX_MESSAGES: int = 1000
     REAL_BACKTEST_MAX_CANDLES: int = 100000
-    # Per-symbol candle budget for real-backtest prefetch windows.
+    # Per-symbol candle budget for backtest prefetch windows.
     # The runner now centers/extends candle windows around each signal's actual
     # time instead of anchoring every fetch to the requested backtest start.
     # That keeps long backtests from starving later signals while still putting
     # a hard cap on per-symbol memory growth. 90 000 candles at 1m is about
     # 62.5 days of data for a single symbol. Set to 0 to disable the cap.
     REAL_BACKTEST_MAX_CANDLES_PER_SYMBOL: int = 90000
-    # Isolated backtests fetch and simulate many independent symbols. Keep this
+    # Backtests fetch and simulate many independent symbols. Keep this
     # budget deliberately lower than the regular runner's cache window: Candle
     # objects carry Decimal values and a single large 1m series can otherwise
     # exhaust the dashboard worker's cgroup memory. Oversized symbol windows
     # are reported as skipped rather than silently truncated and ranked.
-    ISOLATED_BACKTEST_MAX_CANDLES_PER_SYMBOL: int = Field(default=10000, ge=1)
+    BACKTEST_MAX_CANDLES_PER_SYMBOL: int = Field(default=10000, ge=1)
     # This is an end-to-end budget for one symbol, including archive downloads,
     # provider fallback and parsing; provider HTTP timeouts alone are not enough
     # to bound a long series of successful-but-slow requests.
-    ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS: int = Field(default=180, ge=1)
+    BACKTEST_MARKET_DATA_TIMEOUT_SECONDS: int = Field(default=180, ge=1)
     # Fetching multiple Decimal-heavy candle series concurrently was the source
     # of an OOM restart. Keep acquisition serialized; signal simulation retains
     # its independently configured worker parallelism.
-    ISOLATED_BACKTEST_MARKET_DATA_MAX_CONCURRENCY: int = Field(default=1, ge=1)
+    BACKTEST_MARKET_DATA_MAX_CONCURRENCY: int = Field(default=1, ge=1)
     REAL_BACKTEST_ACTIVE_SIGNAL_HOURS: int = 0
     REAL_BACKTEST_REPORT_DIR: str = "runtime/reports/backtests"
     REAL_BACKTEST_USE_AI: bool = True
@@ -276,11 +281,12 @@ class Settings(BaseSettings):
     # of the account balance that existed when the position was opened. The cap is
     # enforced after allocation/leverage sizing and includes modeled entry/exit fees.
     BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE: Decimal = Decimal("5")
+    BACKTEST_MAX_STOP_LOSS_PCT_OF_BALANCE: Decimal = Decimal("5")
     # Per-side trading fee charged on entry and on each (partial) exit, as a
     # percent of the filled notional (e.g. Decimal("0.04") = 0.04% taker fee).
-    # Default 0 keeps PnL gross (no behavior change); set it to model realistic
-    # exchange costs. Fees are subtracted from each trade's net pnl and balance.
-    BACKTEST_FEE_RATE_PCT: Decimal = Decimal("0")
+    # Match the live taker-fee model by default. Fees are subtracted from each
+    # trade's net pnl and balance.
+    BACKTEST_FEE_RATE_PCT: Decimal = Decimal("0.04")
     # During message-by-message classification, the live simulation is re-run
     # from scratch on every N-th message (or immediately on every signal-bearing
     # message). Higher values reduce CPU/I/O at the cost of slightly delayed

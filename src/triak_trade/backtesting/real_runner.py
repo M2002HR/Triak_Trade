@@ -358,9 +358,25 @@ class RealBacktestRunner:
                 and self.settings.TELEGRAM_SESSION_DIR
             )
         )
-        historical_market_ready = bool(
+        uses_toobit = (
+            self.settings.BACKTEST_MARKET_DATA_PROVIDER == "toobit"
+            or self.settings.BACKTEST_MARKET_DATA_USE_TOOBIT_FALLBACK
+        )
+        uses_binance = (
+            self.settings.BACKTEST_MARKET_DATA_PROVIDER == "binance_public"
+            or self.settings.BACKTEST_MARKET_DATA_USE_BINANCE_FALLBACK
+        )
+        toobit_market_ready = bool(
+            self.settings.TOOBIT_BASE_URL
+            and self.settings.TOOBIT_KLINES_PATH
+        )
+        binance_market_ready = bool(
             self.settings.BINANCE_PUBLIC_DATA_BASE_URL
             and self.settings.BINANCE_PUBLIC_DATA_CACHE_DIR
+        )
+        historical_market_ready = (
+            (not uses_toobit or toobit_market_ready)
+            and (not uses_binance or binance_market_ready)
         )
         if not self.settings.REAL_BACKTEST_ENABLED:
             issues.append("REAL_BACKTEST_ENABLED=true is required")
@@ -368,16 +384,30 @@ class RealBacktestRunner:
             issues.append("RUN_BACKTEST_INTEGRATION_TESTS=1 is required")
         if self.settings.RUN_TELEGRAM_INTEGRATION_TESTS != 1:
             issues.append("RUN_TELEGRAM_INTEGRATION_TESTS=1 is required")
-        if self.settings.RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS != 1:
+        if (
+            uses_toobit
+            and self.settings.RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS != 1
+        ):
+            issues.append("RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1 is required")
+        if (
+            uses_binance
+            and self.settings.RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS != 1
+        ):
             issues.append("RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS=1 is required")
         if not telegram_credentials_present:
             issues.append("TELEGRAM_API_ID and TELEGRAM_API_HASH must be configured")
         if not telegram_session_configured:
             issues.append("TELEGRAM_SESSION_NAME and TELEGRAM_SESSION_DIR must be configured")
-        if not historical_market_ready:
+        if uses_toobit and not toobit_market_ready:
+            issues.append("Toobit public historical market-data settings are incomplete")
+        if uses_binance and not binance_market_ready:
             issues.append("Binance public historical market-data settings are incomplete")
         Path(self.settings.REAL_BACKTEST_REPORT_DIR).mkdir(parents=True, exist_ok=True)
-        Path(self.settings.BINANCE_PUBLIC_DATA_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+        if uses_binance:
+            Path(self.settings.BINANCE_PUBLIC_DATA_CACHE_DIR).mkdir(
+                parents=True,
+                exist_ok=True,
+            )
         ai_gateway_reachable = (
             self._check_ai_gateway_reachable(timeout_seconds=2)
             if self.settings.AI_GATEWAY_ENABLED
@@ -401,7 +431,7 @@ class RealBacktestRunner:
         )
         self._log_event(
             logging.INFO,
-            "backtesting.real_readiness_evaluated",
+            "backtesting.backtest_readiness_evaluated",
             ready=readiness.ready,
             issue_count=len(readiness.issues),
             issues=readiness.issues,
@@ -425,7 +455,7 @@ class RealBacktestRunner:
         warnings: list[str] = []
         self._log_event(
             logging.INFO,
-            "backtesting.real_run_started",
+            "backtesting.backtest_run_started",
             channel=request.channel,
             interval=request.interval,
             from_date=from_date.isoformat(),
@@ -444,13 +474,13 @@ class RealBacktestRunner:
         if not readiness.ready:
             self._log_event(
                 logging.WARNING,
-                "backtesting.real_run_blocked",
+                "backtesting.backtest_run_blocked",
                 channel=request.channel,
                 issues=readiness.issues,
             )
             if request.send_log_channel:
                 await self._try_send_log(
-                    "Real backtest blocked before start\n"
+                    "Backtest blocked before start\n"
                     f"channel={request.channel}\nissues={'; '.join(readiness.issues)}",
                     warnings=warnings,
                     warning_message=(
@@ -469,7 +499,7 @@ class RealBacktestRunner:
         selection = self._select_classifier(request.use_ai)
         self._log_event(
             logging.INFO,
-            "backtesting.real_classifier_selected",
+            "backtesting.backtest_classifier_selected",
             channel=request.channel,
             ai_requested=selection.ai_requested,
             ai_configured=selection.ai_configured,
@@ -479,7 +509,7 @@ class RealBacktestRunner:
         if request.use_ai and not selection.ai_configured:
             if request.send_log_channel:
                 await self._try_send_log(
-                    "Real backtest failed before classification\n"
+                    "Backtest failed before classification\n"
                     f"channel={request.channel}\nreason=AI gateway required but unavailable",
                     warnings=warnings,
                     warning_message=(
@@ -505,7 +535,7 @@ class RealBacktestRunner:
         )
         if request.send_log_channel:
             await self._try_send_log(
-                f"Real backtest started\nchannel={request.channel}\ninterval={request.interval}\n"
+                f"Backtest started\nchannel={request.channel}\ninterval={request.interval}\n"
                 f"range={from_date.isoformat()} -> {to_date.isoformat()}",
                 warnings=warnings,
                 warning_message=(
@@ -525,7 +555,7 @@ class RealBacktestRunner:
         except TelegramCredentialError as exc:
             self._log_event(
                 logging.ERROR,
-                "backtesting.real_history_fetch_failed",
+                "backtesting.backtest_history_fetch_failed",
                 channel=request.channel,
                 error_type=type(exc).__name__,
                 error=str(exc),
@@ -540,7 +570,7 @@ class RealBacktestRunner:
         except Exception as exc:
             self._log_event(
                 logging.ERROR,
-                "backtesting.real_history_fetch_failed",
+                "backtesting.backtest_history_fetch_failed",
                 channel=request.channel,
                 error_type=type(exc).__name__,
                 error=str(exc),
@@ -592,7 +622,7 @@ class RealBacktestRunner:
         )
         self._log_event(
             logging.INFO,
-            "backtesting.real_history_fetched",
+            "backtesting.backtest_history_fetched",
             channel=request.channel,
             message_count=len(messages),
             caption_media_candidates=counts["caption_media_candidates"],
@@ -663,7 +693,7 @@ class RealBacktestRunner:
             )
         self._log_event(
             logging.INFO,
-            "backtesting.real_classification_completed",
+            "backtesting.backtest_classification_completed",
             channel=request.channel,
             classified_messages=counts["classified_messages"],
             valid_signals=counts["valid_signals"],
@@ -687,7 +717,7 @@ class RealBacktestRunner:
 
         if request.send_log_channel:
             await self._try_send_log(
-                "Real backtest history fetched\n"
+                "Backtest history fetched\n"
                 f"channel={request.channel}\n"
                 f"messages={len(messages)}\n"
                 f"symbols_detected={len(symbols)}",
@@ -701,12 +731,12 @@ class RealBacktestRunner:
         if not messages:
             self._log_event(
                 logging.WARNING,
-                "backtesting.real_run_failed_no_messages",
+                "backtesting.backtest_run_failed_no_messages",
                 channel=request.channel,
             )
             if request.send_log_channel:
                 await self._try_send_log(
-                    "Real backtest finished with no messages\n"
+                    "Backtest finished with no messages\n"
                     f"channel={request.channel}\n"
                     f"range={from_date.isoformat()} -> {to_date.isoformat()}",
                     warnings=warnings,
@@ -743,14 +773,14 @@ class RealBacktestRunner:
         if not symbols:
             self._log_event(
                 logging.WARNING,
-                "backtesting.real_run_failed_no_valid_signals",
+                "backtesting.backtest_run_failed_no_valid_signals",
                 channel=request.channel,
                 total_messages=len(messages),
                 valid_signals=len(valid_open_events),
             )
             if request.send_log_channel:
                 await self._try_send_log(
-                    "Real backtest finished without valid signals\n"
+                    "Backtest finished without valid signals\n"
                     f"channel={request.channel}\nmessages={len(messages)}\n"
                     "reason=No structurally valid signals were detected",
                     warnings=warnings,
@@ -963,7 +993,7 @@ class RealBacktestRunner:
 
         if request.send_log_channel:
             await self._try_send_log(
-                f"Real backtest candles fetched\nchannel={request.channel}\n"
+                f"Backtest candles fetched\nchannel={request.channel}\n"
                 f"candles={len(candles)}\nreal_market_data_used={real_market_data_used}",
                 warnings=warnings,
                 warning_message=(
@@ -982,7 +1012,7 @@ class RealBacktestRunner:
         if not candles:
             if request.send_log_channel:
                 await self._try_send_log(
-                    "Real backtest finished without market data\n"
+                    "Backtest finished without market data\n"
                     f"channel={request.channel}\nsymbols={', '.join(symbols)}\n"
                     "reason=No candle data available for detected symbols",
                     warnings=warnings,
@@ -1219,7 +1249,7 @@ class RealBacktestRunner:
         result.markdown_report_path = stored.markdown_path
         self._log_event(
             logging.INFO,
-            "backtesting.real_report_written",
+            "backtesting.backtest_report_written",
             channel=request.channel,
             report_path=result.report_path,
             markdown_report_path=result.markdown_report_path,
@@ -1261,7 +1291,7 @@ class RealBacktestRunner:
 
         if request.send_log_channel:
             await self._try_send_log(
-                f"Real backtest complete\nchannel={request.channel}\n"
+                f"Backtest complete\nchannel={request.channel}\n"
                 f"messages={result.total_messages}\nvalid_signals={result.valid_signals}\n"
                 f"trades={result.trades_simulated}\npnl={result.total_pnl}\n"
                 f"report={result.markdown_report_path}",
@@ -1273,7 +1303,7 @@ class RealBacktestRunner:
             )
         self._log_event(
             logging.INFO,
-            "backtesting.real_run_completed",
+            "backtesting.backtest_run_completed",
             channel=request.channel,
             total_messages=result.total_messages,
             valid_signals=result.valid_signals,
@@ -1292,7 +1322,7 @@ class RealBacktestRunner:
     ) -> RealBacktestResult:
         self._log_event(
             logging.INFO,
-            "backtesting.real_run_sync_invoked",
+            "backtesting.backtest_run_sync_invoked",
             channel=request.channel,
             interval=request.interval,
         )
@@ -1301,21 +1331,21 @@ class RealBacktestRunner:
     def latest_report_summary(self) -> dict[str, Any] | None:
         latest = self.report_store.latest()
         if latest is None:
-            self._log_event(logging.DEBUG, "backtesting.real_latest_report_missing")
+            self._log_event(logging.DEBUG, "backtesting.backtest_latest_report_missing")
             return None
         try:
             payload = json.loads(latest.read_text(encoding="utf-8"))
         except ValueError:
             self._log_event(
                 logging.WARNING,
-                "backtesting.real_latest_report_invalid_json",
+                "backtesting.backtest_latest_report_invalid_json",
                 report_path=str(latest),
             )
             return {"report_path": str(latest), "error": "latest report is not valid JSON"}
         payload["report_path"] = str(latest)
         self._log_event(
             logging.DEBUG,
-            "backtesting.real_latest_report_loaded",
+            "backtesting.backtest_latest_report_loaded",
             report_path=str(latest),
         )
         return dict(payload)
@@ -1377,7 +1407,7 @@ class RealBacktestRunner:
             )
             self._log_event(
                 logging.INFO,
-                "backtesting.real_classifier_configured",
+                "backtesting.backtest_classifier_configured",
                 classifier_type=type(selection.classifier).__name__,
                 ai_requested=True,
                 ai_configured=selection.ai_configured,
@@ -1419,7 +1449,7 @@ class RealBacktestRunner:
             )
             self._log_event(
                 logging.WARNING,
-                "backtesting.real_classifier_requires_ai_gateway",
+                "backtesting.backtest_classifier_requires_ai_gateway",
                 classifier_type=type(selection.classifier).__name__,
                 ai_requested=True,
             )
@@ -1436,7 +1466,7 @@ class RealBacktestRunner:
         )
         self._log_event(
             logging.INFO,
-            "backtesting.real_classifier_configured",
+            "backtesting.backtest_classifier_configured",
             classifier_type=type(selection.classifier).__name__,
             ai_requested=use_ai,
             ai_configured=False,
@@ -1457,7 +1487,7 @@ class RealBacktestRunner:
         if getattr(self, "_log_sending_disabled_for_run", False):
             self._log_event(
                 logging.DEBUG,
-                "backtesting.real_log_send_skipped",
+                "backtesting.backtest_log_send_skipped",
                 reason="disabled_for_run",
             )
             return False
@@ -1471,7 +1501,7 @@ class RealBacktestRunner:
                 self._last_log_send_failure_reason = type(exc).__name__
                 self._log_event(
                     logging.WARNING,
-                    "backtesting.real_log_send_attempt_failed",
+                    "backtesting.backtest_log_send_attempt_failed",
                     attempt=attempt + 1,
                     attempts=attempts,
                     error_type=type(exc).__name__,
@@ -1483,7 +1513,7 @@ class RealBacktestRunner:
                     self._last_log_send_failure_reason = None
                     self._log_event(
                         logging.INFO,
-                        "backtesting.real_log_send_succeeded",
+                        "backtesting.backtest_log_send_succeeded",
                         attempt=attempt + 1,
                         attempts=attempts,
                     )
@@ -1491,7 +1521,7 @@ class RealBacktestRunner:
                 self._last_log_send_failure_reason = self._send_result_skip_reason(result)
                 self._log_event(
                     logging.WARNING,
-                    "backtesting.real_log_send_skipped",
+                    "backtesting.backtest_log_send_skipped",
                     attempt=attempt + 1,
                     attempts=attempts,
                     reason=self._last_log_send_failure_reason,
@@ -1505,7 +1535,7 @@ class RealBacktestRunner:
         self._log_sending_disabled_for_run = True
         self._log_event(
             logging.WARNING,
-            "backtesting.real_log_send_disabled_for_run",
+            "backtesting.backtest_log_send_disabled_for_run",
             reason=reason,
         )
         return False
@@ -1586,7 +1616,7 @@ class RealBacktestRunner:
     ) -> RealBacktestResult:
         self._log_event(
             logging.ERROR,
-            "backtesting.real_run_failed",
+            "backtesting.backtest_run_failed",
             channel=channel,
             interval=interval,
             from_date=from_date.isoformat(),
@@ -3904,7 +3934,7 @@ class RealBacktestRunner:
         )
         self._log_event(
             logging.DEBUG,
-            "backtesting.real_progress_run_event",
+            "backtesting.backtest_progress_run_event",
             phase=phase,
             status=status,
             summary=summary,
@@ -3943,7 +3973,7 @@ class RealBacktestRunner:
     ) -> None:
         self._log_event(
             logging.DEBUG,
-            "backtesting.real_progress_message_event",
+            "backtesting.backtest_progress_message_event",
             phase=phase,
             message_id=trace.message_id,
             final_status=trace.final_status,

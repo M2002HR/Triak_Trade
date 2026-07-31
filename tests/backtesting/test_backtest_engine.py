@@ -4,7 +4,8 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from triak_trade.backtesting import BacktestEngine, BacktestRequest
+from triak_trade.backtesting.engine import BacktestEngine
+from triak_trade.backtesting.models import BacktestRequest
 from triak_trade.backtesting.strategies.default_risk import DefaultRiskManagedStrategy
 from triak_trade.backtesting.strategies.registry import load_strategy
 from triak_trade.domain.enums import BacktestFillPolicy

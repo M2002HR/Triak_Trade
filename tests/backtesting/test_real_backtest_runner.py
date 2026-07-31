@@ -133,6 +133,34 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
     return Settings(_env_file=None, **values)
 
 
+def test_readiness_uses_the_configured_toobit_primary_guard(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        BACKTEST_MARKET_DATA_PROVIDER="toobit",
+        BACKTEST_MARKET_DATA_USE_BINANCE_FALLBACK=False,
+        RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS=0,
+    )
+
+    readiness = RealBacktestRunner(settings=settings).readiness()
+
+    assert readiness.ready is True
+    assert not any("BINANCE" in issue for issue in readiness.issues)
+
+
+def test_readiness_rejects_missing_toobit_guard(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        BACKTEST_MARKET_DATA_PROVIDER="toobit",
+        BACKTEST_MARKET_DATA_USE_BINANCE_FALLBACK=False,
+        RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=0,
+    )
+
+    readiness = RealBacktestRunner(settings=settings).readiness()
+
+    assert readiness.ready is False
+    assert "RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1 is required" in readiness.issues
+
+
 def _message(now: datetime, text: str) -> RawTelegramMessage:
     return RawTelegramMessage(
         channel_id="https://t.me/Tofan_Trade",
@@ -287,10 +315,10 @@ def test_real_backtest_runner_logs_blocked_run(tmp_path: Path, caplog) -> None:
 
     assert result.success is False
     events = [rec.msg for rec in caplog.records]
-    assert "backtesting.real_run_sync_invoked" in events
-    assert "backtesting.real_run_started" in events
-    assert "backtesting.real_run_blocked" in events
-    blocked = next(rec for rec in caplog.records if rec.msg == "backtesting.real_run_blocked")
+    assert "backtesting.backtest_run_sync_invoked" in events
+    assert "backtesting.backtest_run_started" in events
+    assert "backtesting.backtest_run_blocked" in events
+    blocked = next(rec for rec in caplog.records if rec.msg == "backtesting.backtest_run_blocked")
     assert "REAL_BACKTEST_ENABLED=true is required" in blocked.issues
 
 
@@ -523,14 +551,14 @@ def test_real_backtest_runner_logs_successful_flow(tmp_path: Path, caplog) -> No
 
     assert result.success is True
     events = [rec.msg for rec in caplog.records]
-    assert "backtesting.real_run_started" in events
-    assert "backtesting.real_history_fetched" in events
-    assert "backtesting.real_run_completed" in events
+    assert "backtesting.backtest_run_started" in events
+    assert "backtesting.backtest_history_fetched" in events
+    assert "backtesting.backtest_run_completed" in events
     history_record = next(
-        rec for rec in caplog.records if rec.msg == "backtesting.real_history_fetched"
+        rec for rec in caplog.records if rec.msg == "backtesting.backtest_history_fetched"
     )
     completed_record = next(
-        rec for rec in caplog.records if rec.msg == "backtesting.real_run_completed"
+        rec for rec in caplog.records if rec.msg == "backtesting.backtest_run_completed"
     )
     assert history_record.message_count == 1
     assert completed_record.trades_simulated >= 1
@@ -2550,7 +2578,7 @@ def test_real_backtest_runner_sends_failure_log_for_no_valid_signal_case(tmp_pat
     )
 
     assert result.success is False
-    assert any("Real backtest finished without valid signals" in text for text in log_client.texts)
+    assert any("Backtest finished without valid signals" in text for text in log_client.texts)
 
 
 def test_real_backtest_runner_simulates_noisy_market_signal_immediately(tmp_path: Path) -> None:

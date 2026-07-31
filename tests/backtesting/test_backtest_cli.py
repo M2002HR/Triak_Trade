@@ -6,57 +6,14 @@ from decimal import Decimal
 import pytest
 from typer.testing import CliRunner
 
-from triak_trade.backtesting.isolated_runner import (
-    IsolatedBacktestResult,
-    IsolatedBacktestRunRequest,
+from triak_trade.backtesting.backtest_runner import (
+    BacktestResult,
+    BacktestRunRequest,
 )
-from triak_trade.backtesting.real_runner import RealBacktestResult
 from triak_trade.cli import app
 from triak_trade.config.settings import Settings
 
 runner = CliRunner()
-
-
-def test_backtest_cli_fixture_and_dry_run() -> None:
-    fixture = runner.invoke(app, ["backtest-fixture"])
-    assert fixture.exit_code == 0
-    assert "Backtest Report" in fixture.stdout
-
-    dry = runner.invoke(
-        app,
-        [
-            "backtest-dry-run",
-            "--channel",
-            "https://t.me/Tofan_Trade",
-            "--from",
-            "2026-06-01",
-            "--to",
-            "2026-06-02",
-            "--interval",
-            "1m",
-        ],
-    )
-    assert dry.exit_code == 0
-    assert '"channel": "https://t.me/Tofan_Trade"' in dry.stdout
-
-
-def test_backtest_cli_real_guarded() -> None:
-    blocked = runner.invoke(
-        app,
-        [
-            "backtest-dry-run",
-            "--channel",
-            "https://t.me/Tofan_Trade",
-            "--from",
-            "2026-06-01",
-            "--to",
-            "2026-06-02",
-            "--interval",
-            "1m",
-            "--real",
-        ],
-    )
-    assert blocked.exit_code == 2
 
 
 class _FakeRunner:
@@ -84,7 +41,7 @@ class _FakeRunner:
 
     def run_sync(self, request: object) -> object:
         self.last_request = request
-        return RealBacktestResult(
+        return BacktestResult(
             success=True,
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
@@ -128,10 +85,10 @@ class _FakeRunner:
         }
 
 
-class _FakeIsolatedRunner(_FakeRunner):
+class _FakeBacktestRunner(_FakeRunner):
     def run_sync(self, request: object) -> object:
         self.last_request = request
-        return IsolatedBacktestResult(
+        return BacktestResult(
             success=True,
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
@@ -163,8 +120,8 @@ class _FakeIsolatedRunner(_FakeRunner):
             optimistic_pnl=Decimal("12.5"),
             channel_score=Decimal("0"),
             generated_at=datetime(2026, 6, 2, tzinfo=timezone.utc),
-            report_path="runtime/reports/backtests/isolated.report.json",
-            markdown_report_path="runtime/reports/backtests/isolated.report.md",
+            report_path="runtime/reports/backtests/backtest.report.json",
+            markdown_report_path="runtime/reports/backtests/backtest.report.md",
             aggregate={
                 "total_signals": 3,
                 "filled_signals": 2,
@@ -191,129 +148,23 @@ class _FakeIsolatedRunner(_FakeRunner):
         )
 
 
-def test_real_backtest_cli_commands_with_fake_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_runner = _FakeRunner(Settings(_env_file=None))
-    monkeypatch.setattr("triak_trade.cli._build_real_backtest_runner", lambda settings: fake_runner)
-
-    check = runner.invoke(app, ["real-backtest-check"])
-    assert check.exit_code == 0
-    assert '"ready": true' in check.stdout
-
-    run = runner.invoke(
-        app,
-        [
-            "real-backtest-run",
-            "--channel",
-            "https://t.me/Tofan_Trade",
-            "--hours",
-            "24",
-            "--interval",
-            "1m",
-            "--max-messages",
-            "1000",
-            "--no-send-telegram-summary",
-            "--no-send-log-channel",
-            "--no-ai",
-        ],
-    )
-    assert run.exit_code == 0
-    assert '"real_telegram_used": true' in run.stdout
-    assert '"report_path": "runtime/reports/backtests/report.json"' in run.stdout
-
-    default = runner.invoke(app, ["real-backtest-tofan", "--hours", "24", "--no-ai"])
-    assert default.exit_code == 0
-    assert '"channel": "https://t.me/Tofan_Trade"' in default.stdout
-
-    latest = runner.invoke(app, ["backtest-show-latest"])
-    assert latest.exit_code == 0
-    assert '"report_path": "runtime/reports/backtests/report.json"' in latest.stdout
-
-
-def test_real_backtest_cli_interprets_naive_dates_as_tehran(
+def test_backtest_cli_commands_with_fake_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_runner = _FakeRunner(Settings(_env_file=None))
-    monkeypatch.setattr("triak_trade.cli._build_real_backtest_runner", lambda settings: fake_runner)
-
-    run = runner.invoke(
-        app,
-        [
-            "real-backtest-run",
-            "--channel",
-            "https://t.me/Tofan_Trade",
-            "--from",
-            "2026-06-04T15:30:00",
-            "--to",
-            "2026-06-04T16:30:00",
-            "--interval",
-            "1m",
-            "--max-messages",
-            "10",
-            "--no-send-telegram-summary",
-            "--no-send-log-channel",
-            "--no-ai",
-        ],
-    )
-
-    assert run.exit_code == 0
-    request = fake_runner.last_request
-    assert request is not None
-    assert request.from_date.isoformat() == "2026-06-04T12:00:00+00:00"
-    assert request.to_date.isoformat() == "2026-06-04T13:00:00+00:00"
-
-
-def test_real_backtest_cli_enables_per_message_log_from_settings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = Settings(_env_file=None, REAL_BACKTEST_LOG_PER_MESSAGE=True)
-    fake_runner = _FakeRunner(settings)
-    monkeypatch.setattr("triak_trade.cli._load_settings", lambda: settings)
+    fake_runner = _FakeBacktestRunner(Settings(_env_file=None))
     monkeypatch.setattr(
-        "triak_trade.cli._build_real_backtest_runner",
-        lambda _settings: fake_runner,
-    )
-
-    run = runner.invoke(
-        app,
-        [
-            "real-backtest-run",
-            "--channel",
-            "https://t.me/Tofan_Trade",
-            "--hours",
-            "1",
-            "--interval",
-            "1m",
-            "--max-messages",
-            "10",
-            "--no-send-telegram-summary",
-            "--no-send-log-channel",
-            "--no-ai",
-        ],
-    )
-
-    assert run.exit_code == 0
-    request = fake_runner.last_request
-    assert request is not None
-    assert request.log_per_message is True
-
-
-def test_isolated_backtest_cli_commands_with_fake_runner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_runner = _FakeIsolatedRunner(Settings(_env_file=None))
-    monkeypatch.setattr(
-        "triak_trade.cli._build_isolated_backtest_runner",
+        "triak_trade.cli._build_backtest_runner",
         lambda settings: fake_runner,
     )
 
-    check = runner.invoke(app, ["isolated-backtest-check"])
+    check = runner.invoke(app, ["backtest-check"])
     assert check.exit_code == 0
     assert '"ready": true' in check.stdout
 
     run = runner.invoke(
         app,
         [
-            "isolated-backtest-run",
+            "backtest-run",
             "--channel",
             "https://t.me/Tofan_Trade",
             "--from",
@@ -363,12 +214,12 @@ def test_isolated_backtest_cli_commands_with_fake_runner(
         ],
     )
     assert run.exit_code == 0
-    assert '"run_type": "isolated"' in run.stdout
-    assert '"report_path": "runtime/reports/backtests/isolated.report.json"' in run.stdout
+    assert '"run_type": "backtest"' in run.stdout
+    assert '"report_path": "runtime/reports/backtests/backtest.report.json"' in run.stdout
     assert '"signals": [' in run.stdout
 
     request = fake_runner.last_request
-    assert isinstance(request, IsolatedBacktestRunRequest)
+    assert isinstance(request, BacktestRunRequest)
     assert request.from_date is not None
     assert request.to_date is not None
     assert request.from_date.isoformat() == "2026-06-04T12:00:00+00:00"
@@ -395,28 +246,32 @@ def test_isolated_backtest_cli_commands_with_fake_runner(
 
     default = runner.invoke(
         app,
-        ["isolated-backtest-tofan", "--hours", "24", "--no-ai", "--include-signals"],
+        ["backtest-tofan", "--hours", "24", "--no-ai", "--include-signals"],
     )
     assert default.exit_code == 0
     assert '"channel": "https://t.me/Tofan_Trade"' in default.stdout
 
+    latest = runner.invoke(app, ["backtest-show-latest"])
+    assert latest.exit_code == 0
+    assert '"report_path": "runtime/reports/backtests/report.json"' in latest.stdout
 
-def test_isolated_backtest_cli_uses_cpu_count_for_default_parallel_workers(
+
+def test_backtest_cli_uses_cpu_count_for_default_parallel_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = Settings(_env_file=None)
-    fake_runner = _FakeIsolatedRunner(settings)
+    fake_runner = _FakeBacktestRunner(settings)
     monkeypatch.setattr("triak_trade.cli._load_settings", lambda: settings)
     monkeypatch.setattr(
-        "triak_trade.cli._build_isolated_backtest_runner",
+        "triak_trade.cli._build_backtest_runner",
         lambda _settings: fake_runner,
     )
-    monkeypatch.setattr("triak_trade.cli.default_isolated_parallel_workers", lambda: 12)
+    monkeypatch.setattr("triak_trade.cli.default_backtest_parallel_workers", lambda: 12)
 
     run = runner.invoke(
         app,
         [
-            "isolated-backtest-run",
+            "backtest-run",
             "--channel",
             "https://t.me/Tofan_Trade",
             "--hours",
@@ -433,15 +288,15 @@ def test_isolated_backtest_cli_uses_cpu_count_for_default_parallel_workers(
 
     assert run.exit_code == 0
     request = fake_runner.last_request
-    assert isinstance(request, IsolatedBacktestRunRequest)
+    assert isinstance(request, BacktestRunRequest)
     assert request.max_parallel_signals == 12
 
 
-def test_isolated_backtest_cli_rejects_fixed_leverage_without_a_value() -> None:
+def test_backtest_cli_rejects_fixed_leverage_without_a_value() -> None:
     result = runner.invoke(
         app,
         [
-            "isolated-backtest-run",
+            "backtest-run",
             "--channel",
             "https://t.me/Tofan_Trade",
             "--hours",

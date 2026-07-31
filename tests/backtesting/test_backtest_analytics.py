@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from triak_trade.backtesting.isolated_analytics import (
-    IsolatedAnalyticsFilters,
-    IsolatedAnalyticsRun,
-    IsolatedBacktestAnalytics,
+from triak_trade.backtesting.backtest_analytics import (
+    BacktestAnalytics,
+    BacktestAnalyticsFilters,
+    BacktestAnalyticsRun,
 )
 
 NOW = datetime(2026, 7, 20, 10, tzinfo=timezone.utc)
@@ -40,12 +40,12 @@ def _run(
     created_offset: int = 0,
     fee_rate: str = "0.01",
     status: str = "completed",
-) -> IsolatedAnalyticsRun:
+) -> BacktestAnalyticsRun:
     signals = [_signal(index, pnl) for index, pnl in enumerate(pnls, start=1)]
     total = sum(int(pnl) for pnl in pnls)
     wins = sum(1 for pnl in pnls if int(pnl) > 0)
     losses = sum(1 for pnl in pnls if int(pnl) < 0)
-    return IsolatedAnalyticsRun(
+    return BacktestAnalyticsRun(
         run_id=run_id,
         channel_resolved=channel,
         from_date=NOW - timedelta(days=30),
@@ -66,7 +66,7 @@ def _run(
             "close_open_positions_at_end": True,
             "include_not_filled_signals": True,
         },
-        isolated_aggregate=(
+        backtest_aggregate=(
             {
                 "total_signals": len(signals),
                 "filled_signals": len(signals),
@@ -123,7 +123,7 @@ def test_analytics_aggregates_channels_runs_and_signal_extremes() -> None:
         ),
     ]
 
-    result = IsolatedBacktestAnalytics().analyze(runs)
+    result = BacktestAnalytics().analyze(runs)
 
     assert result["overview"]["runs"] == 4
     assert result["overview"]["completed_runs"] == 3
@@ -158,7 +158,7 @@ def test_analytics_score_exposes_evidence_selection_penalty_and_methodology() ->
         ),
     ]
 
-    result = IsolatedBacktestAnalytics().analyze(runs)
+    result = BacktestAnalytics().analyze(runs)
     channel = result["channel_rankings"][0]
 
     assert int(channel["configuration_count"]) == 2
@@ -170,7 +170,7 @@ def test_analytics_score_exposes_evidence_selection_penalty_and_methodology() ->
         "sample_evidence",
         "execution_fill",
     }
-    assert result["methodology"]["version"] == "isolated-score-v1"
+    assert result["methodology"]["version"] == "backtest-score-v1"
     assert "annualized Sharpe" in result["methodology"]["why_not_annualized_sharpe"]
     assert len(result["methodology"]["sources"]) == 3
 
@@ -194,9 +194,9 @@ def test_analytics_filters_and_parameter_impact_use_only_matching_runs() -> None
         ),
     ]
 
-    result = IsolatedBacktestAnalytics().analyze(
+    result = BacktestAnalytics().analyze(
         runs,
-        filters=IsolatedAnalyticsFilters(channel="https://t.me/alpha", min_signals=5),
+        filters=BacktestAnalyticsFilters(channel="https://t.me/alpha", min_signals=5),
     )
 
     assert result["overview"]["runs"] == 1
@@ -225,7 +225,7 @@ def test_bootstrap_is_deterministic_and_marks_small_samples() -> None:
         strategy="default_risk_managed",
         pnls=["2", "-1", "3", "-2"],
     )
-    analytics = IsolatedBacktestAnalytics()
+    analytics = BacktestAnalytics()
 
     first = analytics.analyze([sufficient, insufficient])["bootstrap"]
     second = analytics.analyze([sufficient, insufficient])["bootstrap"]

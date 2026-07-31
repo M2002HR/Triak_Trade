@@ -1,4 +1,4 @@
-"""Persistence helpers for real backtest reports."""
+"""Persistence helpers for backtest reports."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class BacktestReportStore:
             # uses the explicit path hints above and updates its own artifact.
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             slug = _channel_slug(str(payload.get("channel", "channel")))
-            base_name = f"real_backtest_{slug}_{stamp}_{uuid.uuid4().hex[:8]}"
+            base_name = f"backtest_{slug}_{stamp}_{uuid.uuid4().hex[:8]}"
             json_path = self.report_dir / f"{base_name}.report.json"
             markdown_path = self.report_dir / f"{base_name}.report.md"
         payload["report_path"] = str(json_path)
@@ -84,7 +84,7 @@ def _channel_slug(channel: str) -> str:
 
 def _render_markdown(payload: dict[str, Any]) -> str:
     lines = [
-        "# Real Backtest Report",
+        "# Backtest Report",
         "",
         f"- Channel: `{payload.get('channel')}`",
         f"- Generated: `{payload.get('generated_at')}`",

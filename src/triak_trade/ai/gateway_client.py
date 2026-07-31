@@ -411,7 +411,7 @@ class AjilGatewayClient:
                 "market": ["futures", "spot", "unknown"],
                 "side": ["long", "short", "buy", "sell", "unknown"],
                 "entry_type": ["market", "limit", "range", "trigger", "unknown"],
-                "leverage_mode": ["cross", "isolated", "unknown"],
+                "leverage_mode": ["cross", "separate_margin", "unknown"],
             },
             "price_string_fields": [
                 "entry_low",

@@ -1,6 +1,6 @@
-"""Cross-run analytics for isolated backtests.
+"""Cross-run analytics for backtests.
 
-The isolated runner owns simulation.  This module only reads persisted, safe
+The backtest runner owns simulation.  This module only reads persisted, safe
 run outputs and turns them into comparable decision-support statistics.  It
 never calls Telegram, market-data, AI, or execution services.
 """
@@ -25,11 +25,11 @@ SCORE_QUANTUM = Decimal("0.01")
 RATIO_QUANTUM = Decimal("0.0001")
 
 
-class IsolatedAnalyticsRun(BaseModel):
+class BacktestAnalyticsRun(BaseModel):
     """Minimal persisted run shape required by the analytics engine."""
 
     run_id: str
-    run_type: str = "isolated"
+    run_type: str = "backtest"
     channel_resolved: str
     from_date: datetime
     to_date: datetime
@@ -41,7 +41,7 @@ class IsolatedAnalyticsRun(BaseModel):
     finished_at: datetime | None = None
     use_ai: bool = False
     request_payload: dict[str, Any] = Field(default_factory=dict)
-    isolated_aggregate: dict[str, Any] = Field(default_factory=dict)
+    backtest_aggregate: dict[str, Any] = Field(default_factory=dict)
     signals: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -49,7 +49,7 @@ class IsolatedAnalyticsRun(BaseModel):
     report_path: str | None = None
 
 
-class IsolatedAnalyticsFilters(BaseModel):
+class BacktestAnalyticsFilters(BaseModel):
     """Server-side filters shared by the API and analytics engine."""
 
     channel: str | None = None
@@ -71,7 +71,7 @@ class IsolatedAnalyticsFilters(BaseModel):
     sort_order: Literal["asc", "desc"] = "desc"
 
 
-class IsolatedBacktestAnalytics:
+class BacktestAnalytics:
     """Build deterministic channel, run, parameter, and uncertainty analytics."""
 
     _PARAMETER_DIMENSIONS: tuple[tuple[str, str], ...] = (
@@ -90,7 +90,9 @@ class IsolatedBacktestAnalytics:
             "synthetic_stop_max_loss_pct_of_balance",
             "Synthetic stop maximum loss",
         ),
+        ("max_stop_loss_pct_of_balance", "Explicit stop maximum loss"),
         ("fee_rate_pct", "Fee rate"),
+        ("consolidation_seconds", "Signal consolidation seconds"),
         ("close_open_positions_at_end", "Close open positions at end"),
         ("include_not_filled_signals", "Include unfilled signals"),
         ("use_ai", "AI classification"),
@@ -98,20 +100,20 @@ class IsolatedBacktestAnalytics:
 
     def analyze(
         self,
-        runs: Sequence[IsolatedAnalyticsRun],
+        runs: Sequence[BacktestAnalyticsRun],
         *,
-        filters: IsolatedAnalyticsFilters | None = None,
+        filters: BacktestAnalyticsFilters | None = None,
     ) -> dict[str, Any]:
-        selected_filters = filters or IsolatedAnalyticsFilters()
-        isolated_runs = [run for run in runs if run.run_type == "isolated"]
-        filter_options = self._filter_options(isolated_runs)
+        selected_filters = filters or BacktestAnalyticsFilters()
+        backtest_runs = [run for run in runs if run.run_type == "backtest"]
+        filter_options = self._filter_options(backtest_runs)
         filtered_runs = [
-            run for run in isolated_runs if self._matches(run, selected_filters)
+            run for run in backtest_runs if self._matches(run, selected_filters)
         ]
         completed_runs = [
             run
             for run in filtered_runs
-            if run.status == "completed" and bool(run.isolated_aggregate)
+            if run.status == "completed" and bool(run.backtest_aggregate)
         ]
         run_rows = [self._run_row(run) for run in completed_runs]
         run_rows = self._sort_run_rows(run_rows, selected_filters)
@@ -201,9 +203,9 @@ class IsolatedBacktestAnalytics:
     @staticmethod
     def methodology() -> dict[str, Any]:
         return {
-            "version": "isolated-score-v1",
+            "version": "backtest-score-v1",
             "purpose": (
-                "Decision support for comparing persisted isolated simulations; "
+                "Decision support for comparing persisted backtest simulations; "
                 "it is not a promise of future returns or a live-trading instruction."
             ),
             "run_score_weights": {
@@ -231,7 +233,7 @@ class IsolatedBacktestAnalytics:
                 "or serial-dependence risk."
             ),
             "why_not_annualized_sharpe": (
-                "Isolated signals are irregular event samples rather than equally spaced periodic "
+                "Signals are irregular event samples rather than equally spaced periodic "
                 "returns, so an annualized Sharpe ratio would imply unsupported timing assumptions."
             ),
             "sources": [
@@ -250,7 +252,7 @@ class IsolatedBacktestAnalytics:
             ],
         }
 
-    def _matches(self, run: IsolatedAnalyticsRun, filters: IsolatedAnalyticsFilters) -> bool:
+    def _matches(self, run: BacktestAnalyticsRun, filters: BacktestAnalyticsFilters) -> bool:
         payload = run.request_payload
         if filters.channel and run.channel_resolved != filters.channel:
             return False
@@ -266,12 +268,12 @@ class IsolatedBacktestAnalytics:
             return False
         if filters.date_to and run.created_at > filters.date_to:
             return False
-        if int(run.isolated_aggregate.get("total_signals") or 0) < filters.min_signals:
+        if int(run.backtest_aggregate.get("total_signals") or 0) < filters.min_signals:
             return False
         return True
 
     @staticmethod
-    def _filter_options(runs: Sequence[IsolatedAnalyticsRun]) -> dict[str, list[str]]:
+    def _filter_options(runs: Sequence[BacktestAnalyticsRun]) -> dict[str, list[str]]:
         return {
             "channels": sorted({run.channel_resolved for run in runs}),
             "strategies": sorted({run.strategy_key for run in runs}),
@@ -286,8 +288,8 @@ class IsolatedBacktestAnalytics:
             "statuses": sorted({run.status for run in runs}),
         }
 
-    def _run_row(self, run: IsolatedAnalyticsRun) -> dict[str, Any]:
-        aggregate = run.isolated_aggregate
+    def _run_row(self, run: BacktestAnalyticsRun) -> dict[str, Any]:
+        aggregate = run.backtest_aggregate
         signals = run.signals
         pnls = [_decimal(signal.get("total_pnl")) for signal in signals]
         filled = [
@@ -486,13 +488,13 @@ class IsolatedBacktestAnalytics:
 
     def _channel_rankings(
         self,
-        filtered_runs: Sequence[IsolatedAnalyticsRun],
-        completed_runs: Sequence[IsolatedAnalyticsRun],
+        filtered_runs: Sequence[BacktestAnalyticsRun],
+        completed_runs: Sequence[BacktestAnalyticsRun],
         run_rows: Sequence[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         rows_by_channel: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        runs_by_channel: dict[str, list[IsolatedAnalyticsRun]] = defaultdict(list)
-        completed_by_channel: dict[str, list[IsolatedAnalyticsRun]] = defaultdict(list)
+        runs_by_channel: dict[str, list[BacktestAnalyticsRun]] = defaultdict(list)
+        completed_by_channel: dict[str, list[BacktestAnalyticsRun]] = defaultdict(list)
         for row in run_rows:
             rows_by_channel[str(row["channel"])].append(row)
         for run in filtered_runs:
@@ -695,7 +697,7 @@ class IsolatedBacktestAnalytics:
 
     def _parameter_impact(
         self,
-        runs: Sequence[IsolatedAnalyticsRun],
+        runs: Sequence[BacktestAnalyticsRun],
         run_rows: Sequence[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         row_by_id = {str(row["run_id"]): row for row in run_rows}
@@ -741,7 +743,7 @@ class IsolatedBacktestAnalytics:
         return dimensions
 
     @staticmethod
-    def _parameter_value(run: IsolatedAnalyticsRun, key: str) -> Any:
+    def _parameter_value(run: BacktestAnalyticsRun, key: str) -> Any:
         if key == "strategy_key":
             return run.strategy_key
         if key == "interval":
@@ -750,14 +752,14 @@ class IsolatedBacktestAnalytics:
             return run.use_ai
         return run.request_payload.get(key)
 
-    def _safe_parameters(self, run: IsolatedAnalyticsRun) -> dict[str, str]:
+    def _safe_parameters(self, run: BacktestAnalyticsRun) -> dict[str, str]:
         return {
             key: _display_parameter(value)
             for key, _label in self._PARAMETER_DIMENSIONS
             if (value := self._parameter_value(run, key)) is not None and value != ""
         }
 
-    def _configuration_fingerprint(self, run: IsolatedAnalyticsRun) -> str:
+    def _configuration_fingerprint(self, run: BacktestAnalyticsRun) -> str:
         values = {
             key: self._parameter_value(run, key)
             for key, _label in self._PARAMETER_DIMENSIONS
@@ -766,7 +768,7 @@ class IsolatedBacktestAnalytics:
         return hashlib.sha256(encoded).hexdigest()[:12]
 
     @staticmethod
-    def _signal_rows(runs: Sequence[IsolatedAnalyticsRun]) -> list[dict[str, Any]]:
+    def _signal_rows(runs: Sequence[BacktestAnalyticsRun]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for run in runs:
             capital = _decimal(run.request_payload.get("capital_per_signal"))
@@ -832,7 +834,7 @@ class IsolatedBacktestAnalytics:
     @staticmethod
     def _bootstrap_channel(
         channel_row: dict[str, Any],
-        completed_runs: Sequence[IsolatedAnalyticsRun],
+        completed_runs: Sequence[BacktestAnalyticsRun],
     ) -> dict[str, Any]:
         channel = str(channel_row["channel"])
         signal_returns: list[Decimal] = []
@@ -885,7 +887,7 @@ class IsolatedBacktestAnalytics:
     @staticmethod
     def _sort_run_rows(
         rows: list[dict[str, Any]],
-        filters: IsolatedAnalyticsFilters,
+        filters: BacktestAnalyticsFilters,
     ) -> list[dict[str, Any]]:
         numeric_keys = {
             "score": "score",

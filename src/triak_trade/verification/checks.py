@@ -649,10 +649,10 @@ def backtest_real_guarded_check(settings: Settings) -> VerificationCheckResult:
         name="backtest_real_guarded",
         status=VerificationStatus.SKIP,
         category="real",
-        summary="real backtest orchestration is guarded for a later tiny-window run",
+        summary="backtest orchestration is guarded for a later tiny-window run",
         started=started,
         next_action=(
-            "run triak-trade real-backtest-run --channel https://t.me/Tofan_Trade "
+            "run triak-trade backtest-run --channel https://t.me/Tofan_Trade "
             "--hours 1 --max-messages 5 --interval 1m "
             "--no-send-telegram-summary --no-send-log-channel"
         ),

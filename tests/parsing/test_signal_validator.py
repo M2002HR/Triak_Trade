@@ -114,3 +114,37 @@ def test_backtest_open_validator_allows_signal_without_entry_and_treats_it_as_ma
     )
     assert ok is True
     assert errors == []
+
+
+def test_execution_normalizer_infers_side_from_price_geometry() -> None:
+    normalized, error = ParsedSignalValidator().normalize_for_execution(
+        _signal(side=TradeSide.UNKNOWN),
+    )
+
+    assert error is None
+    assert normalized.side is TradeSide.LONG
+
+
+def test_execution_normalizer_rejects_inconsistent_stop_geometry() -> None:
+    normalized, error = ParsedSignalValidator().normalize_for_execution(
+        _signal(stop_loss=Decimal("69000")),
+    )
+
+    assert normalized.side is TradeSide.LONG
+    assert error == (
+        "inconsistent long geometry: stop_loss is not below entry/market price"
+    )
+
+
+def test_execution_normalizer_promotes_missing_entry_to_market() -> None:
+    normalized, error = ParsedSignalValidator().normalize_for_execution(
+        _signal(
+            entry_type=EntryType.UNKNOWN,
+            entry_low=None,
+            entry_high=None,
+            stop_loss=None,
+        ),
+    )
+
+    assert error is None
+    assert normalized.entry_type is EntryType.MARKET

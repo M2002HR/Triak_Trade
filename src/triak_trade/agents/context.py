@@ -9,6 +9,41 @@ from triak_trade.core.symbols import same_market_symbol
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
 
 
+def merge_parsed_signals(current: ParsedSignal, update: ParsedSignal) -> ParsedSignal:
+    """Merge a follow-up into a pending signal using the live execution rules."""
+
+    merged_symbol = current.symbol if current.symbol is not None else update.symbol
+    merged_side = current.side if current.side.value != "unknown" else update.side
+    merged_market = current.market if current.market.value != "unknown" else update.market
+    return ParsedSignal(
+        action=update.action if update.action.value != "unknown" else current.action,
+        market=merged_market,
+        symbol=merged_symbol,
+        side=merged_side,
+        entry_type=(
+            update.entry_type
+            if update.entry_type.value != "unknown"
+            else current.entry_type
+        ),
+        entry_low=update.entry_low if update.entry_low is not None else current.entry_low,
+        entry_high=(
+            update.entry_high if update.entry_high is not None else current.entry_high
+        ),
+        stop_loss=update.stop_loss if update.stop_loss is not None else current.stop_loss,
+        take_profits=update.take_profits or current.take_profits,
+        leverage=update.leverage if update.leverage is not None else current.leverage,
+        confidence=(
+            update.confidence
+            if update.confidence > current.confidence
+            else current.confidence
+        ),
+        invalid_reason=update.invalid_reason or current.invalid_reason,
+        source_channel_id=current.source_channel_id,
+        source_message_id=current.source_message_id,
+        parser_version=update.parser_version,
+    )
+
+
 class ChannelContext:
     def __init__(
         self,
@@ -154,46 +189,7 @@ class ChannelContext:
         if current is None:
             signal.current_signal = parsed
         else:
-            merged_symbol = current.symbol if current.symbol is not None else parsed.symbol
-            merged_side = (
-                current.side
-                if current.side.value != "unknown"
-                else parsed.side
-            )
-            merged_market = (
-                current.market
-                if current.market.value != "unknown"
-                else parsed.market
-            )
-            signal.current_signal = ParsedSignal(
-                action=parsed.action if parsed.action.value != "unknown" else current.action,
-                market=merged_market,
-                symbol=merged_symbol,
-                side=merged_side,
-                entry_type=(
-                    parsed.entry_type
-                    if parsed.entry_type.value != "unknown"
-                    else current.entry_type
-                ),
-                entry_low=parsed.entry_low if parsed.entry_low is not None else current.entry_low,
-                entry_high=(
-                    parsed.entry_high
-                    if parsed.entry_high is not None
-                    else current.entry_high
-                ),
-                stop_loss=parsed.stop_loss if parsed.stop_loss is not None else current.stop_loss,
-                take_profits=parsed.take_profits or current.take_profits,
-                leverage=parsed.leverage if parsed.leverage is not None else current.leverage,
-                confidence=(
-                    parsed.confidence
-                    if parsed.confidence > current.confidence
-                    else current.confidence
-                ),
-                invalid_reason=parsed.invalid_reason or current.invalid_reason,
-                source_channel_id=current.source_channel_id,
-                source_message_id=current.source_message_id,
-                parser_version=parsed.parser_version,
-            )
+            signal.current_signal = merge_parsed_signals(current, parsed)
         signal.updated_at = self._monotonic_signal_timestamp(signal, updated_at)
         signal.version += 1
 

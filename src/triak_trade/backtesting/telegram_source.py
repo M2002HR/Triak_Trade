@@ -1,4 +1,4 @@
-"""Telegram history source helpers for real backtesting."""
+"""Telegram history source helpers for backtesting."""
 
 from __future__ import annotations
 

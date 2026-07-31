@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Literal
 
 from triak_trade.backtesting.models import BacktestEvent
@@ -12,6 +12,10 @@ from triak_trade.backtesting.strategies.base import TradeStrategy
 from triak_trade.core.symbols import canonical_market_symbol, same_market_symbol
 from triak_trade.domain.enums import BacktestFillPolicy, EntryType, SignalAction, TradeSide
 from triak_trade.domain.models import Candle, SimulatedTrade
+from triak_trade.risk.stop_loss import (
+    clamp_stop_loss_to_risk_budget,
+    max_quantity_for_stop_risk_budget,
+)
 
 _MAX_SIGNAL_PRICE_HISTORY_POINTS = 1200
 
@@ -157,6 +161,7 @@ class BacktestSimulator:
         max_allocation_pct: Decimal = Decimal("20"),
         default_stop_pct: Decimal = Decimal("5"),
         synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5"),
+        max_stop_loss_pct_of_balance: Decimal | None = None,
         strategy: TradeStrategy | None = None,
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
@@ -174,6 +179,7 @@ class BacktestSimulator:
             max_allocation_pct=max_allocation_pct,
             default_stop_pct=default_stop_pct,
             synthetic_stop_max_loss_pct_of_balance=synthetic_stop_max_loss_pct_of_balance,
+            max_stop_loss_pct_of_balance=max_stop_loss_pct_of_balance,
             strategy=strategy,
             fee_rate_pct=fee_rate_pct,
             default_signal_leverage=default_signal_leverage,
@@ -194,6 +200,7 @@ class BacktestSimulator:
         max_allocation_pct: Decimal = Decimal("20"),
         default_stop_pct: Decimal = Decimal("5"),
         synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5"),
+        max_stop_loss_pct_of_balance: Decimal | None = None,
         strategy: TradeStrategy | None = None,
         snapshot_interval: timedelta | None = None,
         fee_rate_pct: Decimal = Decimal("0"),
@@ -214,6 +221,7 @@ class BacktestSimulator:
             max_allocation_pct=max_allocation_pct,
             default_stop_pct=default_stop_pct,
             synthetic_stop_max_loss_pct_of_balance=synthetic_stop_max_loss_pct_of_balance,
+            max_stop_loss_pct_of_balance=max_stop_loss_pct_of_balance,
             strategy=strategy,
             snapshot_interval=snapshot_interval,
             fee_rate_pct=fee_rate_pct,
@@ -236,6 +244,7 @@ class BacktestSimulator:
         max_allocation_pct: Decimal = Decimal("20"),
         default_stop_pct: Decimal = Decimal("5"),
         synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5"),
+        max_stop_loss_pct_of_balance: Decimal | None = None,
         strategy: TradeStrategy | None = None,
         fee_rate_pct: Decimal = Decimal("0"),
         default_signal_leverage: Decimal = Decimal("1"),
@@ -323,6 +332,7 @@ class BacktestSimulator:
                 max_allocation_pct=max_allocation_pct,
                 default_stop_pct=default_stop_pct,
                 synthetic_stop_max_loss_pct_of_balance=synthetic_stop_max_loss_pct_of_balance,
+                max_stop_loss_pct_of_balance=max_stop_loss_pct_of_balance,
                 strategy=strategy,
                 fee_rate_pct=fee_rate_pct,
                 default_signal_leverage=default_signal_leverage,
@@ -408,6 +418,7 @@ class BacktestSimulator:
         max_allocation_pct: Decimal = Decimal("20"),
         default_stop_pct: Decimal = Decimal("5"),
         synthetic_stop_max_loss_pct_of_balance: Decimal = Decimal("5"),
+        max_stop_loss_pct_of_balance: Decimal | None = None,
         strategy: TradeStrategy | None = None,
         snapshot_interval: timedelta | None = None,
         fee_rate_pct: Decimal = Decimal("0"),
@@ -615,6 +626,8 @@ class BacktestSimulator:
                     continue
                 notes.append(f"allocation_pct={allocation_pct}")
                 qty = (allocation_amount * effective_leverage) / entry_price
+                if max_stop_loss_pct_of_balance is not None:
+                    qty = qty.quantize(Decimal("0.00000001"))
                 # B7: portfolio-level margin check — only when leverage modeling
                 # is active (max_effective_leverage is not None). In legacy mode
                 # (None) no margin model is in effect, so we skip this gate.
@@ -728,6 +741,34 @@ class BacktestSimulator:
                         notes=[*notes, "rejected_zero_stop_distance"],
                     )
                     continue
+                if (
+                    parsed.stop_loss is not None
+                    and max_stop_loss_pct_of_balance is not None
+                ):
+                    qty, risk_notes = self._cap_explicit_stop_quantity(
+                        side=parsed.side,
+                        entry_price=entry_price,
+                        stop_loss=effective_stop,
+                        quantity=qty,
+                        balance_at_entry=balance,
+                        fee_rate_pct=fee_rate_pct,
+                        max_loss_pct_of_balance=max_stop_loss_pct_of_balance,
+                    )
+                    notes.extend(risk_notes)
+                    if qty <= Decimal("0"):
+                        record_not_filled_open(
+                            event=event,
+                            parsed_symbol=parsed.symbol,
+                            parsed_side=parsed.side,
+                            channel_id=parsed.source_channel_id,
+                            stop_loss=effective_stop,
+                            take_profits=list(parsed.take_profits),
+                            balance_basis=balance,
+                            declared_leverage=declared_leverage,
+                            effective_leverage=effective_leverage,
+                            notes=[*notes, "rejected_no_risk_safe_quantity"],
+                        )
+                        continue
 
                 # Filter take-profits to only those on the correct side of
                 # entry.  A TP above entry for a SHORT (or below for a LONG)
@@ -873,47 +914,24 @@ class BacktestSimulator:
                         closed_trades_by_signal[trade.signal_id] = trade
                         balance += trade.pnl
                         del open_positions[event.related_signal_id]
-                elif parsed.action is SignalAction.UPDATE_SL and event.move_stop_to_entry:
-                    position.stop_loss = position.entry_price
-                    position.notes.append("stop_loss_moved_to_entry")
-                    self._replace_stop_loss_history(
+                elif (
+                    parsed.action
+                    in {
+                        SignalAction.UPDATE_SL,
+                        SignalAction.UPDATE_TP,
+                        SignalAction.UPDATE_LEVERAGE,
+                        SignalAction.UPDATE_ENTRY,
+                    }
+                    or event.move_stop_to_entry
+                ):
+                    self._apply_live_style_position_update(
+                        position=position,
+                        event=event,
                         stop_loss_history=stop_loss_history,
-                        signal_id=event.related_signal_id,
-                        timestamp=event.timestamp,
-                        stop_loss=position.stop_loss,
+                        take_profit_history=take_profit_history,
+                        max_effective_leverage=max_effective_leverage,
+                        max_stop_loss_pct_of_balance=max_stop_loss_pct_of_balance,
                     )
-                elif parsed.action is SignalAction.UPDATE_SL and parsed.stop_loss is not None:
-                    position.stop_loss = parsed.stop_loss
-                    position.notes.append(f"stop_loss_updated={parsed.stop_loss}")
-                    self._replace_stop_loss_history(
-                        stop_loss_history=stop_loss_history,
-                        signal_id=event.related_signal_id,
-                        timestamp=event.timestamp,
-                        stop_loss=parsed.stop_loss,
-                    )
-                elif parsed.action is SignalAction.UPDATE_TP and parsed.take_profits:
-                    valid_update_tps = self._sanitize_take_profits(
-                        take_profits=parsed.take_profits,
-                        side=position.side,
-                        entry_price=position.entry_price,
-                        stop_loss=position.stop_loss,
-                    )
-                    if valid_update_tps:
-                        position.take_profits = (
-                            position.take_profits[: position.targets_hit] + valid_update_tps
-                        )
-                        position.notes.append(
-                            "take_profits_updated="
-                            + ",".join(str(item) for item in valid_update_tps)
-                        )
-                        self._replace_take_profit_history(
-                            take_profit_history=take_profit_history,
-                            signal_id=event.related_signal_id,
-                            timestamp=event.timestamp,
-                            take_profits=position.take_profits,
-                        )
-                    else:
-                        position.notes.append("take_profits_update_ignored_invalid")
             if capture_snapshots:
                 snapshots.append(
                     self._build_snapshot(
@@ -1537,6 +1555,7 @@ class BacktestSimulator:
         max_allocation_pct: Decimal,
         default_stop_pct: Decimal,
         synthetic_stop_max_loss_pct_of_balance: Decimal,
+        max_stop_loss_pct_of_balance: Decimal | None,
         strategy: TradeStrategy | None,
         fee_rate_pct: Decimal,
         default_signal_leverage: Decimal,
@@ -1654,6 +1673,8 @@ class BacktestSimulator:
                 return
             notes.append(f"allocation_pct={allocation_pct}")
             qty = (allocation_amount * effective_leverage) / entry_price
+            if max_stop_loss_pct_of_balance is not None:
+                qty = qty.quantize(Decimal("0.00000001"))
             if max_effective_leverage is not None:
                 used_margin = sum(
                     (pos.entry_price * pos.original_quantity)
@@ -1747,6 +1768,30 @@ class BacktestSimulator:
                     notes=[*notes, "rejected_zero_stop_distance"],
                 )
                 return
+            if (
+                parsed.stop_loss is not None
+                and max_stop_loss_pct_of_balance is not None
+            ):
+                qty, risk_notes = self._cap_explicit_stop_quantity(
+                    side=parsed.side,
+                    entry_price=entry_price,
+                    stop_loss=effective_stop,
+                    quantity=qty,
+                    balance_at_entry=balance,
+                    fee_rate_pct=fee_rate_pct,
+                    max_loss_pct_of_balance=max_stop_loss_pct_of_balance,
+                )
+                notes.extend(risk_notes)
+                if qty <= Decimal("0"):
+                    record_not_filled_open(
+                        stop_loss=effective_stop,
+                        take_profits=list(parsed.take_profits),
+                        balance_basis=balance,
+                        declared_leverage=declared_leverage,
+                        effective_leverage=effective_leverage,
+                        notes=[*notes, "rejected_no_risk_safe_quantity"],
+                    )
+                    return
 
             valid_tps = self._sanitize_take_profits(
                 take_profits=parsed.take_profits,
@@ -1896,25 +1941,90 @@ class BacktestSimulator:
                     position
                 )
                 del open_positions[event.related_signal_id]
-        elif parsed.action is SignalAction.UPDATE_SL and event.move_stop_to_entry:
+        elif (
+            parsed.action
+            in {
+                SignalAction.UPDATE_SL,
+                SignalAction.UPDATE_TP,
+                SignalAction.UPDATE_LEVERAGE,
+                SignalAction.UPDATE_ENTRY,
+            }
+            or event.move_stop_to_entry
+        ):
+            self._apply_live_style_position_update(
+                position=position,
+                event=event,
+                stop_loss_history=stop_loss_history,
+                take_profit_history=take_profit_history,
+                max_effective_leverage=max_effective_leverage,
+                max_stop_loss_pct_of_balance=max_stop_loss_pct_of_balance,
+            )
+
+    def _apply_live_style_position_update(
+        self,
+        *,
+        position: _OpenPosition,
+        event: BacktestEvent,
+        stop_loss_history: dict[str, list[PriceLevelSpan]],
+        take_profit_history: dict[str, list[PriceLevelSpan]],
+        max_effective_leverage: Decimal | None,
+        max_stop_loss_pct_of_balance: Decimal | None,
+    ) -> None:
+        """Apply post-entry updates with the same safety semantics as live trading."""
+
+        parsed = event.parsed_signal
+        signal_id = event.related_signal_id or position.signal_id
+        handles_stop = parsed.action in {
+            SignalAction.UPDATE_SL,
+            SignalAction.UPDATE_TP,
+            SignalAction.UPDATE_ENTRY,
+        }
+        if event.move_stop_to_entry:
             position.stop_loss = position.entry_price
             position.notes.append("stop_loss_moved_to_entry")
             self._replace_stop_loss_history(
                 stop_loss_history=stop_loss_history,
-                signal_id=event.related_signal_id,
+                signal_id=signal_id,
                 timestamp=event.timestamp,
                 stop_loss=position.stop_loss,
             )
-        elif parsed.action is SignalAction.UPDATE_SL and parsed.stop_loss is not None:
-            position.stop_loss = parsed.stop_loss
-            position.notes.append(f"stop_loss_updated={parsed.stop_loss}")
-            self._replace_stop_loss_history(
-                stop_loss_history=stop_loss_history,
-                signal_id=event.related_signal_id,
-                timestamp=event.timestamp,
-                stop_loss=parsed.stop_loss,
-            )
-        elif parsed.action is SignalAction.UPDATE_TP and parsed.take_profits:
+        elif handles_stop and parsed.stop_loss is not None:
+            if max_stop_loss_pct_of_balance is not None:
+                risk = clamp_stop_loss_to_risk_budget(
+                    side=position.side,
+                    entry_price=position.entry_price,
+                    stop_loss=parsed.stop_loss,
+                    quantity=position.remaining_quantity,
+                    balance_at_entry=position.balance_at_entry,
+                    fee_rate_pct=position.fee_rate_pct,
+                    max_loss_pct_of_balance=max_stop_loss_pct_of_balance,
+                )
+                if risk.was_capped:
+                    position.notes.append(
+                        "stop_loss_update_rejected_risk_budget="
+                        f"requested={parsed.stop_loss}; maximum_safe={risk.stop_loss}; "
+                        f"risk_budget={risk.risk_budget}"
+                    )
+                    if parsed.action is SignalAction.UPDATE_TP:
+                        return
+                else:
+                    position.stop_loss = parsed.stop_loss
+            else:
+                position.stop_loss = parsed.stop_loss
+            if position.stop_loss == parsed.stop_loss:
+                position.notes.append(f"stop_loss_updated={parsed.stop_loss}")
+                self._replace_stop_loss_history(
+                    stop_loss_history=stop_loss_history,
+                    signal_id=signal_id,
+                    timestamp=event.timestamp,
+                    stop_loss=parsed.stop_loss,
+                )
+
+        handles_take_profit = parsed.action in {
+            SignalAction.UPDATE_TP,
+            SignalAction.UPDATE_ENTRY,
+        }
+        if handles_take_profit and parsed.take_profits:
             valid_update_tps = self._sanitize_take_profits(
                 take_profits=parsed.take_profits,
                 side=position.side,
@@ -1926,16 +2036,37 @@ class BacktestSimulator:
                     position.take_profits[: position.targets_hit] + valid_update_tps
                 )
                 position.notes.append(
-                    "take_profits_updated=" + ",".join(str(item) for item in valid_update_tps)
+                    "take_profits_updated="
+                    + ",".join(str(item) for item in valid_update_tps)
                 )
                 self._replace_take_profit_history(
                     take_profit_history=take_profit_history,
-                    signal_id=event.related_signal_id,
+                    signal_id=signal_id,
                     timestamp=event.timestamp,
                     take_profits=position.take_profits,
                 )
             else:
                 position.notes.append("take_profits_update_ignored_invalid")
+
+        handles_leverage = parsed.action in {
+            SignalAction.UPDATE_LEVERAGE,
+            SignalAction.UPDATE_ENTRY,
+        }
+        if handles_leverage and parsed.leverage is not None and parsed.leverage > 0:
+            requested = Decimal(parsed.leverage)
+            effective = (
+                min(requested, max_effective_leverage)
+                if max_effective_leverage is not None
+                else requested
+            )
+            position.declared_leverage = requested
+            position.effective_leverage = max(effective, Decimal("1"))
+            if effective != requested:
+                position.notes.append(
+                    f"leverage_clamped={requested}->{effective}"
+                )
+            else:
+                position.notes.append(f"leverage_updated={effective}")
 
     def _build_live_preview_snapshot(
         self,
@@ -2405,6 +2536,38 @@ class BacktestSimulator:
         floor_pct = max(min_allocation_pct, Decimal("0"))
         ceiling_pct = max(max_allocation_pct, floor_pct)
         return min(max(raw_pct, floor_pct), ceiling_pct)
+
+    @staticmethod
+    def _cap_explicit_stop_quantity(
+        *,
+        side: TradeSide,
+        entry_price: Decimal,
+        stop_loss: Decimal,
+        quantity: Decimal,
+        balance_at_entry: Decimal,
+        fee_rate_pct: Decimal,
+        max_loss_pct_of_balance: Decimal,
+    ) -> tuple[Decimal, list[str]]:
+        """Apply the same explicit-stop risk sizing used by LivePositionManager."""
+
+        maximum = max_quantity_for_stop_risk_budget(
+            side=side,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            balance_at_entry=balance_at_entry,
+            fee_rate_pct=fee_rate_pct,
+            max_loss_pct_of_balance=max_loss_pct_of_balance,
+        ).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+        if maximum <= Decimal("0"):
+            return Decimal("0"), [
+                "requested_stop_loss_has_no_positive_risk_safe_quantity"
+            ]
+        if quantity <= maximum:
+            return quantity, []
+        return maximum, [
+            "quantity_risk_capped_to_preserve_stop="
+            f"{quantity}->{maximum}; stop_loss={stop_loss}"
+        ]
 
     def _cap_synthetic_stop_loss_risk(
         self,

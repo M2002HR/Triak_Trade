@@ -4,12 +4,64 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from triak_trade.domain.enums import SignalAction, TradeSide
+from triak_trade.domain.enums import EntryType, SignalAction, TradeSide
 from triak_trade.domain.models import ParsedSignal
+from triak_trade.parsing.side_inference import infer_trade_side_from_price_geometry
 
 
 class ParsedSignalValidator:
     """Strict validation for actionable proposal."""
+
+    def normalize_for_execution(
+        self,
+        signal: ParsedSignal,
+    ) -> tuple[ParsedSignal, str | None]:
+        """Apply the geometry normalization shared by live and backtest execution."""
+
+        if signal.action is not SignalAction.OPEN:
+            return signal, None
+        updates: dict[str, object] = {}
+        if (
+            signal.entry_type is EntryType.UNKNOWN
+            and signal.entry_low is None
+            and signal.entry_high is None
+        ):
+            updates["entry_type"] = EntryType.MARKET
+
+        reference = self._entry_reference(signal)
+        if (
+            reference is not None
+            and reference > Decimal("0")
+            and signal.side in {TradeSide.UNKNOWN, TradeSide.BUY, TradeSide.SELL}
+        ):
+            inference = infer_trade_side_from_price_geometry(
+                entry_low=signal.entry_low,
+                entry_high=signal.entry_high,
+                stop_loss=signal.stop_loss,
+                take_profits=signal.take_profits,
+            )
+            if inference.side is not TradeSide.UNKNOWN:
+                updates["side"] = inference.side
+
+        normalized = signal.model_copy(update=updates) if updates else signal
+        reference = self._entry_reference(normalized)
+        if (
+            reference is None
+            or reference <= Decimal("0")
+            or normalized.stop_loss is None
+        ):
+            return normalized, None
+        if normalized.side.is_long and normalized.stop_loss >= reference:
+            return (
+                normalized,
+                "inconsistent long geometry: stop_loss is not below entry/market price",
+            )
+        if normalized.side.is_short and normalized.stop_loss <= reference:
+            return (
+                normalized,
+                "inconsistent short geometry: stop_loss is not above entry/market price",
+            )
+        return normalized, None
 
     def validate_for_proposal(
         self,
@@ -43,7 +95,7 @@ class ParsedSignalValidator:
         *,
         min_confidence: Decimal = Decimal("0.50"),
     ) -> tuple[bool, list[str]]:
-        """Permissive gate for the real backtest: open whatever the channel says.
+        """Permissive gate for the backtest: open whatever the channel says.
 
         The user requirement is that any message which says "open a signal" must
         start being simulated. So we only reject signals that are structurally
@@ -111,6 +163,12 @@ class ParsedSignalValidator:
         if signal.entry_low and signal.entry_high and signal.entry_low > signal.entry_high:
             errors.append("invalid entry range")
         return errors
+
+    @staticmethod
+    def _entry_reference(signal: ParsedSignal) -> Decimal | None:
+        if signal.entry_low is not None and signal.entry_high is not None:
+            return (signal.entry_low + signal.entry_high) / Decimal("2")
+        return signal.entry_low or signal.entry_high
 
     @staticmethod
     def _append_directional_checks(errors: list[str], signal: ParsedSignal) -> None:

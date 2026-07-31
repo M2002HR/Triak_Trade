@@ -11,21 +11,29 @@ from queue import Queue
 import pytest
 from pydantic import ValidationError
 
-from triak_trade.backtesting.isolated_runner import (
-    IsolatedBacktestRunner,
-    IsolatedBacktestRunRequest,
-    _build_isolated_worker_cpu_assignments,
-    _initialize_isolated_worker,
+from triak_trade.backtesting.backtest_runner import (
+    BacktestRunner,
+    BacktestRunRequest,
+    BacktestSignalRecord,
+    _build_backtest_worker_cpu_assignments,
+    _initialize_backtest_worker,
     _load_candle_artifact,
-    _probe_isolated_worker_cpu,
+    _probe_backtest_worker_cpu,
     _write_candle_artifact,
-    default_isolated_parallel_workers,
-    isolated_available_cpu_ids,
-    isolated_worker_multiprocessing_context,
+    backtest_available_cpu_ids,
+    backtest_worker_multiprocessing_context,
+    default_backtest_parallel_workers,
 )
+from triak_trade.backtesting.models import BacktestEvent
 from triak_trade.config.settings import Settings
-from triak_trade.domain.enums import CandleSource
-from triak_trade.domain.models import Candle, RawTelegramMessage
+from triak_trade.domain.enums import (
+    CandleSource,
+    EntryType,
+    MarketType,
+    SignalAction,
+    TradeSide,
+)
+from triak_trade.domain.models import Candle, ParsedSignal, RawTelegramMessage
 from triak_trade.telegram.client import FakeTelegramClient
 
 
@@ -83,6 +91,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         "RUN_BACKTEST_INTEGRATION_TESTS": 1,
         "RUN_TELEGRAM_INTEGRATION_TESTS": 1,
         "RUN_BINANCE_PUBLIC_MARKETDATA_INTEGRATION_TESTS": 1,
+        "RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS": 1,
         "TELEGRAM_API_ID": 123,
         "TELEGRAM_API_HASH": "fake-hash",
         "REAL_BACKTEST_REPORT_DIR": str(tmp_path),
@@ -136,7 +145,125 @@ def _candle(
     )
 
 
-def test_isolated_backtest_runner_builds_independent_signal_results(tmp_path: Path) -> None:
+def _parsed_signal(
+    *,
+    action: SignalAction = SignalAction.OPEN,
+    stop_loss: str = "95",
+    take_profits: list[str] | None = None,
+    leverage: int = 5,
+) -> ParsedSignal:
+    return ParsedSignal(
+        action=action,
+        market=MarketType.FUTURES,
+        symbol="BTCUSDT",
+        side=TradeSide.LONG,
+        entry_type=EntryType.LIMIT,
+        entry_low=Decimal("100"),
+        entry_high=Decimal("100"),
+        stop_loss=Decimal(stop_loss),
+        take_profits=[
+            Decimal(item) for item in (take_profits or ["110"])
+        ],
+        leverage=leverage,
+        confidence=Decimal("0.9"),
+        invalid_reason=None,
+        source_channel_id="channel",
+        source_message_id=1,
+        parser_version="test",
+    )
+
+
+def test_live_consolidation_delays_entry_and_merges_only_pending_updates(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
+    signal_id = "signal-1"
+    open_event = BacktestEvent(
+        timestamp=now,
+        action=SignalAction.OPEN,
+        signal_id=signal_id,
+        parsed_signal=_parsed_signal(),
+        related_signal_id=None,
+        debug_notes=[],
+        source_message_id=1,
+    )
+    pending_update = BacktestEvent(
+        timestamp=now + timedelta(seconds=60),
+        action=SignalAction.UPDATE_ENTRY,
+        signal_id=signal_id,
+        parsed_signal=_parsed_signal(
+            action=SignalAction.UPDATE_ENTRY,
+            stop_loss="96",
+            take_profits=["112"],
+            leverage=7,
+        ),
+        related_signal_id=signal_id,
+        debug_notes=[],
+        source_message_id=2,
+    )
+    post_open_update = BacktestEvent(
+        timestamp=now + timedelta(seconds=240),
+        action=SignalAction.UPDATE_TP,
+        signal_id=signal_id,
+        parsed_signal=_parsed_signal(
+            action=SignalAction.UPDATE_TP,
+            take_profits=["115"],
+        ),
+        related_signal_id=signal_id,
+        debug_notes=[],
+        source_message_id=3,
+    )
+    events = [open_event, pending_update, post_open_update]
+    records = {
+        signal_id: BacktestSignalRecord(
+            signal_id=signal_id,
+            channel_id="channel",
+            symbol="BTCUSDT",
+            side="long",
+            source_message_id=1,
+            source_message_date=now,
+            events=list(events),
+        )
+    }
+    runner = BacktestRunner(
+        settings=_settings(tmp_path),
+        telegram_client=FakeTelegramClient(),
+        market_data_provider=FakeMarketDataProvider({}),
+    )
+
+    runner._apply_live_consolidation(
+        request=BacktestRunRequest(
+            channel="channel",
+            hours=1,
+            interval="1m",
+            max_messages=100,
+            use_ai=False,
+            send_telegram_summary=False,
+            send_log_channel=False,
+            consolidation_seconds=180,
+        ),
+        events=events,
+        records_by_signal_id=records,
+        traces_by_message_id={},
+        symbol_trace_map={"BTCUSDT": [1]},
+        tracked_signal_ids={signal_id},
+        counts={"valid_signals": 1, "invalid_signals": 0},
+    )
+
+    consolidated = records[signal_id].events[0]
+    assert consolidated.timestamp == now + timedelta(seconds=180)
+    assert consolidated.parsed_signal.action is SignalAction.OPEN
+    assert consolidated.parsed_signal.stop_loss == Decimal("96")
+    assert consolidated.parsed_signal.take_profits == [Decimal("112")]
+    assert consolidated.parsed_signal.leverage == 7
+    assert len(records[signal_id].events) == 2
+    assert len(events) == 2
+    assert records[signal_id].events[1].parsed_signal.take_profits == [
+        Decimal("115")
+    ]
+
+
+def test_backtest_runner_builds_independent_signal_results(tmp_path: Path) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
     channel = "https://t.me/Tofan_Trade"
     messages = [
@@ -180,14 +307,14 @@ def test_isolated_backtest_runner_builds_independent_signal_results(tmp_path: Pa
             )
         ],
     }
-    runner = IsolatedBacktestRunner(
+    runner = BacktestRunner(
         settings=_settings(tmp_path),
         telegram_client=telegram,
         market_data_provider=FakeMarketDataProvider(candles_by_symbol),
     )
 
     result = runner.run_sync(
-        IsolatedBacktestRunRequest(
+        BacktestRunRequest(
             channel=channel,
             from_date=now - timedelta(minutes=1),
             to_date=now + timedelta(minutes=10),
@@ -199,13 +326,14 @@ def test_isolated_backtest_runner_builds_independent_signal_results(tmp_path: Pa
             use_ai=False,
             send_telegram_summary=False,
             send_log_channel=False,
-            log_per_message=False,
-            max_parallel_signals=1,
-        )
+                log_per_message=False,
+                max_parallel_signals=1,
+                consolidation_seconds=0,
+            )
     )
 
     assert result.success is True
-    assert result.run_type == "isolated"
+    assert result.run_type == "backtest"
     assert result.trades_simulated == 2
     assert result.trades_filled == 2
     assert result.wins == 1
@@ -224,7 +352,7 @@ def test_isolated_backtest_runner_builds_independent_signal_results(tmp_path: Pa
     assert result.report_path is not None
 
 
-def test_isolated_backtest_replays_oversized_symbol_windows_in_bounded_segments(
+def test_backtest_replays_oversized_symbol_windows_in_bounded_segments(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
@@ -270,14 +398,14 @@ def test_isolated_backtest_replays_oversized_symbol_windows_in_bounded_segments(
             )
         ]
     }
-    runner = IsolatedBacktestRunner(
-        settings=_settings(tmp_path, ISOLATED_BACKTEST_MAX_CANDLES_PER_SYMBOL=2),
+    runner = BacktestRunner(
+        settings=_settings(tmp_path, BACKTEST_MAX_CANDLES_PER_SYMBOL=2),
         telegram_client=FakeTelegramClient(history_by_channel={channel: messages}),
         market_data_provider=FakeMarketDataProvider(candles),
     )
 
     result = runner.run_sync(
-        IsolatedBacktestRunRequest(
+        BacktestRunRequest(
             channel=channel,
             from_date=now,
             to_date=now + timedelta(minutes=10),
@@ -289,9 +417,10 @@ def test_isolated_backtest_replays_oversized_symbol_windows_in_bounded_segments(
             use_ai=False,
             send_telegram_summary=False,
             send_log_channel=False,
-            log_per_message=False,
-            max_parallel_signals=1,
-        )
+                log_per_message=False,
+                max_parallel_signals=1,
+                consolidation_seconds=0,
+            )
     )
 
     assert result.success is True
@@ -300,7 +429,7 @@ def test_isolated_backtest_replays_oversized_symbol_windows_in_bounded_segments(
     assert result.candles_fetched == 11
 
 
-def test_isolated_backtest_times_out_one_symbol_and_continues_with_the_rest(
+def test_backtest_times_out_one_symbol_and_continues_with_the_rest(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
@@ -349,18 +478,18 @@ def test_isolated_backtest_times_out_one_symbol_and_continues_with_the_rest(
         delayed_symbols={"BTCUSDT"},
         delay_seconds=1.05,
     )
-    runner = IsolatedBacktestRunner(
+    runner = BacktestRunner(
         settings=_settings(
             tmp_path,
-            ISOLATED_BACKTEST_MAX_CANDLES_PER_SYMBOL=100,
-            ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS=1,
+            BACKTEST_MAX_CANDLES_PER_SYMBOL=100,
+            BACKTEST_MARKET_DATA_TIMEOUT_SECONDS=1,
         ),
         telegram_client=FakeTelegramClient(history_by_channel={channel: messages}),
         market_data_provider=provider,
     )
 
     result = runner.run_sync(
-        IsolatedBacktestRunRequest(
+        BacktestRunRequest(
             channel=channel,
             from_date=now,
             to_date=now + timedelta(minutes=1),
@@ -372,9 +501,10 @@ def test_isolated_backtest_times_out_one_symbol_and_continues_with_the_rest(
             use_ai=False,
             send_telegram_summary=False,
             send_log_channel=False,
-            log_per_message=False,
-            max_parallel_signals=1,
-        )
+                log_per_message=False,
+                max_parallel_signals=1,
+                consolidation_seconds=0,
+            )
     )
 
     assert result.success is True
@@ -388,7 +518,7 @@ def test_isolated_backtest_times_out_one_symbol_and_continues_with_the_rest(
     assert len(provider.requests) >= 2
 
 
-def test_isolated_candle_artifact_round_trip_streams_each_candle(tmp_path: Path) -> None:
+def test_backtest_candle_artifact_round_trip_streams_each_candle(tmp_path: Path) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
     candles = [
         _candle(
@@ -415,12 +545,12 @@ def test_isolated_candle_artifact_round_trip_streams_each_candle(tmp_path: Path)
 @pytest.mark.parametrize(
     ("setting_name", "invalid_value"),
     [
-        ("ISOLATED_BACKTEST_MAX_CANDLES_PER_SYMBOL", 0),
-        ("ISOLATED_BACKTEST_MARKET_DATA_TIMEOUT_SECONDS", 0),
-        ("ISOLATED_BACKTEST_MARKET_DATA_MAX_CONCURRENCY", 0),
+        ("BACKTEST_MAX_CANDLES_PER_SYMBOL", 0),
+        ("BACKTEST_MARKET_DATA_TIMEOUT_SECONDS", 0),
+        ("BACKTEST_MARKET_DATA_MAX_CONCURRENCY", 0),
     ],
 )
-def test_isolated_market_data_safety_limits_cannot_be_disabled(
+def test_backtest_market_data_safety_limits_cannot_be_disabled(
     tmp_path: Path,
     setting_name: str,
     invalid_value: int,
@@ -429,7 +559,7 @@ def test_isolated_market_data_safety_limits_cannot_be_disabled(
         _settings(tmp_path, **{setting_name: invalid_value})
 
 
-def test_isolated_backtest_runner_compacts_long_chart_payloads(tmp_path: Path) -> None:
+def test_backtest_runner_compacts_long_chart_payloads(tmp_path: Path) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
     channel = "https://t.me/Tofan_Trade"
     messages = [
@@ -454,14 +584,14 @@ def test_isolated_backtest_runner_compacts_long_chart_payloads(tmp_path: Path) -
         )
         for index in range(1305)
     ]
-    runner = IsolatedBacktestRunner(
+    runner = BacktestRunner(
         settings=_settings(tmp_path),
         telegram_client=telegram,
         market_data_provider=FakeMarketDataProvider({"BTCUSDT": candles}),
     )
 
     result = runner.run_sync(
-        IsolatedBacktestRunRequest(
+        BacktestRunRequest(
             channel=channel,
             from_date=now - timedelta(minutes=1),
             to_date=now + timedelta(minutes=1305),
@@ -473,9 +603,10 @@ def test_isolated_backtest_runner_compacts_long_chart_payloads(tmp_path: Path) -
             use_ai=False,
             send_telegram_summary=False,
             send_log_channel=False,
-            log_per_message=False,
-            max_parallel_signals=1,
-        )
+                log_per_message=False,
+                max_parallel_signals=1,
+                consolidation_seconds=0,
+            )
     )
 
     signal = result.signals[0]
@@ -484,7 +615,7 @@ def test_isolated_backtest_runner_compacts_long_chart_payloads(tmp_path: Path) -
     assert signal["chart"]["visible_points"] < signal["chart"]["source_points"]
 
 
-def test_isolated_backtest_runner_failure_keeps_zeroed_aggregate(tmp_path: Path) -> None:
+def test_backtest_runner_failure_keeps_zeroed_aggregate(tmp_path: Path) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
     channel = "https://t.me/Tofan_Trade"
     messages = [
@@ -497,14 +628,14 @@ def test_isolated_backtest_runner_failure_keeps_zeroed_aggregate(tmp_path: Path)
         ),
     ]
     telegram = FakeTelegramClient(history_by_channel={channel: messages})
-    runner = IsolatedBacktestRunner(
+    runner = BacktestRunner(
         settings=_settings(tmp_path),
         telegram_client=telegram,
         market_data_provider=FakeMarketDataProvider({}),
     )
 
     result = runner.run_sync(
-        IsolatedBacktestRunRequest(
+        BacktestRunRequest(
             channel=channel,
             from_date=now - timedelta(minutes=1),
             to_date=now + timedelta(minutes=1),
@@ -516,9 +647,10 @@ def test_isolated_backtest_runner_failure_keeps_zeroed_aggregate(tmp_path: Path)
             use_ai=False,
             send_telegram_summary=False,
             send_log_channel=False,
-            log_per_message=False,
-            max_parallel_signals=1,
-        )
+                log_per_message=False,
+                max_parallel_signals=1,
+                consolidation_seconds=0,
+            )
     )
 
     assert result.success is False
@@ -553,15 +685,15 @@ def test_isolated_backtest_runner_failure_keeps_zeroed_aggregate(tmp_path: Path)
     }
 
 
-def test_isolated_parallel_worker_default_uses_available_cpu_count(
+def test_backtest_parallel_worker_default_uses_available_cpu_count(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "triak_trade.backtesting.isolated_runner.isolated_available_cpu_ids",
+        "triak_trade.backtesting.backtest_runner.backtest_available_cpu_ids",
         lambda: (2, 3, 4, 5),
     )
 
-    request = IsolatedBacktestRunRequest(
+    request = BacktestRunRequest(
         channel="https://t.me/Tofan_Trade",
         from_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
         to_date=datetime(2026, 6, 5, tzinfo=timezone.utc),
@@ -575,22 +707,22 @@ def test_isolated_parallel_worker_default_uses_available_cpu_count(
         log_per_message=False,
     )
 
-    assert default_isolated_parallel_workers() == 4
+    assert default_backtest_parallel_workers() == 4
     assert request.max_parallel_signals == 4
 
 
-def test_isolated_worker_cpu_assignments_cap_to_available_cpu_slots(
+def test_backtest_worker_cpu_assignments_cap_to_available_cpu_slots(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "triak_trade.backtesting.isolated_runner.isolated_available_cpu_ids",
+        "triak_trade.backtesting.backtest_runner.backtest_available_cpu_ids",
         lambda: (1, 4, 6),
     )
 
-    assert _build_isolated_worker_cpu_assignments(8) == [1, 4, 6]
+    assert _build_backtest_worker_cpu_assignments(8) == [1, 4, 6]
 
 
-def test_initialize_isolated_worker_sets_process_affinity(
+def test_initialize_backtest_worker_sets_process_affinity(
     monkeypatch,
 ) -> None:
     assigned: list[tuple[int, set[int]]] = []
@@ -602,7 +734,7 @@ def test_initialize_isolated_worker_sets_process_affinity(
         lambda pid, cpus: assigned.append((pid, set(cpus))),
     )
 
-    _initialize_isolated_worker(cpu_queue)
+    _initialize_backtest_worker(cpu_queue)
 
     assert assigned == [(0, {7})]
 
@@ -611,22 +743,22 @@ def test_process_pool_initializer_pins_worker_to_assigned_cpu() -> None:
     if not hasattr(os, "sched_setaffinity") or not hasattr(os, "sched_getaffinity"):
         pytest.skip("CPU affinity controls are not available on this platform")
 
-    available_cpu_ids = isolated_available_cpu_ids()
+    available_cpu_ids = backtest_available_cpu_ids()
     if not available_cpu_ids:
         pytest.skip("No CPU ids available for affinity test")
 
     expected_cpu_id = available_cpu_ids[0]
-    mp_context = isolated_worker_multiprocessing_context()
+    mp_context = backtest_worker_multiprocessing_context()
     cpu_id_queue = mp_context.Queue()
     cpu_id_queue.put(expected_cpu_id)
 
     with ProcessPoolExecutor(
         max_workers=1,
         mp_context=mp_context,
-        initializer=_initialize_isolated_worker,
+        initializer=_initialize_backtest_worker,
         initargs=(cpu_id_queue,),
     ) as executor:
-        worker_state = executor.submit(_probe_isolated_worker_cpu).result(timeout=10)
+        worker_state = executor.submit(_probe_backtest_worker_cpu).result(timeout=10)
 
     assert worker_state["assigned_cpu_id"] == expected_cpu_id
     assert worker_state["affinity"] == [expected_cpu_id]

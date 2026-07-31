@@ -28,21 +28,14 @@ from triak_trade.ai.runtime import (
     stop_ai_gateway_process,
 )
 from triak_trade.backtesting import (
-    BacktestEngine,
-    BacktestRequest,
-    IsolatedBacktestRunner,
-    IsolatedBacktestRunRequest,
-    RealBacktestRunner,
-    RealBacktestRunRequest,
-    run_fixture_backtest,
+    BacktestRunner,
+    BacktestRunRequest,
 )
-from triak_trade.backtesting.isolated_runner import (
-    IsolatedBacktestResult,
-    default_isolated_parallel_workers,
+from triak_trade.backtesting.backtest_runner import (
+    BacktestResult,
+    default_backtest_parallel_workers,
 )
-from triak_trade.backtesting.real_runner import RealBacktestResult
 from triak_trade.config.settings import Settings, get_settings
-from triak_trade.core.formatting import format_decimal
 from triak_trade.core.health import run_health_checks
 from triak_trade.core.logging import configure_logging
 from triak_trade.core.time import parse_user_datetime_to_utc
@@ -150,23 +143,16 @@ def _build_binance_public_provider(settings: Settings) -> BinancePublicFuturesPr
     )
 
 
-def _build_real_backtest_runner(
+def _build_backtest_runner(
     settings: Settings,
     telegram_client: TelegramClientInterface | None = None,
-) -> RealBacktestRunner:
-    return RealBacktestRunner(settings=settings, telegram_client=telegram_client)
-
-
-def _build_isolated_backtest_runner(
-    settings: Settings,
-    telegram_client: TelegramClientInterface | None = None,
-) -> IsolatedBacktestRunner:
-    return IsolatedBacktestRunner(settings=settings, telegram_client=telegram_client)
+) -> BacktestRunner:
+    return BacktestRunner(settings=settings, telegram_client=telegram_client)
 
 
 def _run_backtest_with_quiet_network_logs(
-    runner: RealBacktestRunner | IsolatedBacktestRunner,
-    request: RealBacktestRunRequest | IsolatedBacktestRunRequest,
+    runner: BacktestRunner,
+    request: BacktestRunRequest,
 ) -> object:
     logger_overrides = {
         "telethon": logging.ERROR,
@@ -914,148 +900,18 @@ def toobit_order_test_cmd(
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@app.command("backtest-fixture")
-def backtest_fixture_cmd() -> None:
-    _load_settings()
-    report_json, summary = run_fixture_backtest()
-    typer.echo(json.dumps({"summary": summary, "report": report_json}, indent=2, sort_keys=True))
-
-
-@app.command("backtest-dry-run")
-def backtest_dry_run_cmd(
-    channel: str = typer.Option("https://t.me/Tofan_Trade", "--channel"),
-    from_date: str = typer.Option(..., "--from"),
-    to_date: str = typer.Option(..., "--to"),
-    interval: str = typer.Option("1m", "--interval"),
-    real: bool = typer.Option(False, "--real"),
-) -> None:
+@app.command("backtest-check")
+def backtest_check_cmd() -> None:
+    """Show non-secret readiness for the backtest pipeline."""
     settings = _load_settings()
-    if real:
-        raise typer.BadParameter(
-            "Real backtest mode blocked unless RUN_BACKTEST_INTEGRATION_TESTS=1 and related guards."
-        )
-    request = BacktestRequest(
-        channel=channel,
-        from_date=parse_user_datetime_to_utc(from_date),
-        to_date=parse_user_datetime_to_utc(to_date),
-        initial_balance=settings.BACKTEST_DEFAULT_INITIAL_BALANCE,
-        interval=interval,
-        fill_policy=BacktestFillPolicy.CONSERVATIVE,
-        risk_per_trade_pct=settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT,
-        use_ai_classifier=settings.BACKTEST_USE_AI_CLASSIFIER,
-        use_regex_fallback=settings.BACKTEST_USE_REGEX_FALLBACK,
-        max_messages=settings.BACKTEST_MAX_MESSAGES,
-        symbols=None,
-    )
-    report = BacktestEngine().run(request)
-    payload = {
-        "channel": report.channel_id,
-        "final_balance": format_decimal(report.final_balance),
-        "max_drawdown": format_decimal(report.metrics.max_drawdown),
-        "profit_factor": (
-            format_decimal(report.metrics.profit_factor)
-            if report.metrics.profit_factor is not None
-            else None
-        ),
-        "total_pnl": format_decimal(report.metrics.total_pnl),
-        "win_rate": format_decimal(report.metrics.win_rate),
-    }
-    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@app.command("real-backtest-check")
-def real_backtest_check_cmd() -> None:
-    """Show non-secret readiness for the real backtest pipeline."""
-    settings = _load_settings()
-    runner = _build_real_backtest_runner(settings)
+    runner = _build_backtest_runner(settings)
     readiness = runner.readiness().model_dump(mode="json")
     readiness["dashboard_running"] = dashboard_status(settings)["running"]
     typer.echo(json.dumps(readiness, indent=2, sort_keys=True))
 
 
-@app.command("isolated-backtest-check")
-def isolated_backtest_check_cmd() -> None:
-    """Show non-secret readiness for the isolated real backtest pipeline."""
-    settings = _load_settings()
-    runner = _build_isolated_backtest_runner(settings)
-    readiness = runner.readiness().model_dump(mode="json")
-    readiness["dashboard_running"] = dashboard_status(settings)["running"]
-    typer.echo(json.dumps(readiness, indent=2, sort_keys=True))
-
-
-@app.command("real-backtest-run")
-def real_backtest_run_cmd(
-    channel: str = typer.Option(..., "--channel"),
-    from_date: str | None = typer.Option(None, "--from"),
-    to_date: str | None = typer.Option(None, "--to"),
-    hours: int | None = typer.Option(None, "--hours"),
-    interval: str = typer.Option("1m", "--interval"),
-    max_messages: int = typer.Option(1000, "--max-messages"),
-    use_ai: bool = typer.Option(True, "--use-ai/--no-ai"),
-    send_telegram_summary: bool = typer.Option(
-        True,
-        "--send-telegram-summary/--no-send-telegram-summary",
-    ),
-    send_log_channel: bool = typer.Option(
-        True,
-        "--send-log-channel/--no-send-log-channel",
-    ),
-) -> None:
-    """Run a guarded real Telegram + Toobit public backtest."""
-    settings = _load_settings()
-    runner = _build_real_backtest_runner(settings)
-    request = RealBacktestRunRequest(
-        channel=channel,
-        from_date=parse_user_datetime_to_utc(from_date) if from_date else None,
-        to_date=parse_user_datetime_to_utc(to_date) if to_date else None,
-        hours=hours,
-        interval=interval,
-        max_messages=max_messages,
-        initial_balance=settings.BACKTEST_DEFAULT_INITIAL_BALANCE,
-        risk_per_trade_pct=settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT,
-        use_ai=use_ai,
-        send_telegram_summary=send_telegram_summary,
-        send_log_channel=send_log_channel,
-        log_per_message=settings.REAL_BACKTEST_LOG_PER_MESSAGE,
-    )
-    result = cast(
-        "RealBacktestResult",
-        _run_backtest_with_quiet_network_logs(runner, request),
-    )
-    typer.echo(
-        json.dumps(
-            {
-                "success": result.success,
-                "channel": result.channel,
-                "from_date": result.from_date.isoformat(),
-                "to_date": result.to_date.isoformat(),
-                "interval": result.interval,
-                "real_telegram_used": result.real_telegram_used,
-                "real_market_data_used": result.real_market_data_used,
-                "ai_used": result.ai_used,
-                "regex_fallback_used": result.regex_fallback_used,
-                "total_messages": result.total_messages,
-                "parsed_signals": result.parsed_signals,
-                "valid_signals": result.valid_signals,
-                "trades_simulated": result.trades_simulated,
-                "trades_filled": result.trades_filled,
-                "total_pnl": str(result.total_pnl),
-                "channel_score": str(result.channel_score),
-                "skipped_reasons": result.skipped_reasons,
-                "warnings": result.warnings,
-                "errors": result.errors,
-                "phase_durations_ms": result.phase_durations_ms,
-                "report_path": result.report_path,
-                "markdown_report_path": result.markdown_report_path,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-
-
-@app.command("isolated-backtest-run")
-def isolated_backtest_run_cmd(
+@app.command("backtest-run")
+def backtest_run_cmd(
     channel: str = typer.Option(..., "--channel"),
     from_date: str | None = typer.Option(None, "--from"),
     to_date: str | None = typer.Option(None, "--to"),
@@ -1087,7 +943,16 @@ def isolated_backtest_run_cmd(
         None,
         "--synthetic-stop-max-loss-pct",
     ),
+    max_stop_loss_pct: str | None = typer.Option(
+        None,
+        "--max-stop-loss-pct",
+    ),
     fee_rate_pct: str | None = typer.Option(None, "--fee-rate-pct"),
+    consolidation_seconds: int | None = typer.Option(
+        None,
+        "--consolidation-seconds",
+        min=0,
+    ),
     lifecycle_refresh_interval: str | None = typer.Option(
         None,
         "--lifecycle-refresh-interval",
@@ -1098,20 +963,20 @@ def isolated_backtest_run_cmd(
         "--include-not-filled-signals/--exclude-not-filled-signals",
     ),
     close_open_positions_at_end: bool = typer.Option(
-        True,
+        False,
         "--close-open-positions-at-end/--leave-open-positions-at-end",
     ),
     include_signals: bool = typer.Option(False, "--include-signals/--summary-only"),
 ) -> None:
-    """Run the isolated per-signal real Telegram + Toobit public backtest."""
+    """Run a guarded Telegram + public-market-data backtest."""
     if leverage_source == "fixed" and (fixed_leverage is None or fixed_leverage <= 0):
         raise typer.BadParameter(
             "must be a positive integer when --leverage-source=fixed",
             param_hint="--fixed-leverage",
         )
     settings = _load_settings()
-    runner = _build_isolated_backtest_runner(settings)
-    request = IsolatedBacktestRunRequest(
+    runner = _build_backtest_runner(settings)
+    request = BacktestRunRequest(
         channel=channel,
         from_date=parse_user_datetime_to_utc(from_date) if from_date else None,
         to_date=parse_user_datetime_to_utc(to_date) if to_date else None,
@@ -1139,34 +1004,43 @@ def isolated_backtest_run_cmd(
         ),
         fixed_leverage=fixed_leverage,
         max_effective_leverage=Decimal(
-            max_effective_leverage or str(settings.BACKTEST_MAX_EFFECTIVE_LEVERAGE)
+            max_effective_leverage or str(settings.LIVE_TRADING_MAX_EFFECTIVE_LEVERAGE)
         ),
         default_signal_leverage=Decimal(
-            default_signal_leverage or str(settings.BACKTEST_DEFAULT_SIGNAL_LEVERAGE)
+            default_signal_leverage or str(settings.LIVE_TRADING_DEFAULT_SIGNAL_LEVERAGE)
         ),
         min_allocation_pct=Decimal(
-            min_allocation_pct or str(settings.BACKTEST_MIN_ALLOCATION_PCT)
+            min_allocation_pct or str(settings.LIVE_TRADING_MIN_ALLOCATION_PCT)
         ),
         max_allocation_pct=Decimal(
-            max_allocation_pct or str(settings.BACKTEST_MAX_ALLOCATION_PCT)
+            max_allocation_pct or str(settings.LIVE_TRADING_MAX_ALLOCATION_PCT)
         ),
         default_stop_pct=Decimal(
-            default_stop_pct or str(settings.BACKTEST_DEFAULT_STOP_PCT)
+            default_stop_pct or str(settings.LIVE_TRADING_DEFAULT_STOP_PCT)
         ),
         synthetic_stop_max_loss_pct_of_balance=Decimal(
             synthetic_stop_max_loss_pct
-            or str(settings.BACKTEST_SYNTHETIC_STOP_MAX_LOSS_PCT_OF_BALANCE)
+            or str(settings.LIVE_TRADING_SYNTHETIC_STOP_MAX_LOSS_PCT)
         ),
-        fee_rate_pct=Decimal(fee_rate_pct or str(settings.BACKTEST_FEE_RATE_PCT)),
+        max_stop_loss_pct_of_balance=Decimal(
+            max_stop_loss_pct
+            or str(settings.LIVE_TRADING_MAX_STOP_LOSS_PCT_OF_BALANCE)
+        ),
+        fee_rate_pct=Decimal(fee_rate_pct or str(settings.LIVE_TRADING_FEE_RATE_PCT)),
+        consolidation_seconds=(
+            consolidation_seconds
+            if consolidation_seconds is not None
+            else settings.SIGNAL_CONSOLIDATION_SECONDS
+        ),
         close_open_positions_at_end=close_open_positions_at_end,
         lifecycle_refresh_interval=(
             lifecycle_refresh_interval or settings.BACKTEST_LIFECYCLE_REFRESH_INTERVAL
         ),
-        max_parallel_signals=max_parallel_signals or default_isolated_parallel_workers(),
+        max_parallel_signals=max_parallel_signals or default_backtest_parallel_workers(),
         include_not_filled_signals=include_not_filled_signals,
     )
     result = cast(
-        "IsolatedBacktestResult",
+        "BacktestResult",
         _run_backtest_with_quiet_network_logs(runner, request),
     )
     payload: dict[str, object] = {
@@ -1203,39 +1077,17 @@ def isolated_backtest_run_cmd(
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@app.command("real-backtest-tofan")
-def real_backtest_tofan_cmd(
-    hours: int = typer.Option(24, "--hours"),
-    interval: str = typer.Option("1m", "--interval"),
-    max_messages: int = typer.Option(1000, "--max-messages"),
-    use_ai: bool = typer.Option(True, "--use-ai/--no-ai"),
-) -> None:
-    """Run the default guarded real backtest against the configured real channel."""
-    settings = _load_settings()
-    real_backtest_run_cmd(
-        channel=settings.REAL_BACKTEST_DEFAULT_CHANNEL,
-        from_date=None,
-        to_date=None,
-        hours=hours,
-        interval=interval,
-        max_messages=max_messages,
-        use_ai=use_ai,
-        send_telegram_summary=False,
-        send_log_channel=settings.REAL_BACKTEST_SEND_TO_LOG_CHANNEL,
-    )
-
-
-@app.command("isolated-backtest-tofan")
-def isolated_backtest_tofan_cmd(
+@app.command("backtest-tofan")
+def backtest_tofan_cmd(
     hours: int = typer.Option(24, "--hours"),
     interval: str = typer.Option("1m", "--interval"),
     max_messages: int = typer.Option(1000, "--max-messages"),
     use_ai: bool = typer.Option(True, "--use-ai/--no-ai"),
     include_signals: bool = typer.Option(False, "--include-signals/--summary-only"),
 ) -> None:
-    """Run the default isolated real backtest against the configured real channel."""
+    """Run a backtest against the configured guarded channel."""
     settings = _load_settings()
-    isolated_backtest_run_cmd(
+    backtest_run_cmd(
         channel=settings.REAL_BACKTEST_DEFAULT_CHANNEL,
         from_date=None,
         to_date=None,
@@ -1258,23 +1110,25 @@ def isolated_backtest_tofan_cmd(
         max_allocation_pct=None,
         default_stop_pct=None,
         synthetic_stop_max_loss_pct=None,
+        max_stop_loss_pct=None,
         fee_rate_pct=None,
+        consolidation_seconds=None,
         lifecycle_refresh_interval=None,
         max_parallel_signals=None,
         include_not_filled_signals=True,
-        close_open_positions_at_end=True,
+        close_open_positions_at_end=False,
         include_signals=include_signals,
     )
 
 
 @app.command("backtest-show-latest")
 def backtest_show_latest_cmd() -> None:
-    """Show the latest stored real backtest summary."""
+    """Show the latest stored backtest summary."""
     settings = _load_settings()
-    runner = _build_real_backtest_runner(settings)
+    runner = _build_backtest_runner(settings)
     payload = runner.latest_report_summary()
     if payload is None:
-        raise typer.BadParameter("No real backtest report found yet.")
+        raise typer.BadParameter("No backtest report found yet.")
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
