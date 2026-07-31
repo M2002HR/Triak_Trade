@@ -1,5 +1,7 @@
 # 09 - Account Execution Coordination
 
+> Last reviewed against the running stack: 2026-07-31.
+
 ## Why This Layer Exists
 
 Telegram channels produce independent logical trades, while Toobit exposes physical
@@ -77,6 +79,24 @@ If protection cannot be created or repaired after the configured retries, the en
 attempts to flatten only that logical leg and reports the failure. It does not leave the
 leg intentionally unprotected.
 
+Toobit's open-algo listing can temporarily omit an owned v2 stop even while a direct
+order lookup reports `ORDER_NEW`. Protection verification therefore retains the tracked
+order/client IDs and performs a direct algo-order lookup before declaring the stop
+missing.
+
+## Position Snapshot Convergence
+
+Order history and aggregate position snapshots do not always converge at the same
+instant. The first missing position response is recorded as
+`exchange_position_missing_snapshot: pending_confirmation` with confirmation count and
+elapsed time. By default, closure requires two missing observations and at least 15
+seconds. If the position reappears, the pending state is cleared and a structured
+`live_trading.exchange_position_missing_recovered` event is emitted.
+
+This guard prevents the engine from abandoning a newly filled position during a normal
+exchange API propagation delay. Confirmed protection fills are still reconciled before
+the missing-position decision.
+
 ## Same-Side Physical Position Accounting
 
 Several logical legs may share one same-direction exchange position. A full close of
@@ -87,6 +107,11 @@ in that bucket.
 Aggregate position margin and PnL snapshots are allocated proportionally to logical
 remaining quantities for session display. Durable order/fill ownership is restored from
 all stored sessions before recovered workers start.
+
+When one logical leg owns the entire physical bucket, a full close first discovers
+unowned Triak TP orders from already-closed trades. Those orphan reservations are
+canceled before the market close, after which the engine re-reads the exchange position
+and retries residual quantity up to the configured reconciliation limit.
 
 ## Operations
 

@@ -1,6 +1,9 @@
 # 06 - Trade Strategies
 
-The backtesting strategy layer is intentionally stateless so the same trade-management logic can be reused in backtesting and future execution flows.
+> Last reviewed against the running stack: 2026-07-31.
+
+The strategy layer is intentionally stateless so the same trade-management logic is
+reused by backtesting and live/demo execution.
 
 ## Strategy Protocol
 
@@ -54,4 +57,8 @@ Available built-in keys:
 This separation is one of the cleaner parts of the architecture:
 - it keeps simulation rules testable
 - it avoids burying TP/SL behavior inside the simulator
-- it prepares the codebase for backtest/live rule reuse
+- it keeps synthetic protection and target-hit actions consistent across backtest/live
+
+Live exchange execution adds another invariant around the strategy output: a filled
+position is not accepted as healthy until its normalized stop and every feasible target
+order are verified. Failed setup or repair triggers a fail-closed flatten attempt.

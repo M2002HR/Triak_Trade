@@ -1,10 +1,29 @@
 # 08 - Bugs And Recommendations
 
+> Last reviewed against the running stack: 2026-07-31.
+
 This file captures current repository-level issues and follow-up work that remain relevant after the documentation cleanup.
+
+## Recently Resolved Live-Safety Incidents
+
+### R1 - Transient exchange-position snapshots no longer close local ownership
+
+A filled position could appear in order history before Toobit's aggregate positions
+endpoint converged. The sync loop used to treat the first missing snapshot as final,
+close the local record, and stop repairing protection. Missing positions now persist a
+structured pending state and require the configured confirmation count plus grace time.
+Recovery is logged explicitly when the exchange position reappears.
+
+### R2 - Full close releases orphan Triak TP reservations
+
+A closed trade's stale TP orders could reserve exchange quantity and make a later
+full-position market close fill only partially. Exclusive-bucket closes now cancel only
+unowned `triak_tp_...` close-limit reservations before closing and reconciling the real
+remaining position. Manual orders and orders owned by active logical legs are excluded.
 
 ## High-Priority Risks
 
-### B1 - Real backtest readiness still behaves like a test harness
+### B1 - Backtest readiness still behaves like a test harness
 
 Location: `src/triak_trade/backtesting/real_runner.py`
 

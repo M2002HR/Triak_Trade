@@ -1,5 +1,7 @@
 # 01 - Project Overview
 
+> Last reviewed against the running stack: 2026-07-31.
+
 ## Purpose
 
 Triak_Trade is a modular signal-intelligence platform centered on Telegram message processing, AI-assisted classification, backtesting, dashboard-driven monitoring, and guarded demo/live execution workflows.
@@ -47,9 +49,11 @@ The intended parsing/classification end-state is AI-driven through Ajil Unified 
 - AI gateway runtime checks and dry-run classification
 - Telegram history dry-runs
 - Public market-data dry-runs
-- Fixture backtesting and guarded real backtesting
+- Guarded backtesting with deterministic injected fixtures for tests
 - Dashboard-based backtest execution and report browsing
 - Dashboard live/demo session monitoring
+- One saved-channel library shared by Backtest and Live Trade
+- Quantity-scoped live stop/target ownership with repair-or-flatten enforcement
 - Processing-audit formatting and guarded log-channel delivery
 - Verification reports with redacted summaries
 
@@ -73,4 +77,5 @@ These come from `AGENTS.md` and shape the implementation:
 - The Ajil gateway exists as a git submodule under `external/Ajil_Unified_AI_Gateway`.
 - The repository already contains dashboard and live/demo trading code, not just backtesting.
 - The CLI surface is broader than the original README used to imply, but it no longer includes an admin-bot command set.
-- Real backtesting is available, but its readiness gate is intentionally strict and still somewhat test-flag-shaped.
+- Backtesting is available, but its readiness gate is intentionally strict and still somewhat test-flag-shaped.
+- Live exchange state treats a single missing position snapshot as provisional; closure requires repeated confirmation across a grace window.

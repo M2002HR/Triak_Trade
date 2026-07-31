@@ -1,5 +1,7 @@
 # 05 - Scoring And Reports
 
+> Last reviewed against the running stack: 2026-07-31.
+
 ## Metrics
 
 `ChannelScorer` builds channel metrics from events, trades, and total PnL.
@@ -64,6 +66,10 @@ Each stored run typically produces:
 - a Markdown report file
 
 These artifacts are what `backtest-show-latest` and the dashboard report views surface.
+
+The dashboard now uses a single Backtest analysis page for run progress, aggregate
+metrics, period buckets, and per-signal rows. Legacy standalone report templates and
+frontend assets were removed so stored artifacts have one presentation path.
 
 ## Follow-Up Correlation
 

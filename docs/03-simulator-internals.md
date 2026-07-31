@@ -1,6 +1,12 @@
 # 03 - Simulator Internals
 
+> Last reviewed against the running stack: 2026-07-31.
+
 `BacktestSimulator` is the deterministic trade-simulation core. It accepts normalized `BacktestEvent` inputs plus candle data and returns simulated trades, balance outcomes, and optionally snapshots.
+
+The public runner creates one simulation state per signal. That preserves each signal's
+configured capital basis and makes cross-channel comparisons deterministic, while the
+documentation explicitly avoids claiming shared-account execution parity.
 
 ## Main Responsibilities
 
@@ -62,7 +68,9 @@ This means balances, scores, and equity curves all reflect fee-aware net results
 
 ## End-Of-Run Closing
 
-Open positions can be closed at the end of the candle series with statuses such as:
+Open positions remain active at the report boundary by default, matching live-session
+behavior. An explicit force-close option can close them at the end of the candle series
+with statuses such as:
 - `open_until_end`
 - `partial_tp_open_until_end`
 
@@ -73,3 +81,5 @@ This keeps reporting complete even when a signal never reaches a hard terminal c
 - The simulator still processes the entry candle itself for post-entry TP/SL evaluation, which can create same-candle exits.
 - `RANGE` midpoint fills remain an approximation rather than a true path-aware fill model.
 - The model does not yet include slippage or funding.
+- Account-wide netting, duplicate consensus, shared margin, and exchange order ownership
+  remain live-only behaviors.

@@ -1,5 +1,7 @@
 # Triak_Trade
 
+> Last reviewed against the running stack: 2026-07-31.
+
 Triak_Trade is a modular Telegram signal intelligence platform focused on safe parsing, AI-assisted classification, backtesting, demo/live session monitoring, and operator visibility.
 
 The project follows a few hard rules:
@@ -13,7 +15,7 @@ The project follows a few hard rules:
 
 - `src/triak_trade/agents`: channel state, consolidation, and message-driven actions.
 - `src/triak_trade/ai`: Ajil Unified AI Gateway client, runtime helpers, prompts, and AI classifier.
-- `src/triak_trade/backtesting`: fixture backtests, real Telegram backtest pipeline, simulator, scoring, and report storage.
+- `src/triak_trade/backtesting`: unified Telegram backtest pipeline, deterministic test fixtures, simulator, scoring, and report storage.
 - `src/triak_trade/dashboard`: local FastAPI/Jinja dashboard for backtests, reports, settings, and live/demo session monitoring.
 - `src/triak_trade/exchange/toobit`: public market data access plus signed/demo-safe trading adapters.
 - `src/triak_trade/live_trading`: session state and execution orchestration for demo/live workflows.
@@ -47,7 +49,7 @@ Important rules:
 Useful defaults:
 - The local dashboard binds to `http://127.0.0.1:8088`.
 - The local Ajil gateway binds to `http://127.0.0.1:8090`.
-- Real backtesting is disabled until its guards are explicitly enabled.
+- Backtesting is disabled until its guards are explicitly enabled.
 - Live trading sessions are blocked until `LIVE_TRADING_LIVE_MODE_ENABLED=true`.
 
 ## Start The Local Stack
@@ -116,13 +118,16 @@ triak-trade toobit-order-test --symbol BTCUSDT --side BUY --type LIMIT --quantit
 Backtesting:
 
 ```bash
-triak-trade backtest-fixture
-triak-trade backtest-dry-run --channel https://t.me/Tofan_Trade --from 2026-06-01 --to 2026-06-02 --interval 1m
-triak-trade real-backtest-check
-triak-trade real-backtest-run --channel https://t.me/Tofan_Trade --hours 24 --interval 1m
-triak-trade real-backtest-tofan --hours 24
+triak-trade backtest-check
+triak-trade backtest-run --channel https://t.me/Tofan_Trade --hours 24 --interval 1m
+triak-trade backtest-tofan --hours 24
 triak-trade backtest-show-latest
 ```
+
+Backtest defaults track the live strategy, consolidation delay, leverage/allocation
+limits, stop-risk caps, and fee rate. Toobit public klines are primary and Binance
+public data is the default fallback. Open positions are not force-closed at the end of
+the requested range unless that option is explicitly enabled.
 
 Observability and dashboard:
 
@@ -162,16 +167,15 @@ These checks are intentionally strict:
 - Toobit public market data: `RUN_TOOBIT_MARKETDATA_INTEGRATION_TESTS=1`
 - Toobit signed checks: `RUN_TOOBIT_SIGNED_INTEGRATION_TESTS=1`
 - Spot order test: `RUN_TOOBIT_ORDERTEST_INTEGRATION_TESTS=1`
-- Real backtest pipeline: `REAL_BACKTEST_ENABLED=true` plus the required real-integration guards above
+- Backtest pipeline: `REAL_BACKTEST_ENABLED=true` plus the required real-integration guards above
 - Telegram log-channel sending: `TELEGRAM_LOG_CHANNEL_ENABLED=true`, `PROCESSING_AUDIT_SEND_TO_LOG_CHANNEL=true`, and `RUN_TELEGRAM_LOG_CHANNEL_INTEGRATION_TESTS=1`
 - Verification real smoke checks: `RUN_SYSTEM_REAL_SMOKE_TESTS=1`
 - Live session unlock: `LIVE_TRADING_LIVE_MODE_ENABLED=true`
 
 ## Backtesting Notes
 
-- The fixture path uses deterministic in-memory messages and candles.
-- The real pipeline is driven by `RealBacktestRunner`.
-- Real backtests read Telegram history, classify messages, fetch public market data, simulate trades, and write JSON/Markdown reports to `runtime/reports/backtests`.
+- The single public pipeline is driven by `BacktestRunner`.
+- Backtests read Telegram history, classify messages, fetch public market data, simulate each signal on its own capital base, and write JSON/Markdown reports to `runtime/reports/backtests`.
 - The backtest dashboard now tracks live message progress and total elapsed runtime for each run.
 - Stored reports now include richer comparison analytics such as period PnL buckets, per-signal rows, trade-outcome summaries, and strategy/risk metadata.
 - The simulator supports conservative and optimistic fill policy comparisons.
@@ -179,19 +183,23 @@ These checks are intentionally strict:
 - Strategy loading comes from `config/strategies.yaml` with safe fallback defaults.
 
 Known behavior worth keeping in mind:
-- `real-backtest-check` currently creates the report/cache directories as a side effect.
-- Real backtest readiness currently requires multiple integration-style guard flags, not just one runtime flag.
+- `backtest-check` currently creates the report/cache directories as a side effect.
+- Backtest readiness currently requires multiple integration-style guard flags, not just one runtime flag.
 - The live backtest dashboard still uses a throttled replay model rather than a fully incremental simulator.
 
 ## Dashboard And Live/Demo Workflows
 
 - The dashboard is local-first and server-rendered with FastAPI, Jinja, and WebSockets.
 - Dashboard auth uses `DASHBOARD_ADMIN_TOKEN` from the root `.env.local`.
+- Backtest and Live Trade use one saved-channel library. Saving or removing a channel
+  from either tab immediately changes the list returned to both workflows.
 - Auto Mode and Kill Switch are persisted as runtime state, not a replacement for live-execution gating.
 - Demo sessions use connected Toobit account state and demo/private symbol rules such as `TBV_...` depending on exchange support.
 - Live sessions remain blocked unless `LIVE_TRADING_LIVE_MODE_ENABLED=true`.
 - All dashboard sessions share one account execution coordinator. It serializes exchange mutations, nets opposite signals by default, deduplicates matching same-direction signals as consensus, and keeps distinct same-direction signals as separately owned logical legs in the aggregate exchange position.
 - Every exchange-executed logical leg must have an owned quantity-scoped stop and all feasible take-profit orders. Protection setup and repair fail closed by flattening the affected logical quantity when protection cannot be verified.
+- Exchange-position disappearance is confirmed across at least two snapshots and a 15-second grace window before a local trade is closed. A transient Toobit position-snapshot delay therefore cannot silently abandon a live position.
+- Full-position closes first release unowned Triak take-profit reservations from already-closed trades, then reconcile the remaining exchange quantity. Manual/non-Triak orders and protection owned by another active leg are left untouched.
 - Run only one dashboard executor process per Toobit account; coordination is process-wide, not a distributed lock across multiple replicas.
 
 The full policy and recovery model is documented in

@@ -1,5 +1,7 @@
 # Triak_Trade Documentation
 
+> Last reviewed against the running stack: 2026-07-31.
+
 This directory contains repository-owned technical documentation for Triak_Trade, with extra depth around backtesting, reporting, and runtime controls.
 
 Scope:
@@ -37,6 +39,6 @@ Key architectural rules reflected in the docs:
 
 ## Notes About Accuracy
 
-- These docs were updated against the current repository state on `2026-07-30`.
+- These docs were updated against the current repository state on `2026-07-31`.
 - They intentionally prefer present behavior over aspirational behavior.
 - Known mismatches and open risks are tracked explicitly in [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md).
