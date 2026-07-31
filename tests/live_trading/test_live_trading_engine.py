@@ -2825,6 +2825,59 @@ async def test_owned_v2_stop_cancellation_only_cancels_trade_owned_stop(
 
 
 @pytest.mark.asyncio
+async def test_full_close_cleanup_cancels_only_unowned_triak_tp_reservations(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    other = trade.model_copy(
+        update={
+            "trade_id": "trade_other",
+            "signal_id": "sig_other",
+            "channel_id": "@other",
+            "tp_order_ids": ["tp_active_other"],
+        }
+    )
+    engine._account_coordinator.register_trade(other, trading_mode="demo")
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_orders.return_value = [
+        SimpleNamespace(
+            order_id="tp_orphan",
+            client_order_id="triak_tp_trade_closed_1_deadbeef",
+            order_type="LIMIT",
+            side="SELL_CLOSE",
+            orig_qty=Decimal("0.01"),
+            price=Decimal("51000"),
+        ),
+        SimpleNamespace(
+            order_id="tp_active_other",
+            client_order_id="triak_tp_trade_other_1_deadbeef",
+            order_type="LIMIT",
+            side="SELL_CLOSE",
+            orig_qty=Decimal("0.01"),
+            price=Decimal("52000"),
+        ),
+        SimpleNamespace(
+            order_id="manual_order",
+            client_order_id="manual-close-order",
+            order_type="LIMIT",
+            side="SELL_CLOSE",
+            orig_qty=Decimal("0.01"),
+            price=Decimal("53000"),
+        ),
+    ]
+
+    canceled = await engine._cancel_unowned_take_profit_reservations_for_full_close(trade)
+
+    assert canceled == 1
+    engine._futures_client.cancel_order.assert_awaited_once_with(
+        symbol="BTCUSDT",
+        order_id="tp_orphan",
+        use_demo_symbol=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_full_logical_close_does_not_flatten_other_same_side_leg(
     tmp_path: Path,
 ) -> None:
@@ -4171,7 +4224,7 @@ async def test_sync_exchange_state_marks_trade_closed_when_exchange_position_is_
 
 
 @pytest.mark.asyncio
-async def test_sync_exchange_state_closes_trade_on_first_missing_exchange_snapshot(
+async def test_sync_exchange_state_keeps_trade_open_on_first_missing_exchange_snapshot(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -4192,12 +4245,68 @@ async def test_sync_exchange_state_closes_trade_on_first_missing_exchange_snapsh
     trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     assert trade_reloaded is not None
-    assert trade_reloaded.status == "closed"
-    assert trade_reloaded.close_reason == "exchange_position_missing_snapshot"
-    assert trade_reloaded.last_exchange_sync_error == "exchange_position_missing_snapshot"
+    assert trade_reloaded.status == "open"
+    assert trade_reloaded.close_reason is None
+    assert trade_reloaded.exchange_position_missing_confirmations == 1
+    assert trade_reloaded.exchange_position_missing_since is not None
+    assert trade_reloaded.last_exchange_sync_error is not None
+    assert "pending_confirmation 1/2" in trade_reloaded.last_exchange_sync_error
     assert signal is not None
-    assert signal.status == "closed"
-    assert "sig_test" not in engine._open_trades
+    assert signal.status == "open"
+    assert engine._open_trades["sig_test"] is trade
+
+
+@pytest.mark.asyncio
+async def test_sync_exchange_state_clears_pending_miss_when_position_reappears(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal())
+    trade = _trade(engine.session.session_id)
+    context.add_signal(state, pending=False)
+    engine._open_trades["sig_test"] = trade
+    engine._sync_signal_snapshot(context=context, state=state, trade=trade)
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_order_history.return_value = []
+    engine._futures_client.get_open_orders.return_value = []
+    engine._futures_client.get_user_trades.return_value = []
+
+    await engine._sync_exchange_state()
+
+    assert trade.exchange_position_missing_confirmations == 1
+    engine._futures_client.get_open_positions.return_value = [
+        SimpleNamespace(
+            symbol_internal="BTCUSDT",
+            side="LONG",
+            position=Decimal("0.01"),
+            available=Decimal("0.01"),
+            avg_price=Decimal("50000"),
+            last_price=Decimal("50010"),
+            mark_price=Decimal("50010"),
+            leverage=10,
+            margin=Decimal("50"),
+            unrealized_pnl=Decimal("0.1"),
+            realized_pnl=Decimal("0"),
+            liquidation_price=Decimal("45000"),
+            margin_type="CROSS",
+            exchange_symbol="BTC-SWAP-USDT",
+        )
+    ]
+    engine._reconcile_exchange_trade_protection = AsyncMock()  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.INFO):
+        await engine._sync_exchange_state()
+
+    reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
+    assert reloaded is not None
+    assert reloaded.status == "open"
+    assert reloaded.exchange_position_missing_since is None
+    assert reloaded.exchange_position_missing_confirmations == 0
+    assert reloaded.last_exchange_sync_error is None
+    assert "live_trading.exchange_position_missing_recovered" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -66,7 +66,6 @@ from triak_trade.live_trading.take_profit_planner import (
     TakeProfitCandidate,
     plan_maximum_take_profit_orders,
 )
-from triak_trade.parsing.side_inference import infer_trade_side_from_price_geometry
 from triak_trade.parsing.validator import ParsedSignalValidator
 from triak_trade.telegram.client import TelegramClientInterface
 from triak_trade.telegram.telethon_client import TelethonTelegramClient
@@ -2035,7 +2034,7 @@ class LiveTradingEngine:
             signal_status=state.status.value,
             **self._parsed_signal_log_fields(parsed),
         )
-        parsed = self._normalize_missing_entry_to_market(parsed)
+        parsed, geometry_error = self._validator.normalize_for_execution(parsed)
         normalized_symbol = canonical_market_symbol(parsed.symbol)
         if normalized_symbol is not None and normalized_symbol != parsed.symbol:
             parsed = parsed.model_copy(update={"symbol": normalized_symbol})
@@ -2113,7 +2112,6 @@ class LiveTradingEngine:
             or (parsed.entry_low is None and parsed.entry_high is None)
         ):
             parsed = parsed.model_copy(update={"entry_low": mark_price, "entry_high": mark_price})
-        parsed, geometry_error = self._normalize_or_reject_open_geometry(parsed)
         if geometry_error is not None:
             self._log_event(
                 logging.INFO,
@@ -2248,56 +2246,21 @@ class LiveTradingEngine:
 
     @staticmethod
     def _normalize_missing_entry_to_market(parsed: ParsedSignal) -> ParsedSignal:
-        if (
-            parsed.action is SignalAction.OPEN
-            and parsed.entry_type is EntryType.UNKNOWN
-            and parsed.entry_low is None
-            and parsed.entry_high is None
-        ):
-            return parsed.model_copy(update={"entry_type": EntryType.MARKET})
-        return parsed
+        """Compatibility wrapper for callers that exercised the former helper."""
+
+        return ParsedSignalValidator().normalize_for_execution(parsed)[0]
 
     @staticmethod
     def _entry_reference(parsed: ParsedSignal) -> Decimal | None:
-        if parsed.entry_low is not None and parsed.entry_high is not None:
-            return (parsed.entry_low + parsed.entry_high) / Decimal("2")
-        return parsed.entry_low or parsed.entry_high
+        return ParsedSignalValidator._entry_reference(parsed)
 
     def _normalize_or_reject_open_geometry(
         self,
         parsed: ParsedSignal,
     ) -> tuple[ParsedSignal, str | None]:
-        if parsed.action is not SignalAction.OPEN:
-            return parsed, None
-        reference = self._entry_reference(parsed)
-        if reference is None or reference <= 0:
-            return parsed, None
+        """Compatibility wrapper around the shared execution normalizer."""
 
-        updates: dict[str, object] = {}
-        if parsed.side in {TradeSide.UNKNOWN, TradeSide.BUY, TradeSide.SELL}:
-            side_inference = infer_trade_side_from_price_geometry(
-                entry_low=parsed.entry_low,
-                entry_high=parsed.entry_high,
-                stop_loss=parsed.stop_loss,
-                take_profits=parsed.take_profits,
-            )
-            if side_inference.side is not TradeSide.UNKNOWN:
-                updates["side"] = side_inference.side
-        normalized = parsed.model_copy(update=updates) if updates else parsed
-
-        if normalized.stop_loss is None:
-            return normalized, None
-        if normalized.side.is_long and normalized.stop_loss >= reference:
-            return (
-                normalized,
-                "inconsistent long geometry: stop_loss is not below entry/market price",
-            )
-        if normalized.side.is_short and normalized.stop_loss <= reference:
-            return (
-                normalized,
-                "inconsistent short geometry: stop_loss is not above entry/market price",
-            )
-        return normalized, None
+        return self._validator.normalize_for_execution(parsed)
 
     async def _open_position(
         self,
@@ -3896,6 +3859,12 @@ class LiveTradingEngine:
             reason=reason,
             **self._trade_log_fields(trade),
         )
+        owns_entire_exchange_bucket = not self._account_coordinator.has_other_open_legs(
+            trade,
+            trading_mode=self.session.trading_mode,
+        )
+        if fraction >= Decimal("1") and owns_entire_exchange_bucket:
+            await self._cancel_unowned_take_profit_reservations_for_full_close(trade)
         await self._cancel_existing_trade_protection(trade)
         order, requested_quantity = await self._submit_exchange_close_order(trade, fraction)
         self._account_coordinator.mark_order_owner(
@@ -3955,10 +3924,6 @@ class LiveTradingEngine:
         processed_close_fills = list(fills)
         exchange_position: Any | None = None
         exchange_remaining_quantity: Decimal | None = None
-        owns_entire_exchange_bucket = not self._account_coordinator.has_other_open_legs(
-            trade,
-            trading_mode=self.session.trading_mode,
-        )
         if fraction >= Decimal("1") and owns_entire_exchange_bucket:
             (
                 exchange_position,
@@ -4119,6 +4084,66 @@ class LiveTradingEngine:
             realized_pnl=realized_pnl,
             fees=fees,
         )
+
+    async def _cancel_unowned_take_profit_reservations_for_full_close(
+        self,
+        trade: LiveTrade,
+    ) -> int:
+        """Release stale Triak TP orders before flattening an exclusive bucket.
+
+        Toobit excludes quantity reserved by regular close orders from a market
+        close. A TP left by a closed logical trade can therefore make a full
+        close fill only partially. Only Triak-prefixed, unowned close-limit
+        orders are eligible; manual orders and orders owned by another active
+        logical trade remain untouched.
+        """
+
+        if self._futures_client is None:
+            return 0
+        close_side = "SELL_CLOSE" if trade.side == "long" else "BUY_CLOSE"
+        current_trade_prefix = f"triak_tp_{trade.trade_id}_"
+        open_orders = await self._futures_client.get_open_orders(
+            trade.symbol,
+            use_demo_symbol=self._use_demo_exchange_symbol(),
+        )
+        canceled = 0
+        for order in open_orders:
+            client_order_id = str(getattr(order, "client_order_id", "") or "")
+            order_id = str(getattr(order, "order_id", "") or "")
+            if (
+                str(getattr(order, "side", "")).upper() != close_side
+                or str(getattr(order, "order_type", "")).upper() != "LIMIT"
+                or not client_order_id.startswith("triak_tp_")
+                or client_order_id.startswith(current_trade_prefix)
+                or not self._account_coordinator.order_is_available(
+                    order_id,
+                    trade.trade_id,
+                )
+            ):
+                continue
+            await self._futures_client.cancel_order(
+                symbol=trade.symbol,
+                order_id=order_id,
+                use_demo_symbol=self._use_demo_exchange_symbol(),
+            )
+            canceled += 1
+            self._log_event(
+                logging.WARNING,
+                "live_trading.orphan_take_profit_reservation_canceled",
+                orphan_order_id=order_id,
+                orphan_client_order_id=client_order_id,
+                orphan_quantity=str(getattr(order, "orig_qty", Decimal("0"))),
+                orphan_price=str(getattr(order, "price", Decimal("0"))),
+                **self._trade_log_fields(trade),
+            )
+        if canceled:
+            self._log_event(
+                logging.WARNING,
+                "live_trading.orphan_take_profit_cleanup_completed",
+                canceled_order_count=canceled,
+                **self._trade_log_fields(trade),
+            )
+        return canceled
 
     def _apply_exchange_close_result(
         self,
@@ -4311,7 +4336,27 @@ class LiveTradingEngine:
         )
         return False
 
-    def _clear_exchange_position_miss_state(self, trade: LiveTrade) -> None:
+    def _clear_exchange_position_miss_state(
+        self,
+        trade: LiveTrade,
+        *,
+        recovered: bool = True,
+    ) -> None:
+        missing_since = trade.exchange_position_missing_since
+        confirmations = trade.exchange_position_missing_confirmations
+        if recovered and (missing_since is not None or confirmations > 0):
+            elapsed_seconds = (
+                max(0, int((_utc_now() - missing_since).total_seconds()))
+                if missing_since is not None
+                else 0
+            )
+            self._log_event(
+                logging.INFO,
+                "live_trading.exchange_position_missing_recovered",
+                confirmations=confirmations,
+                elapsed_seconds=elapsed_seconds,
+                **self._trade_log_fields(trade),
+            )
         trade.exchange_position_missing_since = None
         trade.exchange_position_missing_confirmations = 0
         if self._is_pending_exchange_position_miss_error(trade.last_exchange_sync_error):
@@ -4370,8 +4415,7 @@ class LiveTradingEngine:
             pending_state=pending_state,
             **self._trade_log_fields(trade),
         )
-        if self._is_pending_exchange_position_miss_error(trade.last_exchange_sync_error):
-            trade.last_exchange_sync_error = None
+        trade.last_exchange_sync_error = pending_state
         if trade.exchange_position_missing_confirmations < required_confirmations:
             return False
         return elapsed_seconds >= grace_seconds
@@ -4395,7 +4439,7 @@ class LiveTradingEngine:
         trade.tp_order_ids = []
         trade.tp_order_plan = []
         trade.required_tp_order_count = 0
-        self._clear_exchange_position_miss_state(trade)
+        self._clear_exchange_position_miss_state(trade, recovered=False)
         trade.last_exchange_sync_error = reason
         trade.add_attribution(
             MessageAttribution(
@@ -5613,7 +5657,7 @@ class LiveTradingEngine:
             )
 
     def _finalize_closed_trade(self, trade: LiveTrade) -> None:
-        self._clear_exchange_position_miss_state(trade)
+        self._clear_exchange_position_miss_state(trade, recovered=False)
         self._book_trade_realized_totals(trade)
         if self.session.trading_mode == "demo" and not self._uses_exchange_execution():
             self.session.paper_balance += trade.realized_pnl + trade.margin
@@ -6439,10 +6483,10 @@ class LiveTradingEngine:
                     # positions endpoint until the next refresh to converge.
                     continue
             if trade.exchange_position is None:
-                # A successful aggregate positions response is the exchange
-                # source of truth. Do not retain a locally-open record after a
-                # user manually closes it on Toobit, and do not recreate its
-                # protection orders before detecting that closure.
+                # Filled orders can become visible before the aggregate
+                # positions endpoint converges. Reconcile confirmed fills
+                # immediately, but require repeated missing snapshots across
+                # the configured grace window before abandoning ownership.
                 await self._reconcile_exchange_trade_protection(
                     trade=trade,
                     open_regular_orders=by_symbol_open_regular_orders.get(
@@ -6463,6 +6507,22 @@ class LiveTradingEngine:
                     symbol_user_trades=by_symbol_user_trades.get(trade.symbol, []),
                 )
                 if trade.signal_id not in self._open_trades:
+                    continue
+                if not self._should_confirm_exchange_position_missing(
+                    trade,
+                    reason="exchange_position_missing_snapshot",
+                ):
+                    trade.last_exchange_sync_at = _utc_now()
+                    self.store.save_trade(trade)
+                    if context is not None:
+                        state = context.get_signal(trade.signal_id)
+                        if state is not None:
+                            self._sync_signal_snapshot(
+                                context=context,
+                                state=state,
+                                trade=trade,
+                            )
+                    self._emit_trade_update(trade)
                     continue
                 self._mark_trade_closed_on_exchange(
                     context=context,
