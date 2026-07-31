@@ -49,9 +49,26 @@
     <strong>{{ "Active" if log_channel.guard_enabled else "Inactive" }}</strong>
   </article>
   <article class="status-card">
-    <span class="status-card-label">Debug Lines</span>
-    <strong>{{ log_stats.by_level.DEBUG }}</strong>
+    <span class="status-card-label">Local Log Storage</span>
+    <strong>{{ log_storage.total_megabytes }} MB</strong>
   </article>
+</section>
+
+<section class="panel">
+  <div class="section-head compact">
+    <div>
+      <p class="eyebrow">Retention</p>
+      <h2>Detailed Local Log Storage</h2>
+    </div>
+    <div class="counter-pill">{{ log_storage.file_log_level }} level</div>
+  </div>
+  <div class="overview-detail-grid">
+    <div class="metric-card"><span>File Logging</span><strong>{{ "Enabled" if log_storage.file_logging_enabled else "Disabled" }}</strong></div>
+    <div class="metric-card"><span>Current + Rotated</span><strong>{{ log_storage.total_megabytes }} MB</strong></div>
+    <div class="metric-card"><span>Rotation Limit</span><strong>{{ log_storage.max_file_megabytes }} MB/file</strong></div>
+    <div class="metric-card"><span>Backups</span><strong>{{ log_storage.rotated_files }} / {{ log_storage.backup_count }}</strong></div>
+  </div>
+  <p class="subtle"><code>{{ log_storage.path }}</code> · all application modules are captured as structured JSON; credential-shaped values are redacted.</p>
 </section>
 
 <section class="panel">

@@ -14,21 +14,19 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, Field
 
-from triak_trade.backtesting.isolated_runner import (
-    IsolatedBacktestCheckpoint,
-    IsolatedBacktestResult,
-    IsolatedBacktestRunner,
-    IsolatedBacktestRunRequest,
+from triak_trade.backtesting.backtest_runner import (
+    BacktestCheckpoint,
+    BacktestResult,
+    BacktestRunner,
+    BacktestRunRequest,
 )
 from triak_trade.backtesting.real_runner import (
     RealBacktestMessageTrace,
     RealBacktestProgressEvent,
-    RealBacktestRunner,
-    RealBacktestRunRequest,
 )
 from triak_trade.backtesting.strategies.registry import build_strategy_from_key
 from triak_trade.config.settings import Settings
@@ -47,7 +45,7 @@ class DashboardBacktestEvent(BaseModel):
 
 class DashboardBacktestRun(BaseModel):
     run_id: str
-    run_type: str = "portfolio"
+    run_type: str = "backtest"
     channel_input: str
     channel_resolved: str
     start_message_link: str | None = None
@@ -112,7 +110,7 @@ class DashboardBacktestRun(BaseModel):
     signals: list[dict[str, Any]] = Field(default_factory=list)
     report_path: str | None = None
     markdown_report_path: str | None = None
-    isolated_aggregate: dict[str, Any] = Field(default_factory=dict)
+    backtest_aggregate: dict[str, Any] = Field(default_factory=dict)
     resume_checkpoint: dict[str, Any] | None = None
     resume_available_from: str | None = None
     errors: list[str] = Field(default_factory=list)
@@ -123,7 +121,7 @@ class DashboardBacktestRun(BaseModel):
 
 class DashboardBacktestRunSummary(BaseModel):
     run_id: str
-    run_type: str = "portfolio"
+    run_type: str = "backtest"
     channel_input: str
     channel_resolved: str
     start_message_link: str | None = None
@@ -187,7 +185,7 @@ class DashboardBacktestRunSummary(BaseModel):
     live_current_balance: str = "0"
     report_path: str | None = None
     markdown_report_path: str | None = None
-    isolated_aggregate: dict[str, Any] = Field(default_factory=dict)
+    backtest_aggregate: dict[str, Any] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -397,16 +395,12 @@ class DashboardBacktestCoordinator:
         *,
         settings: Settings,
         store: DashboardBacktestStore | None = None,
-        runner_factory: Callable[[], RealBacktestRunner] | None = None,
-        isolated_runner_factory: Callable[[], IsolatedBacktestRunner] | None = None,
+        runner_factory: Callable[[], BacktestRunner] | None = None,
         notifier: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.settings = settings
         self.store = store or DashboardBacktestStore(settings)
-        self.runner_factory = runner_factory or (lambda: RealBacktestRunner(settings=settings))
-        self.isolated_runner_factory = isolated_runner_factory or (
-            lambda: IsolatedBacktestRunner(settings=settings)
-        )
+        self.runner_factory = runner_factory or (lambda: BacktestRunner(settings=settings))
         self.notifier = notifier
         self._threads: dict[str, threading.Thread] = {}
         self._cancel_requested: set[str] = set()
@@ -420,18 +414,17 @@ class DashboardBacktestCoordinator:
 
     def start_run(
         self,
-        request: RealBacktestRunRequest | IsolatedBacktestRunRequest,
+        request: BacktestRunRequest,
         *,
         channel_input: str,
         strategy_key: str = "default_risk_managed",
-        run_type: str = "portfolio",
         resume_checkpoint: dict[str, Any] | None = None,
     ) -> DashboardBacktestRun:
         from_date, to_date = request.resolve_range()
         created_at = datetime.now(timezone.utc)
         run = DashboardBacktestRun(
             run_id=f"backtest_{uuid.uuid4().hex[:12]}",
-            run_type=run_type,
+            run_type="backtest",
             channel_input=channel_input,
             channel_resolved=request.channel,
             start_message_link=request.start_message_link,
@@ -444,31 +437,11 @@ class DashboardBacktestCoordinator:
             risk_per_trade_pct=request.risk_per_trade_pct,
             strategy_key=strategy_key,
             request_payload=request.model_dump(mode="json"),
-            fill_policy=(
-                request.fill_policy.value
-                if isinstance(request, IsolatedBacktestRunRequest)
-                else None
-            ),
-            capital_per_signal=(
-                request.capital_per_signal
-                if isinstance(request, IsolatedBacktestRunRequest)
-                else None
-            ),
-            fee_rate_pct=(
-                request.fee_rate_pct
-                if isinstance(request, IsolatedBacktestRunRequest)
-                else None
-            ),
-            max_parallel_signals=(
-                request.max_parallel_signals
-                if isinstance(request, IsolatedBacktestRunRequest)
-                else None
-            ),
-            close_open_positions_at_end=(
-                request.close_open_positions_at_end
-                if isinstance(request, IsolatedBacktestRunRequest)
-                else None
-            ),
+            fill_policy=request.fill_policy.value,
+            capital_per_signal=request.capital_per_signal,
+            fee_rate_pct=request.fee_rate_pct,
+            max_parallel_signals=request.max_parallel_signals,
+            close_open_positions_at_end=request.close_open_positions_at_end,
             use_ai=request.use_ai,
             send_log_channel=request.send_log_channel,
             log_per_message=request.log_per_message,
@@ -484,7 +457,7 @@ class DashboardBacktestCoordinator:
             extra={
                 "channel_input": channel_input,
                 "strategy_key": strategy_key,
-                "run_type": run_type,
+                "run_type": "backtest",
             },
         )
         thread = threading.Thread(
@@ -545,28 +518,22 @@ class DashboardBacktestCoordinator:
         if previous is None:
             return None
         request_payload = dict(previous.request_payload)
-        request: RealBacktestRunRequest | IsolatedBacktestRunRequest
-        if previous.run_type == "isolated":
-            request = IsolatedBacktestRunRequest.model_validate(request_payload)
-        else:
-            request = RealBacktestRunRequest.model_validate(request_payload)
+        request = BacktestRunRequest.model_validate(request_payload)
         return self.start_run(
             request,
             channel_input=previous.channel_input,
             strategy_key=previous.strategy_key,
-            run_type=previous.run_type,
         )
 
     def resume_run(self, run_id: str) -> DashboardBacktestRun | None:
         previous = self.store.read(run_id)
-        if previous is None or previous.run_type != "isolated" or not previous.resume_checkpoint:
+        if previous is None or not previous.resume_checkpoint:
             return None
-        request = IsolatedBacktestRunRequest.model_validate(previous.request_payload)
+        request = BacktestRunRequest.model_validate(previous.request_payload)
         return self.start_run(
             request,
             channel_input=previous.channel_input,
             strategy_key=previous.strategy_key,
-            run_type="isolated",
             resume_checkpoint=previous.resume_checkpoint,
         )
 
@@ -626,28 +593,23 @@ class DashboardBacktestCoordinator:
     def _execute_run(
         self,
         run_id: str,
-        request: RealBacktestRunRequest | IsolatedBacktestRunRequest,
+        request: BacktestRunRequest,
         resume_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         run = self.get_run(run_id)
         if run is None:
             return
-        runner: RealBacktestRunner | IsolatedBacktestRunner
-        if run.run_type == "isolated":
-            runner = self.isolated_runner_factory()
-            if resume_checkpoint is not None:
-                runner.resume_checkpoint = IsolatedBacktestCheckpoint.model_validate(
-                    resume_checkpoint
-                )
-        else:
-            runner = self.runner_factory()
+        runner = self.runner_factory()
+        if resume_checkpoint is not None:
+            runner.resume_checkpoint = BacktestCheckpoint.model_validate(
+                resume_checkpoint
+            )
         runner.strategy = build_strategy_from_key(run.strategy_key)
         runner.strategy_key = run.strategy_key
-        if isinstance(runner, IsolatedBacktestRunner):
-            runner.checkpoint_callback = lambda checkpoint: self._store_isolated_checkpoint(
-                run_id,
-                checkpoint.model_dump(mode="json"),
-            )
+        runner.checkpoint_callback = lambda checkpoint: self._store_backtest_checkpoint(
+            run_id,
+            checkpoint.model_dump(mode="json"),
+        )
         if self._is_cancel_requested(run_id):
             self._mark_cancelled(run_id)
             return
@@ -664,9 +626,12 @@ class DashboardBacktestCoordinator:
             self._active_runs[run_id] = run
         self._append_run_log("dashboard.backtest.started", run, level="INFO")
         try:
-            result = runner.run_sync(
-                request,
-                progress_callback=lambda event: self._handle_progress(run_id, event),
+            result = cast(
+                BacktestResult,
+                runner.run_sync(
+                    request,
+                    progress_callback=lambda event: self._handle_progress(run_id, event),
+                ),
             )
         except DashboardBacktestCancelledError:
             self._mark_cancelled(run_id)
@@ -747,20 +712,16 @@ class DashboardBacktestCoordinator:
         completed.markdown_report_path = result.markdown_report_path
         completed.errors = list(result.errors)
         completed.warnings = list(result.warnings)
-        if isinstance(result, IsolatedBacktestResult):
-            completed.signals = list(result.signals)
-            completed.isolated_aggregate = dict(result.aggregate)
-            completed.live_open_positions = int(result.aggregate.get("open_signals", 0))
-            completed.live_closed_trades = int(result.aggregate.get("closed_signals", 0))
-            completed.live_realized_balance = str(
-                result.aggregate.get("total_final_balance", completed.live_realized_balance)
-            )
-            completed.live_current_balance = str(
-                result.aggregate.get("total_final_balance", completed.live_current_balance)
-            )
-        else:
-            completed.live_open_positions = 0
-            completed.live_closed_trades = result.trades_filled
+        completed.signals = list(result.signals)
+        completed.backtest_aggregate = dict(result.aggregate)
+        completed.live_open_positions = int(result.aggregate.get("open_signals", 0))
+        completed.live_closed_trades = int(result.aggregate.get("closed_signals", 0))
+        completed.live_realized_balance = str(
+            result.aggregate.get("total_final_balance", completed.live_realized_balance)
+        )
+        completed.live_current_balance = str(
+            result.aggregate.get("total_final_balance", completed.live_current_balance)
+        )
         completed.trades_simulated = result.trades_simulated
         completed.trades_filled = result.trades_filled
         completed.live_wins = result.wins
@@ -793,7 +754,7 @@ class DashboardBacktestCoordinator:
         )
         self._notify(completed)
 
-    def _store_isolated_checkpoint(self, run_id: str, checkpoint: dict[str, Any]) -> None:
+    def _store_backtest_checkpoint(self, run_id: str, checkpoint: dict[str, Any]) -> None:
         run = self.get_run(run_id)
         if run is None:
             return
@@ -802,6 +763,18 @@ class DashboardBacktestCoordinator:
         self.store.write(run)
         with self._lock:
             self._active_runs[run_id] = run
+        self._append_run_log(
+            "dashboard.backtest.checkpoint_saved",
+            run,
+            level="DEBUG",
+            extra={
+                "resume_phase": run.resume_available_from,
+                "checkpoint_keys": sorted(checkpoint),
+                "message_count": len(checkpoint.get("messages") or []),
+                "signal_record_count": len(checkpoint.get("signal_records") or []),
+                "candle_artifact_count": len(checkpoint.get("candle_artifacts") or []),
+            },
+        )
 
     def _handle_progress(self, run_id: str, event: RealBacktestProgressEvent) -> None:
         if self._is_cancel_requested(run_id):
@@ -1154,26 +1127,24 @@ class DashboardBacktestCoordinator:
         run: DashboardBacktestRun,
         event: RealBacktestProgressEvent,
     ) -> None:
-        if event.event_type != "run" and event.status not in {"completed", "failed"}:
-            return
         extra: dict[str, Any] = {
             "event_type": event.event_type,
             "event_status": event.status,
             "counts": event.counts,
+            "runtime_duration_ms": event.runtime_duration_ms,
+            "current_phase_elapsed_ms": event.current_phase_elapsed_ms,
+            "phase_durations_ms": event.phase_durations_ms,
         }
         if event.trace is not None:
-            extra["trace"] = {
-                "message_id": event.trace.message_id,
-                "classification": event.trace.classification,
-                "parsed_action": event.trace.parsed_action,
-                "symbol": event.trace.symbol,
-                "final_status": event.trace.final_status,
-                "preview_text": event.trace.preview_text,
-            }
+            extra["trace"] = event.trace.model_dump(
+                mode="json",
+                exclude={"full_text"},
+            )
+        level = "ERROR" if event.status == "failed" else "INFO"
         self._append_run_log(
             "dashboard.backtest.progress",
             run,
-            level="INFO",
+            level=level,
             extra=extra,
             summary_override=event.summary,
             phase_override=event.phase,

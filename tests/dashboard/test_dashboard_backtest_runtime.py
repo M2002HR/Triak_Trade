@@ -7,16 +7,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from triak_trade.backtesting.isolated_runner import (
-    IsolatedBacktestResult,
-    IsolatedBacktestRunRequest,
+from triak_trade.backtesting.backtest_runner import (
+    BacktestResult,
+    BacktestRunRequest,
 )
 from triak_trade.backtesting.real_runner import (
     RealBacktestMessageStage,
     RealBacktestMessageTrace,
     RealBacktestProgressEvent,
-    RealBacktestResult,
-    RealBacktestRunRequest,
 )
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.backtest_runtime import (
@@ -61,9 +59,9 @@ class FakeRunner:
 
     def run_sync(
         self,
-        request: RealBacktestRunRequest,
+        request: BacktestRunRequest,
         progress_callback=None,
-    ) -> RealBacktestResult:
+    ) -> BacktestResult:
         now = datetime(2026, 6, 4, tzinfo=timezone.utc)
         trace = RealBacktestMessageTrace(
             message_id=77,
@@ -183,7 +181,7 @@ class FakeRunner:
                 )
             )
 
-        return RealBacktestResult(
+        return BacktestResult(
             success=True,
             channel=request.channel,
             from_date=request.from_date or now,
@@ -224,6 +222,14 @@ class FakeRunner:
             },
             report_path="runtime/reports/backtests/report.json",
             markdown_report_path="runtime/reports/backtests/report.md",
+            signals=[
+                {
+                    "signal_id": "sig_77",
+                    "symbol": "BTCUSDT",
+                    "status": "open",
+                    "status_group": "active",
+                }
+            ],
         )
 
 
@@ -233,9 +239,9 @@ class CancellableRunner(FakeRunner):
 
     def run_sync(
         self,
-        request: RealBacktestRunRequest,
+        request: BacktestRunRequest,
         progress_callback=None,
-    ) -> RealBacktestResult:
+    ) -> BacktestResult:
         now = datetime(2026, 6, 4, tzinfo=timezone.utc)
         if progress_callback is not None:
             progress_callback(
@@ -263,14 +269,14 @@ class CancellableRunner(FakeRunner):
         return super().run_sync(request, progress_callback)
 
 
-class FakeIsolatedRunner(FakeRunner):
+class FakeBacktestRunner(FakeRunner):
     def run_sync(
         self,
-        request: IsolatedBacktestRunRequest,
+        request: BacktestRunRequest,
         progress_callback=None,
-    ) -> IsolatedBacktestResult:
+    ) -> BacktestResult:
         now = datetime(2026, 6, 4, tzinfo=timezone.utc)
-        return IsolatedBacktestResult(
+        return BacktestResult(
             success=True,
             channel=request.channel,
             from_date=request.from_date or now,
@@ -301,8 +307,8 @@ class FakeIsolatedRunner(FakeRunner):
             optimistic_pnl=Decimal("3"),
             channel_score=Decimal("0"),
             generated_at=now,
-            report_path="runtime/reports/backtests/isolated.json",
-            markdown_report_path="runtime/reports/backtests/isolated.md",
+            report_path="runtime/reports/backtests/backtest.json",
+            markdown_report_path="runtime/reports/backtests/backtest.md",
             signals=[
                 {
                     "signal_id": "sig_1",
@@ -368,7 +374,7 @@ def test_dashboard_backtest_store_round_trip(tmp_path: Path) -> None:
         runner_factory=FakeRunner,
     )
     run = coordinator.start_run(
-        RealBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -492,16 +498,16 @@ def test_dashboard_backtest_store_summary_listing_supports_offset(tmp_path: Path
     assert store.count_runs() == 3
 
 
-def test_dashboard_backtest_store_prefers_latest_active_run_within_type(
+def test_dashboard_backtest_store_prefers_latest_active_run(
     tmp_path: Path,
 ) -> None:
     store = DashboardBacktestStore(_settings(tmp_path))
     now = datetime(2026, 7, 20, tzinfo=timezone.utc)
 
-    def _run(run_id: str, *, run_type: str, status: str, minute: int):
+    def _run(run_id: str, *, status: str, minute: int):
         return DashboardBacktestRun(
             run_id=run_id,
-            run_type=run_type,
+            run_type="backtest",
             channel_input="@sample",
             channel_resolved="https://t.me/sample",
             from_date=now,
@@ -515,17 +521,16 @@ def test_dashboard_backtest_store_prefers_latest_active_run_within_type(
             created_at=now.replace(minute=minute),
         )
 
-    store.write(_run("portfolio_newest", run_type="portfolio", status="completed", minute=3))
-    store.write(_run("isolated_completed", run_type="isolated", status="completed", minute=2))
-    store.write(_run("isolated_running", run_type="isolated", status="running", minute=1))
+    store.write(_run("backtest_completed", status="completed", minute=2))
+    store.write(_run("backtest_running", status="running", minute=1))
 
-    latest = store.latest_run_summary(run_type="isolated", prefer_active=True)
-    isolated = store.list_run_summaries(limit=10, run_type="isolated")
+    latest = store.latest_run_summary(run_type="backtest", prefer_active=True)
+    backtest = store.list_run_summaries(limit=10, run_type="backtest")
 
     assert latest is not None
-    assert latest.run_id == "isolated_running"
-    assert {run.run_id for run in isolated} == {"isolated_running", "isolated_completed"}
-    assert store.count_runs(run_type="isolated") == 2
+    assert latest.run_id == "backtest_running"
+    assert {run.run_id for run in backtest} == {"backtest_running", "backtest_completed"}
+    assert store.count_runs(run_type="backtest") == 2
 
 
 def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -> None:
@@ -535,7 +540,7 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
         runner_factory=FakeRunner,
     )
     run = coordinator.start_run(
-        RealBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -585,6 +590,10 @@ def test_dashboard_backtest_coordinator_persists_live_progress(tmp_path: Path) -
     log_text = log_path.read_text(encoding="utf-8")
     assert "dashboard.backtest.started" in log_text
     assert "dashboard.backtest.progress" in log_text
+    assert '"event_type": "message"' in log_text
+    assert '"classification": "new_signal"' in log_text
+    assert '"debug_notes": ["classification=new_signal"]' in log_text
+    assert '"full_text"' not in log_text
     assert loaded.run_id in log_text
 
 
@@ -597,7 +606,7 @@ def test_dashboard_backtest_coordinator_notifies_on_updates(tmp_path: Path) -> N
         notifier=notifications.append,
     )
     run = coordinator.start_run(
-        RealBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -637,7 +646,7 @@ def test_dashboard_backtest_coordinator_lists_run_messages(tmp_path: Path) -> No
         runner_factory=FakeRunner,
     )
     run = coordinator.start_run(
-        RealBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -1480,7 +1489,7 @@ def test_dashboard_backtest_coordinator_persists_start_message_metadata(tmp_path
         runner_factory=FakeRunner,
     )
     run = coordinator.start_run(
-        RealBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -1517,7 +1526,7 @@ def test_dashboard_backtest_coordinator_stops_running_run(tmp_path: Path) -> Non
         runner_factory=CancellableRunner,
     )
     run = coordinator.start_run(
-        RealBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -1558,7 +1567,7 @@ def test_dashboard_backtest_coordinator_reruns_saved_parameters(tmp_path: Path) 
         runner_factory=FakeRunner,
     )
     original = coordinator.start_run(
-        RealBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -1585,15 +1594,14 @@ def test_dashboard_backtest_coordinator_reruns_saved_parameters(tmp_path: Path) 
     assert rerun.use_ai is True
 
 
-def test_dashboard_backtest_coordinator_runs_isolated_mode(tmp_path: Path) -> None:
+def test_dashboard_backtest_coordinator_runs_backtest_mode(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     coordinator = DashboardBacktestCoordinator(
         settings=settings,
-        runner_factory=FakeRunner,
-        isolated_runner_factory=FakeIsolatedRunner,
+        runner_factory=FakeBacktestRunner,
     )
     run = coordinator.start_run(
-        IsolatedBacktestRunRequest(
+        BacktestRunRequest(
             channel="https://t.me/Tofan_Trade",
             from_date=datetime(2026, 6, 3, tzinfo=timezone.utc),
             to_date=datetime(2026, 6, 4, tzinfo=timezone.utc),
@@ -1608,7 +1616,6 @@ def test_dashboard_backtest_coordinator_runs_isolated_mode(tmp_path: Path) -> No
             log_per_message=False,
         ),
         channel_input="@Tofan_Trade",
-        run_type="isolated",
     )
 
     loaded = None
@@ -1619,8 +1626,8 @@ def test_dashboard_backtest_coordinator_runs_isolated_mode(tmp_path: Path) -> No
         time.sleep(0.02)
 
     assert loaded is not None
-    assert loaded.run_type == "isolated"
+    assert loaded.run_type == "backtest"
     assert loaded.capital_per_signal == Decimal("100")
     assert loaded.trades_simulated == 2
-    assert loaded.isolated_aggregate["total_signals"] == 2
+    assert loaded.backtest_aggregate["total_signals"] == 2
     assert loaded.live_current_balance == "203"

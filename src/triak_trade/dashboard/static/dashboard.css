@@ -4046,7 +4046,7 @@ pre {
   background: white;
 }
 
-/* ─── Isolated analysis workspace ───────────────────────────────────────── */
+/* ─── Backtest analysis workspace ───────────────────────────────────────── */
 .workbench-tabs {
   display: inline-flex;
   gap: 6px;

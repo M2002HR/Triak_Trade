@@ -28,6 +28,8 @@ def _make_settings(
     s.LIVE_TRADING_ENABLED = live_enabled
     s.LIVE_TRADING_LIVE_MODE_ENABLED = live_mode_enabled
     s.LIVE_TRADING_RUNTIME_DIR = "/tmp/test_live"
+    s.DASHBOARD_RUNTIME_DIR = "/tmp/test_live"
+    s.REAL_BACKTEST_DEFAULT_CHANNEL = "https://t.me/Tofan_Trade"
     s.LIVE_TRADING_MODE = "demo"
     s.LIVE_TRADING_DEFAULT_INITIAL_BALANCE = Decimal("100")
     s.LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT = Decimal("120")
@@ -61,6 +63,7 @@ class TestDashboardLiveReadiness:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=False)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             readiness = coord.readiness()
             assert not readiness.ready
@@ -70,6 +73,7 @@ class TestDashboardLiveReadiness:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=True)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             readiness = coord.readiness()
             # With all credentials mocked as present, should be ready
@@ -81,6 +85,7 @@ class TestDashboardLiveReadiness:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             settings.TOOBIT_API_KEY.get_secret_value.return_value = "replace_me"
             coord = DashboardLiveCoordinator(settings=settings)
             readiness = coord.readiness()
@@ -91,6 +96,7 @@ class TestDashboardLiveReadiness:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
 
             with caplog.at_level(logging.INFO):
@@ -109,6 +115,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             engine = MagicMock()
             engine._loop = None
@@ -124,6 +131,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             first = MagicMock()
             first._loop = None
@@ -142,6 +150,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             assert not coord.is_running()
 
@@ -149,6 +158,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             assert coord.get_current_session() is None
 
@@ -156,6 +166,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             assert coord.get_snapshot() is None
 
@@ -163,6 +174,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             assert coord.list_sessions() == []
 
@@ -170,6 +182,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             with (
                 patch(
                     "triak_trade.dashboard.live_runtime.list_available_strategies",
@@ -194,6 +207,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             result = coord.stop_session()
             assert result is None
@@ -202,6 +216,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
 
             with caplog.at_level(logging.INFO):
@@ -212,12 +227,13 @@ class TestDashboardLiveCoordinatorState:
                 rec for rec in caplog.records if rec.msg == "dashboard.live_channel_saved"
             )
             assert record.channel_input == "https://t.me/demo"
-            assert record.total_saved_channels == 1
+            assert record.total_saved_channels == 2
 
     def test_save_channel_preserves_numeric_channel_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
 
             channels = coord.save_channel("2443184591")
@@ -230,6 +246,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=False)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             try:
                 coord.start_session(
@@ -247,6 +264,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=True)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
             try:
                 coord.start_session(
@@ -264,6 +282,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=True)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             settings.LIVE_TRADING_REQUIRE_AI_CLASSIFIER = True
             settings.AI_GATEWAY_ENABLED = True
             settings.AI_CLASSIFIER_ENABLED = True
@@ -286,6 +305,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=True, live_mode_enabled=True)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             settings.AI_GATEWAY_ENABLED = True
             settings.AI_CLASSIFIER_ENABLED = True
             coord = DashboardLiveCoordinator(settings=settings)
@@ -325,6 +345,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings(live_enabled=True)
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             settings.AI_GATEWAY_ENABLED = True
             settings.AI_CLASSIFIER_ENABLED = True
             coord = DashboardLiveCoordinator(settings=settings)
@@ -363,6 +384,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
 
             session_one = LiveSession(
@@ -481,6 +503,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
 
             session = LiveSession(
@@ -550,6 +573,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             coord = DashboardLiveCoordinator(settings=settings)
 
             coord.store.save_session(
@@ -599,6 +623,7 @@ class TestDashboardLiveCoordinatorState:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()
             settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
             settings.LIVE_TRADING_AUTO_RESUME_SESSIONS = True
 
             initial = DashboardLiveCoordinator(settings=settings)

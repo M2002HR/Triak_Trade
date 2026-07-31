@@ -33,7 +33,7 @@
     </div>
     <div class="hero-stat">
       <span>Net PnL</span>
-      <strong class="{{ 'metric-pos' if summary.total_pnl > 0 else ('metric-neg' if summary.total_pnl < 0 else '') }}">
+      <strong class="{{ 'metric-pos' if summary.pnl_positive else ('metric-neg' if summary.pnl_negative else '') }}">
           {{ summary.total_pnl_label }}
         </strong>
       </div>
@@ -58,7 +58,7 @@
   </article>
   <article class="status-card">
     <span class="status-card-label">Net PnL</span>
-    <strong class="{{ 'metric-pos' if summary.total_pnl > 0 else ('metric-neg' if summary.total_pnl < 0 else '') }}">{{ summary.total_pnl_label }}</strong>
+    <strong class="{{ 'metric-pos' if summary.pnl_positive else ('metric-neg' if summary.pnl_negative else '') }}">{{ summary.total_pnl_label }}</strong>
   </article>
 </section>
 
@@ -74,7 +74,7 @@
       {% if report.open_trades > 0 %}
       <span class="status-badge ok">{{ report.open_trades }} Open</span>
       {% endif %}
-      <span class="badge {% if report.pnl_positive %}badge-green{% elif report.total_pnl < 0 %}badge-red{% else %}badge-neutral{% endif %}">
+      <span class="badge {% if report.pnl_positive %}badge-green{% elif report.pnl_negative %}badge-red{% else %}badge-neutral{% endif %}">
         {{ report.total_pnl_label }}
       </span>
     </div>
@@ -103,7 +103,7 @@
     </div>
     <div class="metric-card">
       <span>Net PnL</span>
-      <strong class="{{ 'metric-pos' if report.pnl_positive else ('metric-neg' if report.total_pnl < 0 else '') }}">
+      <strong class="{{ 'metric-pos' if report.pnl_positive else ('metric-neg' if report.pnl_negative else '') }}">
         {{ report.total_pnl_label }}
       </strong>
     </div>
@@ -125,7 +125,7 @@
     </div>
     <div class="metric-card">
       <span>Avg Trade PnL</span>
-      <strong class="{{ 'metric-pos' if report.total_pnl > 0 else ('metric-neg' if report.total_pnl < 0 else '') }}">
+      <strong class="{{ 'metric-pos' if report.pnl_positive else ('metric-neg' if report.pnl_negative else '') }}">
         {{ report.avg_trade_pnl_label }}
       </strong>
     </div>
@@ -232,8 +232,8 @@
             <td>{{ s.get("open_positions_count") or 0 }}</td>
             <td>{{ s.get("total_messages_processed") or 0 }}</td>
             <td>{{ s.get("total_signals_received") or 0 }}</td>
-            <td class="{{ 'metric-pos' if (s.get('total_pnl') or 0)|float > 0 else ('metric-neg' if (s.get('total_pnl') or 0)|float < 0 else '') }}">
-              {{ "%+.2f"|format((s.get("total_pnl") or 0)|float) }}
+            <td class="{{ 'metric-pos' if s.get('pnl_positive') else ('metric-neg' if s.get('pnl_negative') else '') }}">
+              {{ s.get("total_pnl_label") or "0.00" }}
             </td>
           </tr>
           {% endfor %}

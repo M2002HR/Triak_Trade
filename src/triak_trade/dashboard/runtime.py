@@ -188,25 +188,18 @@ def dashboard_smoke_test(settings: Settings) -> dict[str, Any]:
         token = smoke_settings.DASHBOARD_ADMIN_TOKEN.get_secret_value()
         headers = {"X-Triak-Admin-Token": token}
         client = LocalASGIClient(app)
-        service = app.state.dashboard_service
         unauthorized = client.get("/", follow_redirects=False)
         authorized = client.get("/", headers=headers)
-        backtest = service.run_fixture_backtest_from_form(
-            {
-                "channel": smoke_settings.BACKTEST_DEFAULT_CHANNEL,
-                "interval": "1m",
-                "initial_balance": str(smoke_settings.BACKTEST_DEFAULT_INITIAL_BALANCE),
-                "risk_per_trade_pct": str(smoke_settings.BACKTEST_DEFAULT_RISK_PER_TRADE_PCT),
-                "fill_policy": "conservative",
-            }
-        )
+        backtest_page = client.get("/backtests", headers=headers)
+        analysis_page = client.get("/backtests/analysis", headers=headers)
         settings_page = client.get("/settings", headers=headers)
         status_json = client.get("/status", headers=headers)
         status_unauthorized = client.get("/status", follow_redirects=False)
         return {
             "unauthorized_blocked": unauthorized.status_code == 303,
             "dashboard_authorized": authorized.status_code == 200,
-            "backtest_fixture_ok": bool(not backtest.get("blocked") and backtest.get("summary")),
+            "backtest_workspace_ok": backtest_page.status_code == 200,
+            "backtest_analysis_ok": analysis_page.status_code == 200,
             "settings_ok": settings_page.status_code == 200,
             "status_json_ok": status_json.status_code == 200,
             "status_api_unauthorized": status_unauthorized.status_code == 401,

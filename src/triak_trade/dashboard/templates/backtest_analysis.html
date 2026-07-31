@@ -2,10 +2,10 @@
 {% block content %}
 <section class="hero backtest-hero analysis-hero">
   <div>
-    <p class="eyebrow">Isolated Backtest Intelligence</p>
+    <p class="eyebrow">Backtest Intelligence</p>
     <h1>Channel, Strategy &amp; Risk Analysis</h1>
     <p class="subtle hero-copy">
-      Compare every persisted isolated simulation, inspect downside and uncertainty, rank channels,
+      Compare every persisted backtest simulation, inspect downside and uncertainty, rank channels,
       and measure how strategy and risk parameters changed the observed outcomes.
     </p>
   </div>
@@ -16,9 +16,9 @@
   </div>
 </section>
 
-<nav class="workbench-tabs" aria-label="Isolated backtest workspace">
-  <a class="workbench-tab" href="/isolated-backtests">Run &amp; Monitor</a>
-  <a class="workbench-tab active" href="/isolated-backtests/analysis" aria-current="page">Analysis &amp; Rankings</a>
+<nav class="workbench-tabs" aria-label="Backtest workspace">
+  <a class="workbench-tab" href="/backtests">Run &amp; Monitor</a>
+  <a class="workbench-tab active" href="/backtests/analysis" aria-current="page">Analysis &amp; Rankings</a>
 </nav>
 
 <section class="panel analysis-filter-panel">
@@ -30,7 +30,7 @@
     </div>
     <div id="analysis-refresh-status" class="counter-pill">Loading persisted runs…</div>
   </div>
-  <form id="isolated-analysis-filters" class="analysis-filter-grid">
+  <form id="backtest-analysis-filters" class="analysis-filter-grid">
     <label>Channel
       <select id="analysis-channel" name="channel"><option value="">All channels</option></select>
     </label>
@@ -145,10 +145,10 @@
 </section>
 
 <div id="analysis-empty" class="panel empty-state-box" hidden>
-  No isolated backtests match this scope. Run an isolated simulation or loosen the filters.
+  No backtests match this scope. Run a backtest or loosen the filters.
 </div>
 {% endblock %}
 
 {% block page_scripts %}
-<script src="/static/isolated_analysis.js?v={{ asset_version }}"></script>
+<script src="/static/backtest_analysis.js?v={{ asset_version }}"></script>
 {% endblock %}

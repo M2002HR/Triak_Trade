@@ -3,10 +3,10 @@
 <section class="hero backtest-hero">
   <div>
     <p class="eyebrow">Backtest Workbench</p>
-    <h1>Portfolio Telegram Backtest Monitor</h1>
+    <h1>Signal Replay Monitor</h1>
     <p class="subtle hero-copy">
-      Watch the system process each Telegram message, stage by stage. You can see which message is
-      active now, which stage is running, what the result was, and how the shared-balance backtest report was formed.
+      Build complete signal records from Telegram history, then inspect how each signal was simulated
+      on its own capital base, lifecycle trail, and final aggregate analytics.
     </p>
   </div>
   <div class="hero-stat-cluster">
@@ -23,21 +23,26 @@
 
 <script id="backtest-bootstrap" type="application/json">{{ bootstrap | tojson }}</script>
 
+<nav class="workbench-tabs" aria-label="Backtest workspace">
+  <a class="workbench-tab active" href="/backtests" aria-current="page">Run &amp; Monitor</a>
+  <a class="workbench-tab" href="/backtests/analysis">Analysis &amp; Rankings</a>
+</nav>
+
 <section class="overview-action-grid overview-action-grid-compact">
   <article class="action-card action-card-plain">
-    <span class="eyebrow">Input</span>
-    <h2>Telegram History Replay</h2>
-    <p>Run guarded history fetches with saved channels, date windows, or a specific start message link.</p>
+    <span class="eyebrow">Record Build</span>
+    <h2>Signal-First History Pass</h2>
+    <p>Walk the Telegram history once, attach updates precisely, and form one complete record per signal.</p>
   </article>
   <article class="action-card action-card-plain">
-    <span class="eyebrow">Decision Engine</span>
-    <h2>Shared Balance Simulation</h2>
-    <p>Keep the classic portfolio-style replay with one running balance across all signals in the chosen range.</p>
+    <span class="eyebrow">Simulation</span>
+    <h2>Independent Per-Signal Replay</h2>
+    <p>Simulate each signal separately with its own capital, leverage policy, and lifecycle checkpoints.</p>
   </article>
   <article class="action-card action-card-plain">
     <span class="eyebrow">Output</span>
-    <h2>Observable Final Report</h2>
-    <p>Inspect run feed, recent backtests, active versus inactive signals, and the resulting report path.</p>
+    <h2>Aggregate Signal Analytics</h2>
+    <p>Review best and worst backtest outcomes, period PnL buckets, symbol splits, and per-signal lifecycle data.</p>
   </article>
 </section>
 
@@ -61,7 +66,7 @@
         <div>
           <p class="eyebrow">Live Run</p>
           <h2 id="run-title">Waiting For A Backtest</h2>
-          <p id="run-subtitle" class="subtle">Start a run to stream message-by-message progress.</p>
+          <p id="run-subtitle" class="subtle">Start a run to stream signal-record building, simulation, and aggregate analytics live.</p>
         </div>
         <div id="run-phase-pill" class="phase-pill phase-queued">Queued</div>
       </div>
@@ -109,7 +114,7 @@
       <div class="phase-progress-panel" aria-live="polite">
         <div class="backtest-progress-head">
           <span class="phase-card-label">Phase Progress</span>
-          <span class="subtle">Each backtest stage updates independently.</span>
+          <span class="subtle">History fetch, classification, market data, simulation, and report are tracked separately.</span>
         </div>
         <div id="phase-progress-grid" class="phase-progress-grid"></div>
       </div>
@@ -120,23 +125,11 @@
         <div>
           <p class="eyebrow">Message Stream</p>
           <h2>Per-Message Trace</h2>
-          <p class="subtle">Click any row to open a full stage timeline, message text, and decision details.</p>
-        </div>
-        <div class="message-stream-toolbar">
-          <div id="message-filter-bar" class="filter-pill-row">
-            <button type="button" class="filter-pill active" data-message-filter="all">All</button>
-            <button type="button" class="filter-pill" data-message-filter="signals">Signals</button>
-            <button type="button" class="filter-pill" data-message-filter="updates">Updates</button>
-            <button type="button" class="filter-pill" data-message-filter="invalid">Invalid</button>
-            <button type="button" class="filter-pill" data-message-filter="ignored">Ignored</button>
-            <button type="button" class="filter-pill" data-message-filter="ambiguous">Ambiguous</button>
-          </div>
-          <div id="message-count-label" class="counter-pill">0 messages</div>
+          <p class="subtle">Load trace records only when you need them; the main workspace stays focused on run progress.</p>
         </div>
       </div>
-      <div id="message-stream" class="message-stream empty-state-box">
-        No messages have been processed yet.
-      </div>
+      <div id="message-stream-preview" class="modal-preview-blurb empty-state-box">No message trace has been loaded.</div>
+      <button type="button" class="button secondary-open-button" data-open-panel-modal="messages">Open Message Stream</button>
     </section>
   </div>
 
@@ -176,28 +169,18 @@
       <button type="button" class="button secondary-open-button" data-open-panel-modal="signals">Open Signals</button>
     </section>
 
-    {% if result %}
-      <section class="panel legacy-result-panel">
-        {% if result.blocked %}
-          <h2>Blocked</h2>
-          <p>{{ result.reason }}</p>
-          {% if result.issues %}
-          <ul>
-          {% for issue in result.issues %}
-            <li>{{ issue }}</li>
-          {% endfor %}
-          </ul>
-          {% endif %}
-        {% else %}
-          <h2>Legacy Result</h2>
-          <dl class="metrics">
-          {% for key, value in result.summary.items() %}
-            <dt>{{ key }}</dt><dd>{{ value }}</dd>
-          {% endfor %}
-          </dl>
-        {% endif %}
-      </section>
-    {% endif %}
+    <section class="panel signal-state-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Analytics</p>
+          <h2>Aggregate Breakdown</h2>
+        </div>
+      </div>
+      <div id="backtest-aggregate-preview" class="modal-preview-blurb empty-state-box">
+        No backtest aggregate metrics yet.
+      </div>
+      <button type="button" class="button secondary-open-button" data-open-panel-modal="aggregate">Open Analytics</button>
+    </section>
   </div>
 </section>
 

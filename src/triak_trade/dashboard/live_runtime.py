@@ -21,12 +21,8 @@ from triak_trade.backtesting.strategies.registry import (
 )
 from triak_trade.config.settings import Settings
 from triak_trade.core.logging import log_event
-from triak_trade.dashboard.backtest_runtime import normalize_channel_reference
-from triak_trade.dashboard.schemas import (
-    SavedChannelEntry,
-    SavedChannelsState,
-    StrategyCatalogEntry,
-)
+from triak_trade.dashboard.saved_channels import SavedChannelStore
+from triak_trade.dashboard.schemas import StrategyCatalogEntry
 from triak_trade.exchange.toobit.futures import build_futures_client_from_settings
 from triak_trade.live_trading.account_coordinator import AccountExecutionCoordinator
 from triak_trade.live_trading.engine import (
@@ -89,7 +85,7 @@ class DashboardLiveCoordinator:
         self.notifier = notifier
         self.runtime_root = Path(settings.LIVE_TRADING_RUNTIME_DIR)
         self.state_dir = self.runtime_root / "state"
-        self.saved_channels_file = self.state_dir / "saved_channels.json"
+        self.saved_channel_store = SavedChannelStore(settings)
         self.telegram_client = SharedTelethonTelegramClient(settings)
         self.account_coordinator = AccountExecutionCoordinator.from_settings(settings)
         self.account_coordinator.restore_from_store(self.store)
@@ -172,7 +168,8 @@ class DashboardLiveCoordinator:
         if default_trading_mode == "live" and not self.live_mode_enabled():
             default_trading_mode = "demo"
         saved_channels = [
-            item.model_dump(mode="json") for item in self._get_saved_channels_state().channels
+            item.model_dump(mode="json")
+            for item in self.saved_channel_store.get().channels
         ]
         payload = {
             "readiness": self.readiness().model_dump(mode="json"),
@@ -597,51 +594,27 @@ class DashboardLiveCoordinator:
         return deleted
 
     def get_saved_channels(self) -> list[dict[str, Any]]:
-        state = self._get_saved_channels_state()
+        state = self.saved_channel_store.get()
         return [item.model_dump(mode="json") for item in state.channels]
 
     def save_channel(self, channel_input: str) -> list[dict[str, Any]]:
-        normalized_input = channel_input.strip()
-        if not normalized_input:
-            raise ValueError("channel is required")
-        resolved = normalize_channel_reference(normalized_input)
-        label = self._channel_label(resolved)
-        state = self._get_saved_channels_state()
-        channels = [item for item in state.channels if item.channel_resolved != resolved]
-        channels.insert(
-            0,
-            SavedChannelEntry(
-                channel_input=normalized_input,
-                channel_resolved=resolved,
-                label=label,
-                created_at=_utc_now(),
-            ),
-        )
-        updated = SavedChannelsState(channels=channels[:50])
-        self._write_json(self.saved_channels_file, updated.model_dump(mode="json"))
+        updated = self.saved_channel_store.add(channel_input)
+        saved = updated.channels[0]
         self._log_event(
             logging.INFO,
             "dashboard.live_channel_saved",
-            channel_input=normalized_input,
-            channel_resolved=resolved,
+            channel_input=saved.channel_input,
+            channel_resolved=saved.channel_resolved,
             total_saved_channels=len(updated.channels),
         )
         return [item.model_dump(mode="json") for item in updated.channels]
 
     def remove_channel(self, channel_reference: str) -> list[dict[str, Any]]:
-        resolved = normalize_channel_reference(channel_reference)
-        state = self._get_saved_channels_state()
-        updated = SavedChannelsState(
-            channels=[
-                item for item in state.channels if item.channel_resolved != resolved
-            ]
-        )
-        self._write_json(self.saved_channels_file, updated.model_dump(mode="json"))
+        updated = self.saved_channel_store.remove(channel_reference)
         self._log_event(
             logging.INFO,
             "dashboard.live_channel_removed",
             channel_reference=channel_reference,
-            channel_resolved=resolved,
             total_saved_channels=len(updated.channels),
         )
         return [item.model_dump(mode="json") for item in updated.channels]
@@ -783,25 +756,6 @@ class DashboardLiveCoordinator:
                 channels=recovered_session.channels,
             )
 
-    def _get_saved_channels_state(self) -> SavedChannelsState:
-        if self.saved_channels_file.exists():
-            return SavedChannelsState.model_validate_json(
-                self.saved_channels_file.read_text(encoding="utf-8")
-            )
-        default_channels = list(self.settings.LIVE_TRADING_DEFAULT_CHANNELS)
-        channels = [
-            SavedChannelEntry(
-                channel_input=item,
-                channel_resolved=normalize_channel_reference(item),
-                label=self._channel_label(normalize_channel_reference(item)),
-                created_at=_utc_now(),
-            )
-            for item in default_channels
-        ]
-        state = SavedChannelsState(channels=channels)
-        self._write_json(self.saved_channels_file, state.model_dump(mode="json"))
-        return state
-
     def _notify_session(self, session: LiveSession) -> None:
         if not self.notifier:
             return
@@ -825,16 +779,6 @@ class DashboardLiveCoordinator:
             value = str(secret)
         normalized = str(value).strip()
         return bool(normalized) and normalized.lower() != "replace_me"
-
-    @staticmethod
-    def _channel_label(channel_reference: str) -> str:
-        if channel_reference.lstrip("-").isdigit():
-            return channel_reference
-        if channel_reference.startswith("https://t.me/"):
-            return f"@{channel_reference.rsplit('/', 1)[-1]}"
-        if channel_reference.startswith("@"):
-            return channel_reference
-        return f"@{channel_reference}"
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:

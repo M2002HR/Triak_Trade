@@ -5,16 +5,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from triak_trade.backtesting.isolated_runner import (
-    IsolatedBacktestResult,
-    IsolatedBacktestRunRequest,
+from triak_trade.backtesting.backtest_runner import (
+    BacktestResult,
+    BacktestRunRequest,
 )
 from triak_trade.backtesting.real_runner import (
     RealBacktestMessageStage,
     RealBacktestMessageTrace,
     RealBacktestProgressEvent,
-    RealBacktestResult,
-    RealBacktestRunRequest,
 )
 from triak_trade.config.settings import Settings
 from triak_trade.dashboard.app import create_dashboard_app
@@ -50,9 +48,9 @@ class FakeRunner:
 
     def run_sync(
         self,
-        request: RealBacktestRunRequest,
+        request: BacktestRunRequest,
         progress_callback=None,
-    ) -> RealBacktestResult:
+    ) -> BacktestResult:
         now = datetime(2026, 6, 4, tzinfo=timezone.utc)
         trace = RealBacktestMessageTrace(
             message_id=501,
@@ -150,7 +148,7 @@ class FakeRunner:
                     trace=trace,
                 )
             )
-        return RealBacktestResult(
+        return BacktestResult(
             success=True,
             channel=request.channel,
             from_date=request.from_date or now,
@@ -188,12 +186,13 @@ class FakeRunner:
         )
 
 
-class FakeIsolatedRunner(FakeRunner):
+class FakeBacktestRunner(FakeRunner):
     def run_sync(
         self,
-        request: IsolatedBacktestRunRequest,
+        request: BacktestRunRequest,
         progress_callback=None,
-    ) -> IsolatedBacktestResult:
+    ) -> BacktestResult:
+        super().run_sync(request, progress_callback)
         now = datetime(2026, 6, 4, tzinfo=timezone.utc)
         if progress_callback is not None:
             progress_callback(
@@ -206,7 +205,7 @@ class FakeIsolatedRunner(FakeRunner):
                     counts={"total_messages": 2},
                 )
             )
-        return IsolatedBacktestResult(
+        return BacktestResult(
             success=True,
             channel=request.channel,
             from_date=request.from_date or now,
@@ -239,8 +238,8 @@ class FakeIsolatedRunner(FakeRunner):
             warnings=[],
             errors=[],
             generated_at=now,
-            report_path="runtime/reports/backtests/isolated.report.json",
-            markdown_report_path="runtime/reports/backtests/isolated.report.md",
+            report_path="runtime/reports/backtests/backtest.report.json",
+            markdown_report_path="runtime/reports/backtests/backtest.report.md",
             signals=[
                 {
                     "signal_id": "sig_iso_1",
@@ -280,18 +279,18 @@ class FakeIsolatedRunner(FakeRunner):
 
 
 def build_client(tmp_path: Path, monkeypatch) -> LocalASGIClient:
-    monkeypatch.setattr("triak_trade.dashboard.services.RealBacktestRunner", FakeRunner)
+    monkeypatch.setattr("triak_trade.dashboard.services.BacktestRunner", FakeRunner)
     monkeypatch.setattr(
-        "triak_trade.dashboard.backtest_runtime.RealBacktestRunner",
+        "triak_trade.dashboard.backtest_runtime.BacktestRunner",
         FakeRunner,
     )
     monkeypatch.setattr(
-        "triak_trade.dashboard.services.IsolatedBacktestRunner",
-        FakeIsolatedRunner,
+        "triak_trade.dashboard.services.BacktestRunner",
+        FakeBacktestRunner,
     )
     monkeypatch.setattr(
-        "triak_trade.dashboard.backtest_runtime.IsolatedBacktestRunner",
-        FakeIsolatedRunner,
+        "triak_trade.dashboard.backtest_runtime.BacktestRunner",
+        FakeBacktestRunner,
     )
     settings = Settings(
         _env_file=None,
@@ -313,52 +312,26 @@ def _headers() -> dict[str, str]:
 def test_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> None:
     response = build_client(tmp_path, monkeypatch).get("/backtests", headers=_headers())
     assert response.status_code == 200
-    assert "Portfolio Telegram Backtest Monitor" in response.text
-    assert "Shared Balance Simulation" in response.text
-    assert "Start Backtest" in response.text
-    assert "Start From Message Link" in response.text
-    assert "Per-Message Trace" in response.text
-    assert "Open Run Feed" in response.text
-    assert "Open History" in response.text
-    assert "Active & Inactive" in response.text
-    assert 'id="signal-state-preview"' in response.text
-    assert 'data-open-panel-modal="signals"' in response.text
-    assert 'id="run-action-bar"' in response.text
-    assert 'id="backtest-progress-track"' in response.text
-    assert 'id="backtest-progress-fill"' in response.text
-    assert 'id="backtest-progress-meta"' in response.text
-    assert 'id="phase-progress-grid"' in response.text
-    assert 'id="backtest-runtime-label"' in response.text
-    assert 'data-message-filter="signals"' in response.text
-    assert 'id="message-modal" class="modal-shell" hidden' in response.text
-    assert 'id="panel-modal" class="modal-shell" hidden' in response.text
-    assert 'data-backtest-mode="isolated"' not in response.text
-    assert 'id="isolated-aggregate-preview"' not in response.text
-
-
-def test_isolated_backtest_page_renders_live_workspace(tmp_path: Path, monkeypatch) -> None:
-    response = build_client(tmp_path, monkeypatch).get("/isolated-backtests", headers=_headers())
-    assert response.status_code == 200
-    assert "Independent Signal Replay Monitor" in response.text
+    assert "Signal Replay Monitor" in response.text
     assert "Signal-First History Pass" in response.text
-    assert "Start Isolated Backtest" in response.text
-    assert 'id="isolated-capital-per-signal"' in response.text
-    assert 'id="isolated-backtest-config"' in response.text
-    assert 'id="isolated-aggregate-preview"' in response.text
+    assert "Start Backtest" in response.text
+    assert 'id="backtest-capital-per-signal"' in response.text
+    assert 'id="backtest-config"' in response.text
+    assert 'id="backtest-aggregate-preview"' in response.text
     assert 'id="phase-progress-grid"' in response.text
     assert 'id="backtest-send-log-channel"' not in response.text
     assert 'id="backtest-log-per-message"' not in response.text
     assert 'id="backtest-initial-balance"' not in response.text
-    assert 'id="isolated-default-stop-pct"' not in response.text
+    assert 'id="backtest-default-stop-pct"' not in response.text
 
 
-def test_backtest_start_api_runs_isolated_mode(tmp_path: Path, monkeypatch) -> None:
+def test_backtest_start_api_runs_backtest_mode(tmp_path: Path, monkeypatch) -> None:
     client = build_client(tmp_path, monkeypatch)
     start = client.post(
         "/api/backtests/start",
         headers=_headers(),
         json={
-            "run_type": "isolated",
+            "run_type": "backtest",
             "channel": "@Tofan_Trade",
             "from_date": "2026-06-03T00:00:00Z",
             "to_date": "2026-06-04T00:00:00Z",
@@ -378,7 +351,7 @@ def test_backtest_start_api_runs_isolated_mode(tmp_path: Path, monkeypatch) -> N
     assert start.status_code == 202
     body = start.json()
     assert body["started"] is True
-    assert body["run"]["run_type"] == "isolated"
+    assert body["run"]["run_type"] == "backtest"
     run_id = body["run"]["run_id"]
 
     loaded = None
@@ -392,10 +365,10 @@ def test_backtest_start_api_runs_isolated_mode(tmp_path: Path, monkeypatch) -> N
 
     assert loaded is not None
     assert loaded["status"] == "completed"
-    assert loaded["run_type"] == "isolated"
+    assert loaded["run_type"] == "backtest"
     assert loaded["capital_per_signal"] == "150"
     assert loaded["max_parallel_signals"] == 2
-    assert loaded["isolated_aggregate"]["total_signals"] == 2
+    assert loaded["backtest_aggregate"]["total_signals"] == 2
     assert loaded["signals"][0]["signal_id"] == "sig_iso_1"
 
 
@@ -443,9 +416,9 @@ def test_backtest_start_api_runs_and_exposes_live_run(tmp_path: Path, monkeypatc
     ).json()
     assert traces["messages"][0]["message_id"] == 501
     assert traces["messages"][0]["classification"] == "new_signal"
-    assert loaded["signals"][0]["signal_id"] == "sig_501"
-    assert loaded["signals"][0]["status_group"] == "active"
-    assert loaded["report_path"] == "runtime/reports/backtests/report.json"
+    assert loaded["signals"][0]["signal_id"] == "sig_iso_1"
+    assert loaded["signals"][0]["status_group"] == "inactive"
+    assert loaded["report_path"] == "runtime/reports/backtests/backtest.report.json"
 
     listed = client.get("/api/backtests/runs?limit=8", headers=_headers())
     assert listed.status_code == 200
@@ -648,6 +621,48 @@ def test_backtest_channel_api_removes_channels(tmp_path: Path, monkeypatch) -> N
         item["channel_resolved"] == "https://t.me/Crypto_Etehad"
         for item in body["channels"]
     )
+
+
+def test_backtest_and_live_channel_apis_share_one_library(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = build_client(tmp_path, monkeypatch)
+
+    saved_from_backtest = client.post(
+        "/api/backtests/channels",
+        headers=_headers(),
+        json={"channel": "@BacktestShared"},
+    )
+    assert saved_from_backtest.status_code == 201
+    listed_in_live = client.get("/api/live/channels", headers=_headers())
+    assert listed_in_live.status_code == 200
+    assert "https://t.me/BacktestShared" in {
+        item["channel_resolved"] for item in listed_in_live.json()["channels"]
+    }
+
+    saved_from_live = client.post(
+        "/api/live/channels",
+        headers=_headers(),
+        json={"channel": "@LiveShared"},
+    )
+    assert saved_from_live.status_code == 201
+    listed_in_backtest = client.get("/api/backtests/channels", headers=_headers())
+    assert "https://t.me/LiveShared" in {
+        item["channel_resolved"] for item in listed_in_backtest.json()["channels"]
+    }
+
+    removed_from_live = client.request(
+        "DELETE",
+        "/api/live/channels",
+        headers=_headers(),
+        json={"channel": "@BacktestShared"},
+    )
+    assert removed_from_live.status_code == 200
+    after_removal = client.get("/api/backtests/channels", headers=_headers())
+    assert "https://t.me/BacktestShared" not in {
+        item["channel_resolved"] for item in after_removal.json()["channels"]
+    }
 
 
 def test_backtest_channel_api_supports_query_token_auth(

@@ -9,11 +9,11 @@ document.documentElement.dataset.dashboardReady = "true";
   const bootstrap = JSON.parse(bootstrapNode.textContent || "{}");
   const initialRecentRuns = Array.isArray(bootstrap.recent_runs) ? bootstrap.recent_runs : [];
   const activeRunIdFromUrl = new URLSearchParams(window.location.search).get("run_id");
-  const runStorageKey = `triak-active-backtest-${bootstrap.default_run_type || "portfolio"}`;
+  const runStorageKey = "triak-active-backtest";
   const storedActiveRunId = readStoredRunId(runStorageKey);
   const state = {
     bootstrap,
-    runType: bootstrap.default_run_type || "portfolio",
+    runType: "backtest",
     savedChannels: Array.isArray(bootstrap.saved_channels) ? bootstrap.saved_channels : [],
     activeRunId: activeRunIdFromUrl
       || bootstrap.active_run_id
@@ -46,8 +46,6 @@ document.documentElement.dataset.dashboardReady = "true";
 
   const nodes = {
     form: document.getElementById("backtest-live-form"),
-    runType: document.getElementById("backtest-run-type"),
-    modeTabs: document.getElementById("backtest-mode-tabs"),
     channel: document.getElementById("backtest-channel"),
     savedChannelSelect: document.getElementById("backtest-saved-channel-select"),
     saveChannelInput: document.getElementById("backtest-save-channel-input"),
@@ -63,22 +61,24 @@ document.documentElement.dataset.dashboardReady = "true";
     maxMessages: document.getElementById("backtest-max-messages"),
     initialBalance: document.getElementById("backtest-initial-balance"),
     riskPerTradePct: document.getElementById("backtest-risk-per-trade-pct"),
-    isolatedConfig: document.getElementById("isolated-backtest-config"),
-    isolatedCapitalPerSignal: document.getElementById("isolated-capital-per-signal"),
-    isolatedFillPolicy: document.getElementById("isolated-fill-policy"),
-    isolatedLeverageSource: document.getElementById("isolated-leverage-source"),
-    isolatedFixedLeverage: document.getElementById("isolated-fixed-leverage"),
-    isolatedMaxEffectiveLeverage: document.getElementById("isolated-max-effective-leverage"),
-    isolatedDefaultSignalLeverage: document.getElementById("isolated-default-signal-leverage"),
-    isolatedMinAllocationPct: document.getElementById("isolated-min-allocation-pct"),
-    isolatedMaxAllocationPct: document.getElementById("isolated-max-allocation-pct"),
-    isolatedDefaultStopPct: document.getElementById("isolated-default-stop-pct"),
-    isolatedSyntheticStopMaxLossPct: document.getElementById("isolated-synthetic-stop-max-loss-pct"),
-    isolatedFeeRatePct: document.getElementById("isolated-fee-rate-pct"),
-    isolatedLifecycleRefreshInterval: document.getElementById("isolated-lifecycle-refresh-interval"),
-    isolatedMaxParallelSignals: document.getElementById("isolated-max-parallel-signals"),
-    isolatedIncludeNotFilledSignals: document.getElementById("isolated-include-not-filled-signals"),
-    isolatedCloseOpenPositionsAtEnd: document.getElementById("isolated-close-open-positions-at-end"),
+    backtestConfig: document.getElementById("backtest-config"),
+    backtestCapitalPerSignal: document.getElementById("backtest-capital-per-signal"),
+    backtestFillPolicy: document.getElementById("backtest-fill-policy"),
+    backtestLeverageSource: document.getElementById("backtest-leverage-source"),
+    backtestFixedLeverage: document.getElementById("backtest-fixed-leverage"),
+    backtestMaxEffectiveLeverage: document.getElementById("backtest-max-effective-leverage"),
+    backtestDefaultSignalLeverage: document.getElementById("backtest-default-signal-leverage"),
+    backtestMinAllocationPct: document.getElementById("backtest-min-allocation-pct"),
+    backtestMaxAllocationPct: document.getElementById("backtest-max-allocation-pct"),
+    backtestDefaultStopPct: document.getElementById("backtest-default-stop-pct"),
+    backtestSyntheticStopMaxLossPct: document.getElementById("backtest-synthetic-stop-max-loss-pct"),
+    backtestMaxStopLossPct: document.getElementById("backtest-max-stop-loss-pct"),
+    backtestFeeRatePct: document.getElementById("backtest-fee-rate-pct"),
+    backtestConsolidationSeconds: document.getElementById("backtest-consolidation-seconds"),
+    backtestLifecycleRefreshInterval: document.getElementById("backtest-lifecycle-refresh-interval"),
+    backtestMaxParallelSignals: document.getElementById("backtest-max-parallel-signals"),
+    backtestIncludeNotFilledSignals: document.getElementById("backtest-include-not-filled-signals"),
+    backtestCloseOpenPositionsAtEnd: document.getElementById("backtest-close-open-positions-at-end"),
     strategyKey: document.getElementById("backtest-strategy-key"),
     strategySummary: document.getElementById("backtest-strategy-summary"),
     strategyParameters: document.getElementById("backtest-strategy-parameters"),
@@ -110,7 +110,7 @@ document.documentElement.dataset.dashboardReady = "true";
     eventFeed: document.getElementById("event-feed"),
     recentRuns: document.getElementById("recent-runs"),
     signalStatePreview: document.getElementById("signal-state-preview"),
-    isolatedAggregatePreview: document.getElementById("isolated-aggregate-preview"),
+    backtestAggregatePreview: document.getElementById("backtest-aggregate-preview"),
     modal: document.getElementById("message-modal"),
     modalTitle: document.getElementById("message-modal-title"),
     modalStatus: document.getElementById("message-modal-status"),
@@ -144,24 +144,23 @@ document.documentElement.dataset.dashboardReady = "true";
       nodes.initialBalance.value = String(bootstrap.default_initial_balance || "100");
     }
     nodes.riskPerTradePct.value = String(bootstrap.default_risk_per_trade_pct || "120");
-    if (nodes.runType) {
-      nodes.runType.value = state.runType;
-    }
-    if (nodes.isolatedCapitalPerSignal) {
-      nodes.isolatedCapitalPerSignal.value = String(bootstrap.default_capital_per_signal || "100");
-      nodes.isolatedFillPolicy.value = bootstrap.default_fill_policy || "conservative";
-      nodes.isolatedLeverageSource.value = bootstrap.default_leverage_source || "signal_or_default";
-      nodes.isolatedFixedLeverage.value = String(bootstrap.default_fixed_leverage || "50");
-      nodes.isolatedMaxEffectiveLeverage.value = String(bootstrap.default_max_effective_leverage || "50");
-      nodes.isolatedDefaultSignalLeverage.value = String(bootstrap.default_signal_leverage || "50");
-      nodes.isolatedMinAllocationPct.value = String(bootstrap.default_min_allocation_pct || "2");
-      nodes.isolatedMaxAllocationPct.value = String(bootstrap.default_max_allocation_pct || "20");
-      nodes.isolatedSyntheticStopMaxLossPct.value = String(bootstrap.default_synthetic_stop_max_loss_pct || "5");
-      nodes.isolatedFeeRatePct.value = String(bootstrap.default_fee_rate_pct || "0");
-      nodes.isolatedLifecycleRefreshInterval.value = bootstrap.default_lifecycle_refresh_interval || "30m";
-      nodes.isolatedMaxParallelSignals.value = String(bootstrap.default_max_parallel_signals || "4");
-      nodes.isolatedIncludeNotFilledSignals.checked = Boolean(bootstrap.default_include_not_filled_signals);
-      nodes.isolatedCloseOpenPositionsAtEnd.checked = Boolean(bootstrap.default_close_open_positions_at_end);
+    if (nodes.backtestCapitalPerSignal) {
+      nodes.backtestCapitalPerSignal.value = String(bootstrap.default_capital_per_signal || "100");
+      nodes.backtestFillPolicy.value = bootstrap.default_fill_policy || "conservative";
+      nodes.backtestLeverageSource.value = bootstrap.default_leverage_source || "signal_or_default";
+      nodes.backtestFixedLeverage.value = String(bootstrap.default_fixed_leverage || "50");
+      nodes.backtestMaxEffectiveLeverage.value = String(bootstrap.default_max_effective_leverage || "50");
+      nodes.backtestDefaultSignalLeverage.value = String(bootstrap.default_signal_leverage || "50");
+      nodes.backtestMinAllocationPct.value = String(bootstrap.default_min_allocation_pct || "2");
+      nodes.backtestMaxAllocationPct.value = String(bootstrap.default_max_allocation_pct || "20");
+      nodes.backtestSyntheticStopMaxLossPct.value = String(bootstrap.default_synthetic_stop_max_loss_pct || "5");
+      nodes.backtestMaxStopLossPct.value = String(bootstrap.default_max_stop_loss_pct || "5");
+      nodes.backtestFeeRatePct.value = String(bootstrap.default_fee_rate_pct || "0.04");
+      nodes.backtestConsolidationSeconds.value = String(bootstrap.default_consolidation_seconds ?? 180);
+      nodes.backtestLifecycleRefreshInterval.value = bootstrap.default_lifecycle_refresh_interval || "30m";
+      nodes.backtestMaxParallelSignals.value = String(bootstrap.default_max_parallel_signals || "4");
+      nodes.backtestIncludeNotFilledSignals.checked = Boolean(bootstrap.default_include_not_filled_signals);
+      nodes.backtestCloseOpenPositionsAtEnd.checked = Boolean(bootstrap.default_close_open_positions_at_end);
     }
     if (nodes.strategyKey) {
       nodes.strategyKey.value = bootstrap.default_strategy_key || "default_risk_managed";
@@ -237,17 +236,8 @@ document.documentElement.dataset.dashboardReady = "true";
     if (nodes.strategyKey) {
       nodes.strategyKey.addEventListener("change", renderSelectedStrategy);
     }
-    if (nodes.modeTabs) {
-      nodes.modeTabs.addEventListener("click", (event) => {
-        const target = event.target instanceof Element ? event.target.closest("[data-backtest-mode]") : null;
-        if (!target) {
-          return;
-        }
-        applyRunType(target.getAttribute("data-backtest-mode") || "portfolio");
-      });
-    }
-    if (nodes.isolatedLeverageSource) {
-      nodes.isolatedLeverageSource.addEventListener("change", syncIsolatedLeverageInputs);
+    if (nodes.backtestLeverageSource) {
+      nodes.backtestLeverageSource.addEventListener("change", syncBacktestLeverageInputs);
     }
     document.querySelectorAll("[data-preset-hours]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -347,29 +337,19 @@ document.documentElement.dataset.dashboardReady = "true";
     });
   }
 
-  function applyRunType(runType) {
-    state.runType = runType === "isolated" ? "isolated" : "portfolio";
-    if (nodes.runType) {
-      nodes.runType.value = state.runType;
+  function applyRunType() {
+    state.runType = "backtest";
+    if (nodes.backtestConfig) {
+      nodes.backtestConfig.hidden = state.runType !== "backtest";
     }
-    if (nodes.modeTabs) {
-      nodes.modeTabs.querySelectorAll("[data-backtest-mode]").forEach((button) => {
-        const active = button.getAttribute("data-backtest-mode") === state.runType;
-        button.classList.toggle("active", active);
-        button.setAttribute("aria-selected", active ? "true" : "false");
-      });
-    }
-    if (nodes.isolatedConfig) {
-      nodes.isolatedConfig.hidden = state.runType !== "isolated";
-    }
-    syncIsolatedLeverageInputs();
+    syncBacktestLeverageInputs();
   }
 
-  function syncIsolatedLeverageInputs() {
-    if (!nodes.isolatedFixedLeverage || !nodes.isolatedLeverageSource) {
+  function syncBacktestLeverageInputs() {
+    if (!nodes.backtestFixedLeverage || !nodes.backtestLeverageSource) {
       return;
     }
-    nodes.isolatedFixedLeverage.disabled = nodes.isolatedLeverageSource.value !== "fixed";
+    nodes.backtestFixedLeverage.disabled = nodes.backtestLeverageSource.value !== "fixed";
   }
 
   function renderStrategies() {
@@ -532,7 +512,7 @@ document.documentElement.dataset.dashboardReady = "true";
     } else if (kind === "aggregate") {
       nodes.panelModalTitle.textContent = "Aggregate Analytics";
       nodes.panelModalBody.innerHTML = buildAggregateMarkup(
-        (state.activeRun && state.activeRun.isolated_aggregate) || {},
+        (state.activeRun && state.activeRun.backtest_aggregate) || {},
         true,
       );
     } else {
@@ -571,7 +551,7 @@ document.documentElement.dataset.dashboardReady = "true";
     if (!payload) {
       return;
     }
-    setFormStatus("Starting real backtest worker...", "working");
+    setFormStatus("Starting backtest worker...", "working");
     nodes.startButton.disabled = true;
     try {
       const response = await fetch(withAuthPath("/api/backtests/start"), {
@@ -626,7 +606,6 @@ document.documentElement.dataset.dashboardReady = "true";
       return null;
     }
     const payload = {
-      run_type: state.runType,
       channel: nodes.channel.value.trim(),
       from_date: fromDate.toISOString(),
       to_date: toDate.toISOString(),
@@ -646,22 +625,22 @@ document.documentElement.dataset.dashboardReady = "true";
         ? nodes.logPerMessage.checked
         : Boolean(bootstrap.default_log_per_message),
     };
-    if (state.runType === "isolated") {
-      payload.capital_per_signal = nodes.isolatedCapitalPerSignal.value.trim();
-      payload.fill_policy = nodes.isolatedFillPolicy.value;
-      payload.leverage_source = nodes.isolatedLeverageSource.value;
-      payload.fixed_leverage = nodes.isolatedFixedLeverage.value.trim();
-      payload.max_effective_leverage = nodes.isolatedMaxEffectiveLeverage.value.trim();
-      payload.default_signal_leverage = nodes.isolatedDefaultSignalLeverage.value.trim();
-      payload.min_allocation_pct = nodes.isolatedMinAllocationPct.value.trim();
-      payload.max_allocation_pct = nodes.isolatedMaxAllocationPct.value.trim();
-      payload.synthetic_stop_max_loss_pct = nodes.isolatedSyntheticStopMaxLossPct.value.trim();
-      payload.fee_rate_pct = nodes.isolatedFeeRatePct.value.trim();
-      payload.lifecycle_refresh_interval = nodes.isolatedLifecycleRefreshInterval.value;
-      payload.max_parallel_signals = Number(nodes.isolatedMaxParallelSignals.value || "1");
-      payload.include_not_filled_signals = nodes.isolatedIncludeNotFilledSignals.checked;
-      payload.close_open_positions_at_end = nodes.isolatedCloseOpenPositionsAtEnd.checked;
-    }
+    payload.capital_per_signal = nodes.backtestCapitalPerSignal.value.trim();
+    payload.fill_policy = nodes.backtestFillPolicy.value;
+    payload.leverage_source = nodes.backtestLeverageSource.value;
+    payload.fixed_leverage = nodes.backtestFixedLeverage.value.trim();
+    payload.max_effective_leverage = nodes.backtestMaxEffectiveLeverage.value.trim();
+    payload.default_signal_leverage = nodes.backtestDefaultSignalLeverage.value.trim();
+    payload.min_allocation_pct = nodes.backtestMinAllocationPct.value.trim();
+    payload.max_allocation_pct = nodes.backtestMaxAllocationPct.value.trim();
+    payload.synthetic_stop_max_loss_pct = nodes.backtestSyntheticStopMaxLossPct.value.trim();
+    payload.max_stop_loss_pct = nodes.backtestMaxStopLossPct.value.trim();
+    payload.fee_rate_pct = nodes.backtestFeeRatePct.value.trim();
+    payload.consolidation_seconds = Number(nodes.backtestConsolidationSeconds.value || "0");
+    payload.lifecycle_refresh_interval = nodes.backtestLifecycleRefreshInterval.value;
+    payload.max_parallel_signals = Number(nodes.backtestMaxParallelSignals.value || "1");
+    payload.include_not_filled_signals = nodes.backtestIncludeNotFilledSignals.checked;
+    payload.close_open_positions_at_end = nodes.backtestCloseOpenPositionsAtEnd.checked;
     return payload;
   }
 
@@ -711,7 +690,7 @@ document.documentElement.dataset.dashboardReady = "true";
     try {
       const response = await fetch(
         withAuthPath(
-          `/api/backtests/runs?limit=${state.recentRunsPageSize}&offset=0&run_type=${encodeURIComponent(state.runType)}`,
+          `/api/backtests/runs?limit=${state.recentRunsPageSize}&offset=0`,
         ),
       );
       if (response.ok) {
@@ -741,7 +720,7 @@ document.documentElement.dataset.dashboardReady = "true";
     try {
       const response = await fetch(
         withAuthPath(
-          `/api/backtests/runs?limit=${state.recentRunsPageSize}&offset=${state.recentRuns.length}&run_type=${encodeURIComponent(state.runType)}`,
+          `/api/backtests/runs?limit=${state.recentRunsPageSize}&offset=${state.recentRuns.length}`,
         ),
       );
       if (!response.ok) {
@@ -828,7 +807,7 @@ document.documentElement.dataset.dashboardReady = "true";
     nodes.readinessHeadline.textContent = ready ? "Ready" : "Blocked";
     nodes.readinessBadges.innerHTML = "";
     const checks = [
-      ["Real Backtest", readiness.real_backtest_enabled],
+      ["Backtest Enabled", readiness.real_backtest_enabled],
       ["Telegram Creds", readiness.telegram_credentials_present],
       ["Telegram Session", readiness.telegram_session_configured],
       ["Market Data", readiness.toobit_public_market_ready],
@@ -844,7 +823,7 @@ document.documentElement.dataset.dashboardReady = "true";
     });
     const issues = Array.isArray(readiness.issues) ? readiness.issues : [];
     if (!issues.length) {
-      nodes.readinessIssues.innerHTML = '<div class="issue ok">All real backtest guards are satisfied.</div>';
+      nodes.readinessIssues.innerHTML = '<div class="issue ok">All backtest guards are satisfied.</div>';
       return;
     }
     nodes.readinessIssues.innerHTML = issues
@@ -860,7 +839,7 @@ document.documentElement.dataset.dashboardReady = "true";
     renderEventFeed(run.events || []);
     renderMessageStreamPreview(run);
     renderSignals(run.signals || []);
-    renderAggregate(run.isolated_aggregate || {});
+    renderAggregate(run.backtest_aggregate || {});
     renderRecentRuns(state.recentRuns);
     if (state.modalOpen && state.selectedMessageId) {
       const runMessages = Array.isArray(run.messages) ? run.messages : [];
@@ -877,14 +856,13 @@ document.documentElement.dataset.dashboardReady = "true";
         nodes.panelModalBody.innerHTML = buildSignalDetailMarkup(signal);
       }
     } else if (state.panelModalOpen && state.activePanelModal === "aggregate") {
-      nodes.panelModalBody.innerHTML = buildAggregateMarkup(run.isolated_aggregate || {}, true);
+      nodes.panelModalBody.innerHTML = buildAggregateMarkup(run.backtest_aggregate || {}, true);
     }
   }
 
   function renderCurrentRunHeader(run) {
     nodes.activeRunHeadline.textContent = isActiveStatus(run.status) ? "Streaming" : run.current_phase_label;
-    const modeLabel = run.run_type === "isolated" ? "Isolated" : "Portfolio";
-    nodes.runTitle.textContent = `${run.channel_resolved} • ${run.interval} • ${modeLabel}`;
+    nodes.runTitle.textContent = `${run.channel_resolved} • ${run.interval} • Backtest`;
     const startMessageSuffix = run.start_message_id
       ? ` • from message ${run.start_message_id}`
       : "";
@@ -939,7 +917,7 @@ document.documentElement.dataset.dashboardReady = "true";
 
   function renderMetrics(run) {
     const cards = [
-      ["Run Type", run.run_type === "isolated" ? "Isolated" : "Portfolio"],
+      ["Run Type", "Backtest"],
       ["Messages", run.total_messages],
       ["Classified", run.classified_messages],
       ["Parsed Signals", run.parsed_signals],
@@ -949,9 +927,7 @@ document.documentElement.dataset.dashboardReady = "true";
       ["Trades Simulated", run.trades_simulated],
       ["Trades Filled", run.trades_filled],
       ["Initial Balance", run.initial_balance],
-      ...(run.run_type === "isolated"
-        ? [["Capital Per Signal", run.capital_per_signal || run.initial_balance]]
-        : []),
+      ["Capital Per Signal", run.capital_per_signal || run.initial_balance],
       ["Allocation Factor", run.risk_per_trade_pct],
       ["Open Positions", run.live_open_positions],
       ["Closed Trades", run.live_closed_trades],
@@ -1377,19 +1353,19 @@ document.documentElement.dataset.dashboardReady = "true";
   }
 
   function renderAggregate(aggregate) {
-    if (!nodes.isolatedAggregatePreview) {
+    if (!nodes.backtestAggregatePreview) {
       return;
     }
     if (!aggregate || !Object.keys(aggregate).length) {
-      nodes.isolatedAggregatePreview.textContent = "No isolated aggregate metrics yet.";
-      nodes.isolatedAggregatePreview.classList.add("empty-state-box");
+      nodes.backtestAggregatePreview.textContent = "No backtest aggregate metrics yet.";
+      nodes.backtestAggregatePreview.classList.add("empty-state-box");
       if (state.panelModalOpen && state.activePanelModal === "aggregate") {
         nodes.panelModalBody.innerHTML = buildAggregateMarkup({}, true);
       }
       return;
     }
-    nodes.isolatedAggregatePreview.classList.remove("empty-state-box");
-    nodes.isolatedAggregatePreview.innerHTML = `
+    nodes.backtestAggregatePreview.classList.remove("empty-state-box");
+    nodes.backtestAggregatePreview.innerHTML = `
       <div class="preview-stack signal-preview-stack">
         <strong>${escapeHtml(String(aggregate.total_signals || 0))} signals</strong>
         <span>PnL ${escapeHtml(String(aggregate.total_pnl || "0"))} • Win rate ${escapeHtml(formatPercentValue(aggregate.win_rate))}</span>
@@ -1403,7 +1379,7 @@ document.documentElement.dataset.dashboardReady = "true";
 
   function buildAggregateMarkup(aggregate, expanded) {
     if (!aggregate || !Object.keys(aggregate).length) {
-      return '<div class="empty-state-box">No isolated aggregate metrics yet.</div>';
+      return '<div class="empty-state-box">No backtest aggregate metrics yet.</div>';
     }
     const dailyRows = buildPeriodRows(aggregate.period_pnl && aggregate.period_pnl.daily);
     const weeklyRows = buildPeriodRows(aggregate.period_pnl && aggregate.period_pnl.weekly);
@@ -1469,7 +1445,7 @@ document.documentElement.dataset.dashboardReady = "true";
 
   function buildPeriodRows(rows) {
     if (!Array.isArray(rows) || !rows.length) {
-      return '<div class="empty-state-box">No closed isolated signals in this period.</div>';
+      return '<div class="empty-state-box">No closed backtest signals in this period.</div>';
     }
     return `
       <div class="signal-list panel-modal-list">
@@ -1994,7 +1970,7 @@ document.documentElement.dataset.dashboardReady = "true";
 
   async function resumeRun(runId) {
     if (!runId) return;
-    setFormStatus("Resuming from the saved isolated checkpoint...", "working");
+    setFormStatus("Resuming from the saved backtest checkpoint...", "working");
     try {
       const response = await fetch(withAuthPath(`/api/backtests/runs/${encodeURIComponent(runId)}/resume`), { method: "POST" });
       const data = await response.json();
@@ -2018,7 +1994,7 @@ document.documentElement.dataset.dashboardReady = "true";
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}${withAuthPath(`/ws/backtests?run_type=${encodeURIComponent(state.runType)}`)}`;
+    const wsUrl = `${protocol}//${window.location.host}${withAuthPath("/ws/backtests")}`;
     try {
       state.ws = new WebSocket(wsUrl);
     } catch (_error) {
@@ -2112,7 +2088,7 @@ document.documentElement.dataset.dashboardReady = "true";
     try {
       const response = await fetch(
         withAuthPath(
-          `/api/backtests/runs/latest?run_type=${encodeURIComponent(state.runType)}&prefer_active=true`,
+          "/api/backtests/runs/latest?prefer_active=true",
         ),
       );
       if (!response.ok) {
@@ -2141,8 +2117,7 @@ document.documentElement.dataset.dashboardReady = "true";
     if (!run || typeof run !== "object") {
       return false;
     }
-    const runType = run.run_type || "portfolio";
-    return runType === state.runType;
+    return run.run_type === "backtest";
   }
 
   function rememberActiveRun(runId, options = {}) {
@@ -2394,7 +2369,7 @@ document.documentElement.dataset.dashboardReady = "true";
                 <strong>${escapeHtml(run.channel_input || run.channel_resolved)}</strong>
                 <span>${escapeHtml(run.current_phase_label || run.current_phase || run.status)}</span>
                 <small>${escapeHtml(run.strategy_key || "default_risk_managed")}</small>
-                <small>${escapeHtml(run.run_type === "isolated" ? "isolated" : "portfolio")}</small>
+                <small>backtest</small>
                 <small>${formatDate(run.created_at)}</small>
               </button>
               <div class="recent-run-actions">

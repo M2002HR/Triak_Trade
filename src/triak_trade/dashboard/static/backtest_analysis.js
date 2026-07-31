@@ -1,5 +1,5 @@
 (() => {
-  const form = document.getElementById("isolated-analysis-filters");
+  const form = document.getElementById("backtest-analysis-filters");
   if (!form) {
     return;
   }
@@ -83,7 +83,7 @@
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
     }
     try {
-      const response = await fetch(withAuthPath(`/api/backtests/isolated/analysis?${params}`));
+      const response = await fetch(withAuthPath(`/api/backtests/analysis?${params}`));
       const payload = await response.json();
       if (sequence !== state.requestSequence) {
         return;
@@ -195,7 +195,7 @@
     const status = data.status_counts || {};
     const sources = data.data_sources || {};
     const activeLink = overview.latest_active_run_id
-      ? `<a href="/isolated-backtests?run_id=${encodeURIComponent(overview.latest_active_run_id)}">Resume monitor</a>`
+      ? `<a href="/backtests?run_id=${encodeURIComponent(overview.latest_active_run_id)}">Resume monitor</a>`
       : "No active worker";
     nodes.quality.innerHTML = `
       <article class="analysis-quality-item ${Number(status.failed || 0) ? "warning" : "success"}">
@@ -531,9 +531,9 @@
   function runReference(row, compact = false) {
     const label = escapeHtml(shortId(row.run_id));
     if (row.source === "report") {
-      return `<a href="/reports">${compact ? label : `<strong>${label}</strong>`}</a>${compact ? "" : "<small>CLI report</small>"}`;
+      return `<span>${compact ? label : `<strong>${label}</strong>`}</span>${compact ? "" : "<small>Saved report</small>"}`;
     }
-    const link = `/isolated-backtests?run_id=${encodeURIComponent(row.run_id)}`;
+    const link = `/backtests?run_id=${encodeURIComponent(row.run_id)}`;
     return `<a href="${link}">${compact ? label : `<strong>${label}</strong>`}</a>${compact ? "" : "<small>Dashboard run</small>"}`;
   }
 
