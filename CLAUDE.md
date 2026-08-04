@@ -1,14 +1,15 @@
-# AGENTS: Triak_Trade
+# CLAUDE: Triak_Trade
 
-> **This file and `CLAUDE.md` MUST stay synchronized.**
+> **This file and `AGENTS.md` MUST stay synchronized.**
 > Both files describe the same project rules for any AI agent working on this repository
 > (Claude Code, Codex, or any other agent). Whenever a rule is added, changed, or removed
 > in one file, the exact same change MUST be applied to the other file in the same task.
 > A rule that exists in only one of the two files is a bug. Before finishing any task that
-> touches project rules, diff the "Rules" sections of `AGENTS.md` and `CLAUDE.md` and
+> touches project rules, diff the "Rules" sections of `CLAUDE.md` and `AGENTS.md` and
 > confirm they match.
 
 ## Purpose
+
 Triak_Trade is a modular signal intelligence and trading platform.
 
 ## Reporting To Telegram (Standing Instruction)
