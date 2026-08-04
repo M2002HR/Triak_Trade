@@ -107,9 +107,10 @@ class Settings(BaseSettings):
     DASHBOARD_STATUS_FILE: str = "runtime/dashboard/status.json"
     DASHBOARD_LOG_FILE: str = "runtime/dashboard/dashboard.log"
     DASHBOARD_FILE_LOG_ENABLED: bool = True
-    DASHBOARD_LOG_LEVEL: str = "DEBUG"
+    DASHBOARD_LOG_LEVEL: str = "INFO"
     DASHBOARD_LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
     DASHBOARD_LOG_BACKUP_COUNT: int = Field(default=5, ge=0)
+    DASHBOARD_LOG_RETENTION_DAYS: int = Field(default=7, ge=3)
     DASHBOARD_AUTO_RELOAD: bool = False
     ROOT_ENV_FILE: str = ".env.local"
     AUTO_MODE_ENABLED: bool = False
@@ -360,6 +361,8 @@ class Settings(BaseSettings):
     LIVE_TRADING_CLOSE_RECONCILE_ATTEMPTS: int = 3
     LIVE_TRADING_PROTECTION_SYNC_RETRY_ATTEMPTS: int = 3
     LIVE_TRADING_PROTECTION_SYNC_RETRY_DELAY_SECONDS: float = 1.0
+    LIVE_TRADING_PROTECTION_CIRCUIT_BASE_SECONDS: int = 60
+    LIVE_TRADING_PROTECTION_CIRCUIT_MAX_SECONDS: int = 1800
     LIVE_TRADING_EXCHANGE_POSITION_MISS_CONFIRMATIONS: int = 2
     LIVE_TRADING_EXCHANGE_POSITION_MISS_GRACE_SECONDS: int = 15
     LIVE_TRADING_DEFAULT_CHANNELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -368,6 +371,7 @@ class Settings(BaseSettings):
     LIVE_TRADING_FAIL_CLOSED_ON_LEVERAGE_SYNC_ERROR: bool = True
     LIVE_TRADING_FAIL_CLOSED_ON_PROTECTION_SYNC_ERROR: bool = True
     LIVE_TRADING_AUTO_RESUME_SESSIONS: bool = True
+    LIVE_TRADING_ENGINE_RECOVERY_RETRY_SECONDS: int = Field(default=30, ge=1)
     LIVE_TRADING_DEFAULT_STRATEGY_KEY: str = "tp_trailing_risk_managed"
     TOOBIT_DEMO_PRIVATE_SYMBOL_MODE: Literal["auto", "tbv_only", "live_only"] = "tbv_only"
 
