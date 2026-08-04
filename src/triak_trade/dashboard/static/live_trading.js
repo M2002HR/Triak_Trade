@@ -515,7 +515,7 @@
         </div>
         <div class="session-card-ribbon">
           <span class="mini-badge">${esc(session.strategy_key)}</span>
-          <span class="mini-badge">Risk ${esc(session.risk_per_trade_pct)}%</span>
+          <span class="mini-badge">Allocation ${esc(session.risk_per_trade_pct)}%</span>
           <span class="mini-badge">W/L ${session.wins || 0}/${session.losses || 0}</span>
         </div>
         <div class="session-card-grid session-card-grid-compact">
@@ -638,7 +638,7 @@
       <div class="metric"><span>Balance</span><strong>${balance}</strong></div>
       <div class="metric"><span>Strategy</span><strong>${esc(session.strategy_key || "—")}</strong></div>
       <div class="metric"><span>Last Error</span><strong>${esc(session.last_error || "—")}</strong></div>
-      <div class="metric"><span>Risk / Trade</span><strong>${esc(session.risk_per_trade_pct || "0")}%</strong></div>
+      <div class="metric"><span>Allocation Factor</span><strong>${esc(session.risk_per_trade_pct || "0")}%</strong></div>
       <div class="metric"><span>Open Positions</span><strong>${(snapshot.open_trades || detail.open_trades || []).length}</strong></div>
       <div class="metric"><span>Closed Trades</span><strong>${session.closed_trades_count || 0}</strong></div>
       <div class="metric"><span>Realized PnL</span><strong class="${realizedClass}">${fmtUSDT(session.total_realized_pnl || 0)}</strong></div>

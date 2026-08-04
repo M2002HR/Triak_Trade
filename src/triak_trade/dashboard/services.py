@@ -1047,6 +1047,8 @@ class DashboardService:
                 f"{Decimal(self.settings.DASHBOARD_LOG_MAX_BYTES) / mebibyte:.2f}"
             ),
             "backup_count": self.settings.DASHBOARD_LOG_BACKUP_COUNT,
+            "retention_days": self.settings.DASHBOARD_LOG_RETENTION_DAYS,
+            "rotation_strategy": "daily_utc",
             "file_logging_enabled": self.settings.DASHBOARD_FILE_LOG_ENABLED,
             "file_log_level": self.settings.DASHBOARD_LOG_LEVEL,
         }
