@@ -92,6 +92,7 @@ class DashboardLiveCoordinator:
         self._lock = threading.Lock()
         self._engines: dict[str, LiveTradingEngine] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._flag_unresolved_inactive_sessions()
         self._recover_incomplete_sessions()
 
     def _log_event(self, level: int, event: str, /, **fields: Any) -> None:
@@ -278,6 +279,20 @@ class DashboardLiveCoordinator:
             self._log_event(logging.INFO, "dashboard.live_stop_skipped", reason="no_target_session")
             return None
         engine: LiveTradingEngine | None = None
+        open_trades = self.store.list_open_trades(target_session_id)
+        if open_trades:
+            symbols = sorted({trade.symbol for trade in open_trades})
+            self._log_event(
+                logging.WARNING,
+                "dashboard.live_stop_blocked_open_trades",
+                session_id=target_session_id,
+                open_trade_count=len(open_trades),
+                symbols=symbols,
+            )
+            raise ValueError(
+                "Session stop is blocked while open or pending trades exist: "
+                + ", ".join(symbols)
+            )
         with self._lock:
             engine = self._engines.get(target_session_id)
         if engine is not None:
@@ -686,24 +701,84 @@ class DashboardLiveCoordinator:
 
     def _run_engine(self, session_id: str, engine: LiveTradingEngine) -> None:
         try:
-            self._log_event(
-                logging.INFO,
-                "dashboard.live_engine_thread_started",
-                session_id=session_id,
-            )
-            asyncio.run(engine.start())
-        except Exception as exc:
-            session = self.store.load_session(session_id) or engine.session
-            session.mark_stopped(error=f"engine crashed: {type(exc).__name__}: {exc}")
-            self.store.save_session(session)
-            self._notify_session(session)
-            self._log_event(
-                logging.ERROR,
-                "dashboard.live_engine_thread_failed",
-                session_id=session_id,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
+            while True:
+                self._log_event(
+                    logging.INFO,
+                    "dashboard.live_engine_thread_started",
+                    session_id=session_id,
+                )
+                failure: Exception | None = None
+                try:
+                    asyncio.run(engine.start())
+                except Exception as exc:
+                    failure = exc
+                    self._log_event(
+                        logging.ERROR,
+                        "dashboard.live_engine_thread_failed",
+                        session_id=session_id,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+
+                open_trades = self.store.list_open_trades(session_id)
+                if not open_trades:
+                    if failure is not None:
+                        session = self.store.load_session(session_id) or engine.session
+                        session.mark_stopped(
+                            error=f"engine crashed: {type(failure).__name__}: {failure}"
+                        )
+                        self.store.save_session(session)
+                        self._notify_session(session)
+                    break
+
+                session = self.store.load_session(session_id) or engine.session
+                issue = (
+                    "Engine worker exited with open trades; recovery supervision is active "
+                    "and new entries are blocked."
+                )
+                session.status = "starting"
+                session.stopped_at = None
+                session.health_status = "critical"
+                session.new_entries_blocked = True
+                session.last_error = issue
+                if issue not in session.health_issues:
+                    session.health_issues.append(issue)
+                if issue not in session.errors:
+                    session.errors.append(issue)
+                session.last_update_at = datetime.now(timezone.utc)
+                self.store.save_session(session)
+                self._notify_session(session)
+                retry_seconds = int(
+                    getattr(
+                        self.settings,
+                        "LIVE_TRADING_ENGINE_RECOVERY_RETRY_SECONDS",
+                        30,
+                    )
+                )
+                self._log_event(
+                    logging.CRITICAL,
+                    "dashboard.live_engine_recovery_scheduled",
+                    session_id=session_id,
+                    open_trade_count=len(open_trades),
+                    retry_seconds=retry_seconds,
+                )
+                threading.Event().wait(max(1, retry_seconds))
+                recovered_session, engine = build_engine_from_session(
+                    session=session,
+                    settings=self.settings,
+                    store=self.store,
+                    notifier=self.notifier,
+                    telegram_client=self.telegram_client,
+                    account_coordinator=self.account_coordinator,
+                )
+                with self._lock:
+                    self._engines[session_id] = engine
+                self._log_event(
+                    logging.WARNING,
+                    "dashboard.live_engine_recovery_started",
+                    session_id=recovered_session.session_id,
+                    open_trade_count=len(open_trades),
+                )
         finally:
             with self._lock:
                 self._engines.pop(session_id, None)
@@ -720,7 +795,8 @@ class DashboardLiveCoordinator:
 
     def _recover_incomplete_sessions(self) -> None:
         for session in self.store.list_active_sessions(limit=200):
-            if not self.settings.LIVE_TRADING_AUTO_RESUME_SESSIONS:
+            open_trades = self.store.list_open_trades(session.session_id)
+            if not self.settings.LIVE_TRADING_AUTO_RESUME_SESSIONS and not open_trades:
                 session.mark_stopped(
                     error="Dashboard restart interrupted the in-memory worker for this session."
                 )
@@ -731,6 +807,19 @@ class DashboardLiveCoordinator:
                     session_id=session.session_id,
                 )
                 continue
+            if not self.settings.LIVE_TRADING_AUTO_RESUME_SESSIONS:
+                issue = (
+                    "Open trades require recovery supervision after dashboard restart; "
+                    "new entries are blocked."
+                )
+                session.new_entries_blocked = True
+                session.health_status = "critical"
+                session.last_error = issue
+                if issue not in session.health_issues:
+                    session.health_issues.append(issue)
+                if issue not in session.errors:
+                    session.errors.append(issue)
+                self.store.save_session(session)
             recovered_session, engine = build_engine_from_session(
                 session=session,
                 settings=self.settings,
@@ -754,6 +843,50 @@ class DashboardLiveCoordinator:
                 "dashboard.live_session_recovered",
                 session_id=recovered_session.session_id,
                 channels=recovered_session.channels,
+            )
+
+    def _flag_unresolved_inactive_sessions(self) -> None:
+        issue_prefix = "Inactive session has "
+        for session in self.store.list_sessions(limit=500):
+            if session.status in {"running", "starting"}:
+                continue
+            open_trades = self.store.list_open_trades(session.session_id)
+            if not open_trades:
+                previous_issues = list(session.health_issues)
+                session.health_issues = [
+                    issue
+                    for issue in session.health_issues
+                    if not issue.startswith(issue_prefix)
+                ]
+                if session.health_issues != previous_issues:
+                    if not session.health_issues:
+                        session.health_status = "healthy"
+                        session.new_entries_blocked = False
+                    if session.last_error and session.last_error.startswith(issue_prefix):
+                        session.last_error = None
+                    session.last_update_at = datetime.now(timezone.utc)
+                    self.store.save_session(session)
+                continue
+            issue = (
+                f"{issue_prefix}{len(open_trades)} unresolved open or pending trade(s); "
+                "exchange fill reconciliation is required before reuse."
+            )
+            session.health_status = "critical"
+            session.new_entries_blocked = True
+            session.last_error = issue
+            if issue not in session.health_issues:
+                session.health_issues.append(issue)
+            if issue not in session.errors:
+                session.errors.append(issue)
+            session.last_update_at = datetime.now(timezone.utc)
+            self.store.save_session(session)
+            self._log_event(
+                logging.CRITICAL,
+                "dashboard.inactive_session_unresolved_trades_flagged",
+                session_id=session.session_id,
+                session_status=session.status,
+                open_trade_count=len(open_trades),
+                symbols=sorted({trade.symbol for trade in open_trades}),
             )
 
     def _notify_session(self, session: LiveSession) -> None:

@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from triak_trade.dashboard.live_runtime import DashboardLiveCoordinator
 from triak_trade.live_trading.models import (
     LiveMessageTrace,
@@ -211,6 +213,94 @@ class TestDashboardLiveCoordinatorState:
             coord = DashboardLiveCoordinator(settings=settings)
             result = coord.stop_session()
             assert result is None
+
+    def test_stop_session_is_blocked_while_trade_is_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+            session = LiveSession(
+                session_id="ls_open",
+                channels=["https://t.me/demo"],
+                trading_mode="demo",
+                initial_balance=Decimal("100"),
+                risk_per_trade_pct=Decimal("120"),
+                strategy_key="tp_trailing_risk_managed",
+                use_ai=False,
+                interval="1m",
+                status="running",
+            )
+            trade = LiveTrade(
+                trade_id="trade_open",
+                session_id=session.session_id,
+                signal_id="sig_open",
+                channel_id="@demo",
+                channel_input="https://t.me/demo",
+                channel_label="@demo",
+                symbol="BTCUSDT",
+                side="long",
+                entry_price=Decimal("100"),
+                quantity=Decimal("1"),
+                remaining_quantity=Decimal("1"),
+                stop_loss=Decimal("95"),
+                take_profits=[Decimal("110")],
+                balance_at_entry=Decimal("100"),
+                status="open",
+            )
+            coord.store.save_session(session)
+            coord.store.save_trade(trade)
+
+            with pytest.raises(ValueError, match="open or pending trades"):
+                coord.stop_session(session.session_id)
+
+            assert coord.store.load_session(session.session_id).status == "running"
+
+    def test_inactive_session_with_open_trade_is_flagged_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
+            initial = DashboardLiveCoordinator(settings=settings)
+            session = LiveSession(
+                session_id="ls_inactive_open",
+                channels=["https://t.me/demo"],
+                trading_mode="live",
+                initial_balance=Decimal("100"),
+                risk_per_trade_pct=Decimal("120"),
+                strategy_key="tp_trailing_risk_managed",
+                use_ai=False,
+                interval="1m",
+                status="stopped",
+            )
+            trade = LiveTrade(
+                trade_id="trade_inactive_open",
+                session_id=session.session_id,
+                signal_id="sig_inactive_open",
+                channel_id="@demo",
+                channel_input="https://t.me/demo",
+                channel_label="@demo",
+                symbol="SOLUSDT",
+                side="short",
+                entry_price=Decimal("70"),
+                quantity=Decimal("0.1"),
+                remaining_quantity=Decimal("0.1"),
+                stop_loss=Decimal("75"),
+                take_profits=[Decimal("65")],
+                balance_at_entry=Decimal("100"),
+                status="open",
+            )
+            initial.store.save_session(session)
+            initial.store.save_trade(trade)
+
+            recovered = DashboardLiveCoordinator(settings=settings)
+
+            flagged = recovered.store.load_session(session.session_id)
+            assert flagged is not None
+            assert flagged.status == "stopped"
+            assert flagged.health_status == "critical"
+            assert flagged.new_entries_blocked is True
+            assert "unresolved open or pending" in (flagged.last_error or "")
 
     def test_save_channel_emits_structured_log(self, caplog) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -657,4 +747,66 @@ class TestDashboardLiveCoordinatorState:
                 recovered = DashboardLiveCoordinator(settings=settings)
 
             assert "ls_resume" in recovered._engines
+            fake_thread.start.assert_called_once()
+
+    def test_recover_incomplete_session_with_open_trade_even_when_auto_resume_disabled(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
+            settings.LIVE_TRADING_AUTO_RESUME_SESSIONS = False
+            initial = DashboardLiveCoordinator(settings=settings)
+            session = LiveSession(
+                session_id="ls_supervise",
+                channels=["https://t.me/resume"],
+                channel_labels=["@resume"],
+                trading_mode="demo",
+                initial_balance=Decimal("100"),
+                risk_per_trade_pct=Decimal("120"),
+                strategy_key="tp_trailing_risk_managed",
+                use_ai=False,
+                interval="1m",
+                status="running",
+            )
+            initial.store.save_session(session)
+            initial.store.save_trade(
+                LiveTrade(
+                    trade_id="trade_supervise",
+                    session_id=session.session_id,
+                    signal_id="sig_supervise",
+                    channel_id="@resume",
+                    channel_input="https://t.me/resume",
+                    channel_label="@resume",
+                    symbol="BTCUSDT",
+                    side="long",
+                    entry_price=Decimal("100"),
+                    quantity=Decimal("1"),
+                    remaining_quantity=Decimal("1"),
+                    stop_loss=Decimal("95"),
+                    take_profits=[Decimal("110")],
+                    balance_at_entry=Decimal("100"),
+                    status="open",
+                )
+            )
+            fake_engine = MagicMock()
+            fake_thread = MagicMock()
+            with (
+                patch(
+                    "triak_trade.dashboard.live_runtime.build_engine_from_session",
+                    return_value=(session, fake_engine),
+                ),
+                patch(
+                    "triak_trade.dashboard.live_runtime.threading.Thread",
+                    return_value=fake_thread,
+                ),
+            ):
+                recovered = DashboardLiveCoordinator(settings=settings)
+
+            recovered_session = recovered.store.load_session(session.session_id)
+            assert recovered_session is not None
+            assert recovered_session.new_entries_blocked is True
+            assert recovered_session.health_status == "critical"
+            assert session.session_id in recovered._engines
             fake_thread.start.assert_called_once()
