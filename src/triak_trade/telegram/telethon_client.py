@@ -183,7 +183,7 @@ class TelethonTelegramClient:
     ) -> list[RawTelegramMessage]:
         client = await self._ensure_client()
         self._log_event(
-            logging.INFO,
+            logging.DEBUG,
             "telegram.history_fetch_started",
             channel=channel,
             start=start.isoformat() if start is not None else None,
@@ -214,7 +214,7 @@ class TelethonTelegramClient:
         if limit is not None:
             result = result[:limit]
         self._log_event(
-            logging.INFO,
+            logging.DEBUG,
             "telegram.history_fetch_completed",
             channel=channel,
             message_count=len(result),
