@@ -1,6 +1,6 @@
 # 05 - Scoring And Reports
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 ## Metrics
 
@@ -85,3 +85,9 @@ That logic is intentionally separate from AI output so the system can distrust a
 ## Current Limit
 
 Drawdown and equity are still realized-trade based. They do not model intra-trade unrealized equity swings.
+
+Backtest reports and live logical-trade cards currently exclude futures funding. Live
+funding is posted by Toobit as a separate `FUNDING_SETTLEMENT` balance flow and may be
+material relative to leveraged margin. Account-level net performance must therefore
+reconcile fill PnL, trading commissions, and funding flows rather than treating the
+logical trade's `fees` field as an all-in cost.

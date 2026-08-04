@@ -1,6 +1,6 @@
 # 03 - Simulator Internals
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 `BacktestSimulator` is the deterministic trade-simulation core. It accepts normalized `BacktestEvent` inputs plus candle data and returns simulated trades, balance outcomes, and optionally snapshots.
 
@@ -80,6 +80,8 @@ This keeps reporting complete even when a signal never reaches a hard terminal c
 
 - The simulator still processes the entry candle itself for post-entry TP/SL evaluation, which can create same-candle exits.
 - `RANGE` midpoint fills remain an approximation rather than a true path-aware fill model.
-- The model does not yet include slippage or funding.
+- The model does not yet include slippage or funding. This matches the current live
+  logical-trade report boundary, which also excludes account-ledger funding attribution,
+  but it does not mean funding has no real balance impact.
 - Account-wide netting, duplicate consensus, shared margin, and exchange order ownership
   remain live-only behaviors.

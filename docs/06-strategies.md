@@ -1,6 +1,6 @@
 # 06 - Trade Strategies
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 The strategy layer is intentionally stateless so the same trade-management logic is
 reused by backtesting and live/demo execution.
@@ -62,3 +62,11 @@ This separation is one of the cleaner parts of the architecture:
 Live exchange execution adds another invariant around the strategy output: a filled
 position is not accepted as healthy until its normalized stop and every feasible target
 order are verified. Failed setup or repair triggers a fail-closed flatten attempt.
+Stop replacement keeps the previously verified stop until the new submission succeeds;
+failed repair plus failed flattening opens a bounded retry circuit and blocks entries.
+For range entries, strategy protection starts after the first confirmed leg fill and is
+resized after later legs fill. Later fills preserve `targets_hit` and the existing
+trailing stop instead of restarting the strategy. TP1 after a midpoint fill retires the
+last 25% entry order; when only the first 25% entry has filled, both later entry orders
+remain through TP1 and are retired at TP2. A later fill may tighten an existing stop but
+cannot move it backward to a less protective level.

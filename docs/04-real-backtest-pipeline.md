@@ -1,6 +1,6 @@
 # 04 - Backtest Pipeline
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 `BacktestRunner` is the single guarded path that turns Telegram history into per-signal
 simulated trading results and stored reports.

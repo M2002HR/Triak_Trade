@@ -1,6 +1,6 @@
 # 02 - Backtesting Architecture
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 ## Public Execution Path
 

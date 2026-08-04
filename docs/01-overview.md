@@ -1,6 +1,6 @@
 # 01 - Project Overview
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 ## Purpose
 
@@ -54,6 +54,9 @@ The intended parsing/classification end-state is AI-driven through Ajil Unified 
 - Dashboard live/demo session monitoring
 - One saved-channel library shared by Backtest and Live Trade
 - Quantity-scoped live stop/target ownership with repair-or-flatten enforcement
+- Owned-fill recovery, asset-normalized position reconciliation, and duplicate-fill protection
+- Critical health state, entry blocking, protection backoff, and worker recovery supervision
+- Daily dashboard log rotation with at least three days of retained operational history
 - Processing-audit formatting and guarded log-channel delivery
 - Verification reports with redacted summaries
 
@@ -78,4 +81,5 @@ These come from `AGENTS.md` and shape the implementation:
 - The repository already contains dashboard and live/demo trading code, not just backtesting.
 - The CLI surface is broader than the original README used to imply, but it no longer includes an admin-bot command set.
 - Backtesting is available, but its readiness gate is intentionally strict and still somewhat test-flag-shaped.
-- Live exchange state treats a single missing position snapshot as provisional; closure requires repeated confirmation across a grace window.
+- Live exchange state treats a single missing position snapshot as provisional. Even after confirmation, a local close requires complete owned close-fill evidence; otherwise the trade remains critical and unresolved.
+- Live logical-trade PnL does not yet include account-level futures funding flows. The exchange balance ledger remains authoritative for funding-paid/received reconciliation.
