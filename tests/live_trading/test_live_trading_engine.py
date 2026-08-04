@@ -21,6 +21,7 @@ from triak_trade.live_trading.account_coordinator import AccountExecutionCoordin
 from triak_trade.live_trading.engine import LiveTradingEngine
 from triak_trade.live_trading.models import (
     LiveAccountInfo,
+    LiveEntryOrderPlan,
     LiveMessageTrace,
     LiveSession,
     LiveSignalSnapshot,
@@ -772,6 +773,39 @@ async def test_start_records_startup_backlog_messages_in_stream_without_trading(
 
 
 @pytest.mark.asyncio
+async def test_recovery_only_start_disables_telegram_and_entry_workers(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine.session.recovery_only = True
+    engine._open_trades["sig_test"] = _trade(engine.session.session_id)
+    engine._setup_components = MagicMock()  # type: ignore[method-assign]
+    engine._restore_runtime_state = MagicMock()  # type: ignore[method-assign]
+    engine._refresh_account = AsyncMock()  # type: ignore[method-assign]
+    engine._bootstrap_channel_cursors = AsyncMock()  # type: ignore[method-assign]
+    engine._poll_messages_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._price_refresh_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._account_refresh_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._pending_entry_monitor_loop = AsyncMock()  # type: ignore[method-assign]
+    engine._consolidation_tick_loop = AsyncMock()  # type: ignore[method-assign]
+    recovery_started = asyncio.Event()
+
+    async def _blocking_recovery_loop() -> None:
+        recovery_started.set()
+        await asyncio.sleep(3600)
+
+    engine._recovery_only_monitor_loop = _blocking_recovery_loop  # type: ignore[method-assign]
+
+    task = asyncio.create_task(engine.start())
+    await recovery_started.wait()
+    engine.stop()
+    await task
+
+    engine._bootstrap_channel_cursors.assert_not_awaited()
+    engine._poll_messages_loop.assert_not_awaited()
+    engine._pending_entry_monitor_loop.assert_not_awaited()
+    engine._consolidation_tick_loop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_prepare_message_for_classification_downloads_caption_media(
     tmp_path: Path,
 ) -> None:
@@ -1313,6 +1347,481 @@ async def test_real_limit_entry_is_submitted_pending_without_market_fill_wait(
     engine._ensure_trade_protection_after_open.assert_not_awaited()
 
 
+def test_range_entry_plan_splits_exact_risk_quantity_25_50_25(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_type = EntryType.RANGE.value
+    trade.requested_entry_low = Decimal("90")
+    trade.requested_entry_high = Decimal("110")
+    trade.quantity = Decimal("100")
+    spec = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        contract_min_qty=Decimal("1"),
+        contract_step_size=Decimal("1"),
+    )
+
+    plan = engine._build_range_entry_order_plan(trade=trade, spec=spec)
+
+    assert [leg.label for leg in plan] == [
+        "range_start",
+        "range_midpoint",
+        "range_end",
+    ]
+    assert [leg.price for leg in plan] == [Decimal("90"), Decimal("100"), Decimal("110")]
+    assert [leg.quantity for leg in plan] == [Decimal("25"), Decimal("50"), Decimal("25")]
+    assert sum((leg.quantity for leg in plan), Decimal("0")) == trade.quantity
+
+
+def test_range_entry_plan_falls_back_when_three_orders_cannot_meet_minimum(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_type = EntryType.RANGE.value
+    trade.requested_entry_low = Decimal("90")
+    trade.requested_entry_high = Decimal("110")
+    trade.quantity = Decimal("3")
+    spec = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        contract_min_qty=Decimal("1"),
+        contract_step_size=Decimal("1"),
+    )
+
+    assert engine._build_range_entry_order_plan(trade=trade, spec=spec) == []
+
+
+def test_range_entry_target_policy_thresholds_are_exact(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=label,
+            price=price,
+            quantity=quantity,
+            fraction=fraction,
+            order_id=f"range_{index}",
+            status="FILLED" if index == 0 else "NEW",
+            executed_quantity=Decimal("25") if index == 0 else Decimal("0"),
+        )
+        for index, (label, price, quantity, fraction) in enumerate(
+            (
+                ("range_start", Decimal("90"), Decimal("25"), Decimal("0.25")),
+                ("range_midpoint", Decimal("100"), Decimal("50"), Decimal("0.50")),
+                ("range_end", Decimal("110"), Decimal("25"), Decimal("0.25")),
+            )
+        )
+    ]
+
+    assert engine._range_entry_target_cancel_leg_indexes(trade, target_hits=1) == set()
+    assert engine._range_entry_target_cancel_leg_indexes(trade, target_hits=2) == {1, 2}
+
+    trade.entry_order_plan[1].status = "FILLED"
+    trade.entry_order_plan[1].executed_quantity = Decimal("50")
+    assert engine._range_entry_target_cancel_leg_indexes(trade, target_hits=1) == {2}
+
+
+@pytest.mark.asyncio
+async def test_range_entry_target_policy_cancels_only_required_future_legs(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=f"range_{index}",
+            price=Decimal("90") + Decimal(index * 10),
+            quantity=quantity,
+            fraction=fraction,
+            order_id=f"range_{index}",
+            status="FILLED" if index == 0 else "NEW",
+            executed_quantity=Decimal("25") if index == 0 else Decimal("0"),
+        )
+        for index, (quantity, fraction) in enumerate(
+            (
+                (Decimal("25"), Decimal("0.25")),
+                (Decimal("50"), Decimal("0.50")),
+                (Decimal("25"), Decimal("0.25")),
+            )
+        )
+    ]
+    engine._cancel_range_entry_orders = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._apply_range_entry_target_cancellation_policy(
+        trade=trade,
+        target_hits=1,
+        reason="first_leg_tp1",
+    )
+    engine._cancel_range_entry_orders.assert_not_awaited()
+
+    await engine._apply_range_entry_target_cancellation_policy(
+        trade=trade,
+        target_hits=2,
+        reason="first_leg_tp2",
+    )
+    engine._cancel_range_entry_orders.assert_awaited_once_with(
+        trade=trade,
+        reason="first_leg_tp2",
+        reconcile_fills=True,
+        ensure_protection=True,
+        leg_indexes={1, 2},
+    )
+
+    engine._cancel_range_entry_orders.reset_mock()
+    trade.entry_order_plan[1].status = "FILLED"
+    trade.entry_order_plan[1].executed_quantity = Decimal("50")
+    await engine._apply_range_entry_target_cancellation_policy(
+        trade=trade,
+        target_hits=1,
+        reason="midpoint_leg_tp1",
+    )
+    engine._cancel_range_entry_orders.assert_awaited_once_with(
+        trade=trade,
+        reason="midpoint_leg_tp1",
+        reconcile_fills=True,
+        ensure_protection=True,
+        leg_indexes={2},
+    )
+
+
+@pytest.mark.asyncio
+async def test_selective_range_cancellation_leaves_untargeted_leg_open(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=f"range_{index}",
+            price=Decimal("90") + Decimal(index * 10),
+            quantity=Decimal("25"),
+            fraction=Decimal("0.25"),
+            order_id=f"range_{index}",
+            status="FILLED" if index == 0 else "NEW",
+            executed_quantity=Decimal("25") if index == 0 else Decimal("0"),
+        )
+        for index in range(3)
+    ]
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_order.return_value = SimpleNamespace(
+        order_id="range_2",
+        status="CANCELED",
+        executed_qty=Decimal("0"),
+        avg_price=Decimal("0"),
+    )
+
+    await engine._cancel_range_entry_orders(
+        trade=trade,
+        reason="tp1_after_midpoint_fill",
+        reconcile_fills=False,
+        leg_indexes={2},
+    )
+
+    engine._futures_client.cancel_order.assert_awaited_once_with(
+        symbol=trade.symbol,
+        order_id="range_2",
+        use_demo_symbol=True,
+    )
+    assert trade.entry_order_plan[1].status == "NEW"
+    assert trade.entry_order_plan[2].status == "CANCELED"
+
+
+@pytest.mark.asyncio
+async def test_real_range_entry_submits_three_durable_limit_legs(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.RANGE.value
+    trade.entry_price = Decimal("100")
+    trade.requested_entry_low = Decimal("90")
+    trade.requested_entry_high = Decimal("110")
+    trade.quantity = Decimal("100")
+    trade.remaining_quantity = Decimal("100")
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        contract_min_qty=Decimal("1"),
+        contract_step_size=Decimal("1"),
+    )
+    engine._futures_client.open_long.side_effect = [
+        SimpleNamespace(order_id=f"range_{index}", client_order_id=None, status="NEW")
+        for index in range(3)
+    ]
+    engine._ensure_exchange_quantity_supports_market_entry = MagicMock()  # type: ignore[method-assign]
+    engine._ensure_exchange_quantity_supports_take_profit_ladder = MagicMock()  # type: ignore[method-assign]
+    engine._apply_exchange_risk_limit_to_open_trade = MagicMock()  # type: ignore[method-assign]
+    engine._ensure_supported_exchange_leverage = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._real_open_position(trade)
+
+    assert trade.status == "waiting_entry"
+    assert trade.entry_order_type == "LIMIT_LADDER"
+    assert trade.entry_order_status == "LADDER_PENDING"
+    assert trade.entry_order_id == "range_1"
+    assert trade.entry_planned_quantity == Decimal("100")
+    assert trade.remaining_quantity == Decimal("100")
+    assert engine._account_coordinator.bucket_logical_quantity(
+        trading_mode=engine.session.trading_mode,
+        symbol=trade.symbol,
+        side=trade.side,
+    ) == Decimal("100")
+
+    assert [leg.order_id for leg in trade.entry_order_plan] == [
+        "range_0",
+        "range_1",
+        "range_2",
+    ]
+    submitted_quantities = [
+        call.kwargs["quantity"] for call in engine._futures_client.open_long.await_args_list
+    ]
+    assert submitted_quantities == [
+        Decimal("25"),
+        Decimal("50"),
+        Decimal("25"),
+    ]
+    assert [call.kwargs["price"] for call in engine._futures_client.open_long.await_args_list] == [
+        Decimal("90"),
+        Decimal("100"),
+        Decimal("110"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_range_entry_reconciliation_accumulates_partial_leg_fills_once(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.RANGE.value
+    trade.quantity = Decimal("100")
+    trade.remaining_quantity = Decimal("0")
+    trade.entry_planned_quantity = Decimal("100")
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=label,
+            price=price,
+            quantity=quantity,
+            fraction=fraction,
+            order_id=f"range_{index}",
+            status="NEW",
+        )
+        for index, (label, price, quantity, fraction) in enumerate(
+            (
+                ("range_start", Decimal("90"), Decimal("25"), Decimal("0.25")),
+                ("range_midpoint", Decimal("100"), Decimal("50"), Decimal("0.50")),
+                ("range_end", Decimal("110"), Decimal("25"), Decimal("0.25")),
+            )
+        )
+    ]
+    spec = SimpleNamespace(contract_multiplier=Decimal("1"))
+    engine._futures_client = AsyncMock()
+    engine._pm.rebase_trade_protection_after_entry_fill = MagicMock(return_value=[])
+    engine._enforce_trade_protection_or_flatten = AsyncMock()  # type: ignore[method-assign]
+    first_snapshot = [
+        SimpleNamespace(
+            order_id="range_0",
+            status="FILLED",
+            executed_qty=Decimal("25"),
+            avg_price=Decimal("90"),
+        ),
+        SimpleNamespace(
+            order_id="range_1",
+            status="NEW",
+            executed_qty=Decimal("0"),
+            avg_price=Decimal("0"),
+        ),
+        SimpleNamespace(
+            order_id="range_2",
+            status="NEW",
+            executed_qty=Decimal("0"),
+            avg_price=Decimal("0"),
+        ),
+    ]
+
+    activated = await engine._reconcile_range_entry_orders(
+        trade=trade,
+        history_orders=first_snapshot,
+        open_orders=[],
+        symbol_user_trades=[],
+        spec=spec,
+    )
+    assert activated is True
+    assert trade.quantity == Decimal("25")
+    assert trade.remaining_quantity == Decimal("25")
+    assert trade.entry_price == Decimal("90")
+    assert engine._account_coordinator.bucket_logical_quantity(
+        trading_mode=engine.session.trading_mode,
+        symbol=trade.symbol,
+        side=trade.side,
+    ) == Decimal("100")
+
+    trade.targets_hit = 1
+    trade.stop_loss = Decimal("95")
+    engine._apply_range_entry_target_cancellation_policy = AsyncMock()  # type: ignore[method-assign]
+
+    second_snapshot = [
+        first_snapshot[0],
+        SimpleNamespace(
+            order_id="range_1",
+            status="FILLED",
+            executed_qty=Decimal("50"),
+            avg_price=Decimal("100"),
+        ),
+        first_snapshot[2],
+    ]
+    await engine._reconcile_range_entry_orders(
+        trade=trade,
+        history_orders=second_snapshot,
+        open_orders=[],
+        symbol_user_trades=[],
+        spec=spec,
+    )
+    await engine._reconcile_range_entry_orders(
+        trade=trade,
+        history_orders=second_snapshot,
+        open_orders=[],
+        symbol_user_trades=[],
+        spec=spec,
+    )
+
+    assert trade.quantity == Decimal("75")
+    assert trade.remaining_quantity == Decimal("75")
+    assert trade.entry_filled_quantity == Decimal("75")
+    assert trade.entry_price == Decimal("96.66666666666666666666666667")
+    assert trade.targets_hit == 1
+    assert trade.stop_loss == Decimal("95")
+    assert engine._account_coordinator.bucket_logical_quantity(
+        trading_mode=engine.session.trading_mode,
+        symbol=trade.symbol,
+        side=trade.side,
+    ) == Decimal("100")
+    assert engine._enforce_trade_protection_or_flatten.await_count == 2
+    engine._pm.rebase_trade_protection_after_entry_fill.assert_called_once()
+    engine._apply_range_entry_target_cancellation_policy.assert_awaited_once_with(
+        trade=trade,
+        target_hits=1,
+        reason="range_entry_fill_after_target_progress",
+    )
+
+
+@pytest.mark.asyncio
+async def test_range_entry_submission_timeout_keeps_known_fill_protected_and_blocks(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.RANGE.value
+    trade.entry_price = Decimal("100")
+    trade.requested_entry_low = Decimal("90")
+    trade.requested_entry_high = Decimal("110")
+    trade.quantity = Decimal("100")
+    engine._futures_client = AsyncMock()
+    spec = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        contract_min_qty=Decimal("1"),
+        contract_step_size=Decimal("1"),
+    )
+    engine._futures_client.get_contract_spec.return_value = spec
+    filled_order = SimpleNamespace(
+        order_id="range_0",
+        client_order_id="entry_start",
+        status="FILLED",
+        executed_qty=Decimal("25"),
+        avg_price=Decimal("90"),
+    )
+    engine._futures_client.open_long.side_effect = [
+        filled_order,
+        TimeoutError("submission response lost"),
+    ]
+    engine._futures_client.get_user_trades.return_value = []
+    engine._futures_client.get_order.side_effect = [
+        ToobitAPIError("unknown client order state"),
+        filled_order,
+    ]
+    engine._ensure_exchange_quantity_supports_market_entry = MagicMock()  # type: ignore[method-assign]
+    engine._ensure_exchange_quantity_supports_take_profit_ladder = MagicMock()  # type: ignore[method-assign]
+    engine._apply_exchange_risk_limit_to_open_trade = MagicMock()  # type: ignore[method-assign]
+    engine._ensure_supported_exchange_leverage = AsyncMock()  # type: ignore[method-assign]
+    engine._pm.rebase_trade_protection_after_entry_fill = MagicMock(return_value=[])
+    engine._enforce_trade_protection_or_flatten = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._real_open_position(trade)
+
+    assert trade.status == "open"
+    assert trade.quantity == Decimal("25")
+    assert trade.remaining_quantity == Decimal("25")
+    assert trade.entry_price == Decimal("90")
+    assert trade.entry_order_plan[1].client_order_id is not None
+    assert trade.entry_order_plan[1].order_id is None
+    assert engine.session.health_status == "critical"
+    assert engine.session.new_entries_blocked is True
+    assert engine._enforce_trade_protection_or_flatten.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_expired_unfilled_range_entry_cancels_all_legs(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "waiting_entry"
+    trade.entry_type = EntryType.RANGE.value
+    trade.quantity = Decimal("100")
+    trade.remaining_quantity = Decimal("0")
+    trade.entry_planned_quantity = Decimal("100")
+    trade.entry_order_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=f"range_{index}",
+            price=Decimal("90") + Decimal(index * 10),
+            quantity=quantity,
+            fraction=fraction,
+            order_id=f"range_{index}",
+            status="NEW",
+        )
+        for index, (quantity, fraction) in enumerate(
+            (
+                (Decimal("25"), Decimal("0.25")),
+                (Decimal("50"), Decimal("0.50")),
+                (Decimal("25"), Decimal("0.25")),
+            )
+        )
+    ]
+    engine._open_trades[trade.signal_id] = trade
+    engine.session.open_positions_count = 1
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1")
+    )
+    engine._futures_client.get_order.side_effect = [
+        SimpleNamespace(
+            order_id=f"range_{index}",
+            status="CANCELED",
+            executed_qty=Decimal("0"),
+            avg_price=Decimal("0"),
+        )
+        for index in range(3)
+    ]
+    engine._futures_client.get_user_trades.return_value = []
+
+    activated = await engine._reconcile_pending_entry(
+        trade=trade,
+        history_orders=[],
+        open_orders=[],
+        symbol_user_trades=[],
+    )
+
+    assert activated is False
+    assert trade.status == "expired"
+    assert trade.close_reason == "entry_order_expired"
+    assert trade.signal_id not in engine._open_trades
+    assert engine._futures_client.cancel_order.await_count == 3
+
+
 def test_trigger_entry_waits_with_stop_order_until_price_reached(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     trade = _trade(engine.session.session_id)
@@ -1441,7 +1950,7 @@ async def test_expired_pending_entry_is_cancelled_without_opening_position(
 
 
 @pytest.mark.asyncio
-async def test_terminal_partial_entry_missing_on_exchange_closes_without_recancel(
+async def test_terminal_partial_entry_without_fill_details_blocks_for_reconciliation(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -1472,10 +1981,13 @@ async def test_terminal_partial_entry_missing_on_exchange_closes_without_recance
     )
 
     assert activated is False
-    assert trade.status == "closed"
-    assert trade.close_reason == "partial_entry_position_missing_snapshot"
-    assert trade.signal_id not in engine._open_trades
-    assert state.status is SignalStatus.CLOSED
+    assert trade.status == "waiting_entry"
+    assert trade.close_reason is None
+    assert trade.signal_id in engine._open_trades
+    assert state.status is SignalStatus.ORDER_SUBMITTED
+    assert "partial_entry_fill_details_missing" in (trade.last_exchange_sync_error or "")
+    assert engine.session.health_status == "critical"
+    assert engine.session.new_entries_blocked is True
     engine._futures_client.cancel_order.assert_not_awaited()
 
 
@@ -2186,6 +2698,22 @@ async def test_sync_trade_protection_update_sl_only_preserves_existing_take_prof
     engine._futures_client.get_open_orders.side_effect = [
         [
             SimpleNamespace(
+                order_id="tp_live_1",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_1_existing",
+                stop_price=Decimal("0"),
+            ),
+            SimpleNamespace(
+                order_id="tp_live_2",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_2_existing",
+                stop_price=Decimal("0"),
+            ),
+        ],
+        [
+            SimpleNamespace(
                 order_id="sl_live_old",
                 order_type="STOP_LONG_LOSS",
                 side="SELL_CLOSE",
@@ -2226,12 +2754,7 @@ async def test_sync_trade_protection_update_sl_only_preserves_existing_take_prof
     )
 
     engine._futures_client.place_order.assert_not_awaited()
-    engine._futures_client.cancel_order.assert_awaited_once_with(
-        symbol="DOGEUSDT",
-        order_id="sl_live_old",
-        order_type="STOP",
-        use_demo_symbol=True,
-    )
+    engine._futures_client.cancel_order.assert_not_awaited()
     assert trade.tp_order_ids == ["tp_live_1", "tp_live_2"]
     assert trade.sl_order_id == "sl_live_new"
     engine._futures_client.set_trading_stop.assert_awaited_once_with(
@@ -2271,6 +2794,16 @@ async def test_sync_trade_protection_retries_without_quantity_on_position_limit(
         [Decimal("0.09")],
     )
     engine._futures_client.get_open_orders.side_effect = [
+        [
+            SimpleNamespace(
+                order_id="tp_existing",
+                order_type="LIMIT",
+                side="SELL_CLOSE",
+                client_order_id="triak_tp_trade_test_1_existing",
+                stop_price=Decimal("0"),
+                price=Decimal("0.09"),
+            ),
+        ],
         [],
         [
             SimpleNamespace(
@@ -2463,6 +2996,25 @@ async def test_reconcile_exchange_trade_protection_applies_tp_fill_and_rearms_ne
     trade.tp_order_ids = ["tp1"]
     trade.sl_order_id = "sl1"
     trade.take_profits = [Decimal("51000"), Decimal("52000")]
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=f"range_{index}",
+            price=Decimal("49000") + Decimal(index * 500),
+            quantity=quantity,
+            fraction=fraction,
+            order_id=f"entry_{index}",
+            status="FILLED" if index == 0 else "NEW",
+            executed_quantity=Decimal("0.0025") if index == 0 else Decimal("0"),
+        )
+        for index, (quantity, fraction) in enumerate(
+            (
+                (Decimal("0.0025"), Decimal("0.25")),
+                (Decimal("0.005"), Decimal("0.50")),
+                (Decimal("0.0025"), Decimal("0.25")),
+            )
+        )
+    ]
     engine._futures_client = AsyncMock()
     engine._futures_client.get_order.return_value = SimpleNamespace(
         order_id="tp1",
@@ -2486,6 +3038,7 @@ async def test_reconcile_exchange_trade_protection_applies_tp_fill_and_rearms_ne
         ),
     ]
     engine._sync_trade_protection = AsyncMock()  # type: ignore[method-assign]
+    engine._apply_range_entry_target_cancellation_policy = AsyncMock()  # type: ignore[method-assign]
 
     await engine._reconcile_exchange_trade_protection(
         trade=trade,
@@ -2510,6 +3063,50 @@ async def test_reconcile_exchange_trade_protection_applies_tp_fill_and_rearms_ne
     assert trade.tp_order_ids == []
     assert trade.sl_order_id == "sl1"
     engine._sync_trade_protection.assert_awaited_once_with(trade)
+    engine._apply_range_entry_target_cancellation_policy.assert_awaited_once_with(
+        trade=trade,
+        target_hits=1,
+        reason="exchange_tp1_fill",
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_fill_still_cancels_every_pending_range_leg(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=f"range_{index}",
+            price=Decimal("49000") + Decimal(index * 500),
+            quantity=Decimal("0.003"),
+            fraction=Decimal("0.25"),
+            order_id=f"entry_{index}",
+            status="NEW",
+        )
+        for index in range(3)
+    ]
+    engine._futures_client = AsyncMock()
+    engine._cancel_range_entry_orders = AsyncMock()  # type: ignore[method-assign]
+    stop_order = SimpleNamespace(
+        order_id="sl1",
+        executed_order_id="close_sl1",
+        order_type="STOP_LONG_LOSS",
+    )
+
+    with pytest.raises(ValueError, match="no userTrades"):
+        await engine._apply_exchange_protection_fill(
+            trade=trade,
+            protection_order=stop_order,
+            symbol_user_trades=[],
+        )
+
+    engine._cancel_range_entry_orders.assert_awaited_once_with(
+        trade=trade,
+        reason="exchange_stop_loss_fill",
+        reconcile_fills=True,
+        ensure_protection=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -2610,6 +3207,106 @@ async def test_reconcile_exchange_trade_protection_applies_multiple_tp_fills_bef
 
 
 @pytest.mark.asyncio
+async def test_protection_fills_do_not_double_reduce_snapshot_clamped_quantity(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "symbol": "BICOUSDT",
+            "side": "short",
+            "entry_price": Decimal("0.0166"),
+            "quantity": Decimal("1966"),
+            "remaining_quantity": Decimal("767"),
+            "pending_fill_audit_quantity": Decimal("1199"),
+            "stop_loss": Decimal("0.01777"),
+            "take_profits": [Decimal("0.01638"), Decimal("0.01630"), Decimal("0.01613")],
+            "tp_order_ids": ["tp1", "tp2", "tp3"],
+            "tp_order_plan": [
+                LiveTakeProfitOrderPlan(
+                    target_index=index,
+                    price=price,
+                    quantity=quantity,
+                    order_id=f"tp{index + 1}",
+                )
+                for index, (price, quantity) in enumerate(
+                    (
+                        (Decimal("0.01638"), Decimal("688")),
+                        (Decimal("0.01630"), Decimal("511")),
+                        (Decimal("0.01613"), Decimal("767")),
+                    )
+                )
+            ],
+        }
+    )
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_order.side_effect = [
+        SimpleNamespace(
+            order_id="tp1",
+            executed_order_id="tp1",
+            order_type="LIMIT",
+            status="ORDER_FILLED",
+        ),
+        SimpleNamespace(
+            order_id="tp2",
+            executed_order_id="tp2",
+            order_type="LIMIT",
+            status="ORDER_FILLED",
+        ),
+    ]
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1")
+    )
+    engine._strategy.get_target_hit_action.side_effect = [
+        SimpleNamespace(
+            close_fraction=Decimal("0.35"),
+            move_sl_to_entry=True,
+            new_stop_loss=None,
+        ),
+        SimpleNamespace(
+            close_fraction=Decimal("0.40"),
+            move_sl_to_entry=False,
+            new_stop_loss=Decimal("0.01638"),
+        ),
+    ]
+    engine._sync_trade_protection = AsyncMock()  # type: ignore[method-assign]
+
+    await engine._reconcile_exchange_trade_protection(
+        trade=trade,
+        open_regular_orders=[SimpleNamespace(order_id="tp3")],
+        open_protection_orders=[],
+        symbol_user_trades=[
+            SimpleNamespace(
+                trade_id="fill1",
+                order_id="tp1",
+                qty=Decimal("688"),
+                realized_pnl=Decimal("0.15136"),
+                commission=Decimal("0.00225388"),
+                price=Decimal("0.01638"),
+            ),
+            SimpleNamespace(
+                trade_id="fill2",
+                order_id="tp2",
+                qty=Decimal("511"),
+                realized_pnl=Decimal("0.1533"),
+                commission=Decimal("0.00166586"),
+                price=Decimal("0.01630"),
+            ),
+        ],
+    )
+
+    assert trade.status == "partial_close"
+    assert trade.remaining_quantity == Decimal("767")
+    assert trade.pending_fill_audit_quantity == Decimal("0")
+    assert trade.targets_hit == 2
+    assert trade.stop_loss == Decimal("0.01638")
+    assert trade.realized_pnl == Decimal("0.30466")
+    assert trade.fees == Decimal("0.00391974")
+    assert trade.tp_order_ids == ["tp3"]
+    engine._sync_trade_protection.assert_awaited_once_with(trade)
+
+
+@pytest.mark.asyncio
 async def test_missing_exchange_position_reconciles_stop_fill_and_real_pnl(
     tmp_path: Path,
 ) -> None:
@@ -2656,7 +3353,7 @@ async def test_missing_exchange_position_reconciles_stop_fill_and_real_pnl(
 
     assert reconciled is True
     assert trade.status == "closed"
-    assert trade.close_reason == "sl_hit"
+    assert trade.close_reason == "exchange_close_reconciled"
     assert trade.remaining_quantity == Decimal("0")
     assert trade.realized_pnl == Decimal("-2.44769")
     assert trade.fees == Decimal("0.100")
@@ -2740,7 +3437,7 @@ async def test_missing_exchange_position_reconciles_tp_then_stop_without_double_
     assert reconciled is True
     assert repeated is False
     assert trade.status == "closed"
-    assert trade.close_reason == "sl_hit"
+    assert trade.close_reason == "exchange_close_reconciled"
     assert trade.targets_hit == 1
     assert trade.realized_pnl == Decimal("-0.54638")
     assert trade.fees == Decimal("0.045")
@@ -2748,6 +3445,266 @@ async def test_missing_exchange_position_reconciles_tp_then_stop_without_double_
     assert len(trade.processed_exchange_fill_ids) == 2
     assert engine.session.total_realized_pnl == Decimal("-0.54638")
     assert engine.session.total_fees == Decimal("0.045")
+
+
+@pytest.mark.asyncio
+async def test_owned_duplicate_tp_fills_reconcile_while_position_still_exists(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "symbol": "SOLUSDT",
+            "quantity": Decimal("0.43"),
+            "remaining_quantity": Decimal("0.43"),
+            "take_profits": [Decimal("72.53"), Decimal("75")],
+        }
+    )
+    engine._open_trades[trade.signal_id] = trade
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        tick_size=Decimal("0.01"),
+    )
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    history = [
+        SimpleNamespace(
+            order_id="sol_tp_first",
+            client_order_id="triak_tp_trade_test_1_first",
+        ),
+        SimpleNamespace(
+            order_id="sol_tp_rearmed",
+            client_order_id="triak_tp_trade_test_1_rearmed",
+        ),
+    ]
+    fills = [
+        SimpleNamespace(
+            trade_id="sol_fill_first",
+            order_id="sol_tp_first",
+            time=now_ms,
+            side="SELL_CLOSE",
+            order_type="LIMIT",
+            qty=Decimal("0.15"),
+            price=Decimal("72.53"),
+            realized_pnl=Decimal("0.30"),
+            commission=Decimal("0.01"),
+        ),
+        SimpleNamespace(
+            trade_id="sol_fill_rearmed",
+            order_id="sol_tp_rearmed",
+            time=now_ms + 1,
+            side="SELL_CLOSE",
+            order_type="LIMIT",
+            qty=Decimal("0.15"),
+            price=Decimal("72.53"),
+            realized_pnl=Decimal("0.31"),
+            commission=Decimal("0.01"),
+        ),
+    ]
+
+    reconciled = await engine._reconcile_missing_exchange_position_fills(
+        trade=trade,
+        symbol_user_trades=fills,
+        history_orders=history,
+        require_owned_order=True,
+    )
+    repeated = await engine._reconcile_missing_exchange_position_fills(
+        trade=trade,
+        symbol_user_trades=fills,
+        history_orders=history,
+        require_owned_order=True,
+    )
+
+    assert reconciled is True
+    assert repeated is False
+    assert trade.status == "partial_close"
+    assert trade.remaining_quantity == Decimal("0.13")
+    assert trade.targets_hit == 1
+    assert trade.realized_pnl == Decimal("0.61")
+    assert trade.fees == Decimal("0.02")
+    assert len(trade.processed_exchange_fill_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_delayed_fills_do_not_reduce_quantity_twice_after_snapshot_clamp(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "symbol": "SOLUSDT",
+            "quantity": Decimal("0.43"),
+            "remaining_quantity": Decimal("0.43"),
+            "take_profits": [Decimal("72.53")],
+        }
+    )
+    engine._open_trades[trade.signal_id] = trade
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1"),
+        tick_size=Decimal("0.01"),
+    )
+    engine._strategy.get_target_hit_action.side_effect = [
+        SimpleNamespace(
+            close_fraction=Decimal("0.35"),
+            move_sl_to_entry=True,
+            new_stop_loss=None,
+        ),
+        SimpleNamespace(
+            close_fraction=Decimal("1"),
+            move_sl_to_entry=False,
+            new_stop_loss=Decimal("72.53"),
+        ),
+    ]
+    assert engine._reconcile_trade_quantity_to_exchange(
+        trade=trade,
+        exchange_quantity=Decimal("0.13"),
+    )
+    assert trade.pending_fill_audit_quantity == Decimal("0.30")
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    history = [
+        SimpleNamespace(
+            order_id=f"sol_tp_{index}",
+            client_order_id=f"triak_tp_trade_test_{index}_recovered",
+        )
+        for index in (1, 2)
+    ]
+    fills = [
+        SimpleNamespace(
+            trade_id=f"sol_delayed_{index}",
+            order_id=f"sol_tp_{index}",
+            time=now_ms + index,
+            side="SELL_CLOSE",
+            order_type="LIMIT",
+            qty=Decimal("0.15"),
+            price=Decimal("72.53"),
+            realized_pnl=Decimal("0.30"),
+            commission=Decimal("0.01"),
+        )
+        for index in (1, 2)
+    ]
+
+    reconciled = await engine._reconcile_missing_exchange_position_fills(
+        trade=trade,
+        symbol_user_trades=fills,
+        history_orders=history,
+        require_owned_order=True,
+    )
+
+    assert reconciled is True
+    assert trade.remaining_quantity == Decimal("0.13")
+    assert trade.pending_fill_audit_quantity == Decimal("0")
+    assert trade.realized_pnl == Decimal("0.60")
+    assert trade.fees == Decimal("0.02")
+    assert trade.targets_hit == 2
+    assert trade.stop_loss == Decimal("72.53")
+    assert engine.session.health_status == "healthy"
+    assert engine.session.new_entries_blocked is False
+    assert (
+        engine._account_coordinator.bucket_block_reason(trade, trading_mode="demo")
+        is None
+    )
+
+
+def test_position_snapshot_converts_contracts_to_asset_quantity(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    position = SimpleNamespace(
+        symbol_internal="SOLUSDT",
+        exchange_symbol="SOL-SWAP-USDT",
+        side="LONG",
+        position=Decimal("430"),
+        available=Decimal("130"),
+        avg_price=Decimal("70"),
+        mark_price=Decimal("71"),
+        leverage=10,
+        unrealized_pnl=Decimal("1"),
+        realized_pnl=Decimal("0"),
+        margin=Decimal("3"),
+        margin_type="CROSS",
+    )
+
+    snapshot = engine._position_snapshot(
+        position,
+        spec=SimpleNamespace(contract_multiplier=Decimal("0.001")),
+    )
+
+    assert snapshot.quantity == Decimal("0.430")
+    assert snapshot.available == Decimal("0.130")
+
+
+def test_protection_circuit_uses_exponential_backoff_and_blocks_entries(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+
+    engine._schedule_protection_retry(trade, RuntimeError("protection failed"))
+    first_retry = trade.protection_retry_at
+    engine._schedule_protection_retry(trade, RuntimeError("protection failed again"))
+
+    assert first_retry is not None
+    assert trade.protection_retry_at is not None
+    assert trade.protection_retry_at > first_retry
+    assert trade.consecutive_protection_failures == 2
+    assert engine._protection_retry_is_deferred(trade) is True
+    assert engine.session.health_status == "critical"
+    assert engine.session.new_entries_blocked is True
+    assert engine._account_coordinator.bucket_block_reason(trade, trading_mode="demo")
+
+
+def test_finalizing_trade_clears_trade_scoped_health_blocks(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    engine._open_trades[trade.signal_id] = trade
+    issues = [
+        f"protection unavailable for {trade.trade_id}: invalid quantity",
+        f"exchange quantity drift for {trade.trade_id} requires fill audit: pending=1",
+        f"exchange reconciliation required for {trade.trade_id}: missing fills",
+    ]
+    for issue in issues:
+        engine._account_coordinator.block_trade_bucket(
+            trade,
+            trading_mode=engine.session.trading_mode,
+            reason=issue,
+        )
+        engine._set_session_health_issue(issue, critical=True)
+    trade.status = "closed"
+    trade.remaining_quantity = Decimal("0")
+
+    engine._finalize_closed_trade(trade)
+
+    assert engine.session.health_issues == []
+    assert engine.session.health_status == "healthy"
+    assert engine.session.new_entries_blocked is False
+    assert (
+        engine._account_coordinator.bucket_block_reason(
+            trade,
+            trading_mode=engine.session.trading_mode,
+        )
+        is None
+    )
+
+
+def test_restore_prunes_stale_health_issue_for_terminal_trade(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    trade = _trade(engine.session.session_id)
+    trade.status = "closed"
+    trade.remaining_quantity = Decimal("0")
+    engine.store.save_trade(trade)
+    stale_issue = f"protection unavailable for {trade.trade_id}: invalid quantity"
+    active_issue = "recovery-only: reconcile pre-existing exposure"
+    engine.session.health_issues = [stale_issue, active_issue]
+    engine.session.health_status = "critical"
+    engine.session.new_entries_blocked = True
+    engine.session.last_error = stale_issue
+    engine.store.save_session(engine.session)
+
+    engine._prune_terminal_trade_health_issues()
+
+    assert engine.session.health_issues == [active_issue]
+    assert engine.session.health_status == "critical"
+    assert engine.session.new_entries_blocked is True
+    assert engine.session.last_error == active_issue
 
 
 @pytest.mark.asyncio
@@ -2896,16 +3853,31 @@ async def test_full_logical_close_does_not_flatten_other_same_side_leg(
             "balance_at_entry": Decimal("1000"),
         }
     )
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=2,
+            label="range_end",
+            price=Decimal("52000"),
+            quantity=Decimal("0.25"),
+            fraction=Decimal("0.25"),
+            order_id="pending_range_end",
+            status="NEW",
+        )
+    ]
+    trade.entry_filled_quantity = Decimal("1")
     other = trade.model_copy(
         update={
             "trade_id": "trade_other",
             "signal_id": "sig_other",
             "channel_id": "@other",
+            "entry_order_plan": [],
+            "entry_filled_quantity": Decimal("0"),
         }
     )
     coordinator.register_trade(trade, trading_mode="demo")
     coordinator.register_trade(other, trading_mode="demo")
     engine._futures_client = AsyncMock()
+    engine._cancel_range_entry_orders = AsyncMock()  # type: ignore[method-assign]
     engine._cancel_existing_trade_protection = AsyncMock()  # type: ignore[method-assign]
     engine._submit_exchange_close_order = AsyncMock(  # type: ignore[method-assign]
         return_value=(SimpleNamespace(order_id="close_owned"), Decimal("1"))
@@ -2952,6 +3924,12 @@ async def test_full_logical_close_does_not_flatten_other_same_side_leg(
     ) == Decimal("1")
     engine._fetch_trade_exchange_position_quantity.assert_not_awaited()
     engine._submit_exchange_close_order.assert_awaited_once()
+    engine._cancel_range_entry_orders.assert_awaited_once_with(
+        trade=trade,
+        reason="exit_started:owned_logical_close",
+        reconcile_fills=True,
+        ensure_protection=False,
+    )
 
 
 def test_exchange_take_profit_orders_builds_partial_ladder_from_strategy() -> None:
@@ -4060,7 +5038,7 @@ async def test_handle_followup_close_retries_exchange_residual_until_flat(
 
 
 @pytest.mark.asyncio
-async def test_process_message_treats_stale_related_open_as_new_signal(
+async def test_process_message_blocks_when_related_trade_requires_reconciliation(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -4097,14 +5075,14 @@ async def test_process_message_treats_stale_related_open_as_new_signal(
     trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
     traces = engine.store.list_message_traces(engine.session.session_id, limit=5)
 
-    assert new_signal is not None
-    assert new_signal.status == "pending_consolidation"
+    assert new_signal is None
     assert old_signal is not None
-    assert old_signal.status == "closed"
+    assert old_signal.status == "open"
     assert trade_reloaded is not None
-    assert trade_reloaded.status == "closed"
-    assert "sig_test" not in engine._open_trades
-    assert traces[0].final_status == "pending_consolidation"
+    assert trade_reloaded.status == "open"
+    assert "sig_test" in engine._open_trades
+    assert traces[0].final_status == "exchange_reconciliation_required"
+    assert engine.session.new_entries_blocked is True
 
 
 @pytest.mark.asyncio
@@ -4156,7 +5134,7 @@ async def test_pending_signal_update_sl_keeps_open_action_and_opens_after_consol
 
 
 @pytest.mark.asyncio
-async def test_handle_followup_closes_stale_exchange_trade_before_updating(
+async def test_handle_followup_blocks_stale_exchange_trade_before_updating(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -4187,14 +5165,14 @@ async def test_handle_followup_closes_stale_exchange_trade_before_updating(
     )
 
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
-    assert trace.final_status == "no_open_trade"
+    assert trace.final_status == "exchange_reconciliation_required"
     assert signal is not None
-    assert signal.status == "closed"
-    assert "sig_test" not in engine._open_trades
+    assert signal.status == "open"
+    assert "sig_test" in engine._open_trades
 
 
 @pytest.mark.asyncio
-async def test_sync_exchange_state_marks_trade_closed_when_exchange_position_is_missing(
+async def test_sync_exchange_state_blocks_trade_when_position_and_close_fills_are_missing(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -4217,10 +5195,12 @@ async def test_sync_exchange_state_marks_trade_closed_when_exchange_position_is_
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
     assert signal is not None
-    assert signal.status == "closed"
+    assert signal.status == "open"
     assert trade_reloaded is not None
-    assert trade_reloaded.status == "closed"
-    assert engine._open_trades == {}
+    assert trade_reloaded.status == "open"
+    assert "no complete owned close-fill" in (trade_reloaded.last_exchange_sync_error or "")
+    assert engine._open_trades == {"sig_test": trade}
+    assert engine.session.health_status == "critical"
 
 
 @pytest.mark.asyncio
@@ -4343,10 +5323,11 @@ async def test_ensure_trade_still_open_on_exchange_requires_confirmed_miss(
 
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     assert second_seen is False
-    assert trade.status == "closed"
+    assert trade.status == "open"
     assert signal is not None
-    assert signal.status == "closed"
-    assert "sig_test" not in engine._open_trades
+    assert signal.status == "open"
+    assert "sig_test" in engine._open_trades
+    assert engine.session.new_entries_blocked is True
 
 
 def test_finalize_closed_trade_clears_pending_exchange_position_missing_state(
