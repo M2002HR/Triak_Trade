@@ -1,6 +1,6 @@
 # 07 - Data And Configuration
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 ## Market Data Providers
 
@@ -92,22 +92,39 @@ Selected live/demo defaults:
 | `LIVE_TRADING_PENDING_ENTRY_TTL_SECONDS` | `86400` |
 | `LIVE_TRADING_PROTECTION_SYNC_RETRY_ATTEMPTS` | `3` |
 | `LIVE_TRADING_PROTECTION_SYNC_RETRY_DELAY_SECONDS` | `1.0` |
+| `LIVE_TRADING_PROTECTION_CIRCUIT_BASE_SECONDS` | `60` |
+| `LIVE_TRADING_PROTECTION_CIRCUIT_MAX_SECONDS` | `1800` |
 | `LIVE_TRADING_EXCHANGE_POSITION_MISS_CONFIRMATIONS` | `2` |
 | `LIVE_TRADING_EXCHANGE_POSITION_MISS_GRACE_SECONDS` | `15` |
 | `LIVE_TRADING_STOP_COOLDOWN_BASE_SECONDS` | `3600` |
 | `LIVE_TRADING_STOP_COOLDOWN_MAX_SECONDS` | `21600` |
 | `LIVE_TRADING_MAX_TRIGGER_SLIPPAGE_PCT` | `0.5` |
 | `LIVE_TRADING_REQUIRE_AI_CLASSIFIER` | `true` |
+| `LIVE_TRADING_AUTO_RESUME_SESSIONS` | `true` |
+| `LIVE_TRADING_ENGINE_RECOVERY_RETRY_SECONDS` | `30` |
 | `TOOBIT_DEMO_PRIVATE_SYMBOL_MODE` | `tbv_only` |
+
+`LIVE_TRADING_DEFAULT_RISK_PER_TRADE_PCT` is retained as the configuration/API
+name for compatibility, but its value is an allocation factor, not a direct
+loss percentage. Position sizing starts from `allocation_factor / leverage`,
+bounded by `LIVE_TRADING_MIN_ALLOCATION_PCT` and
+`LIVE_TRADING_MAX_ALLOCATION_PCT`. Explicit and synthetic stop-loss risk is
+then constrained separately by the configured stop-loss balance limits. With
+the default factor `120` and `10x` leverage, the starting margin allocation is
+`12%`, not `120%` of account balance.
 
 Selected dashboard logging defaults:
 
 | Key | Default |
 |-----|---------|
 | `DASHBOARD_FILE_LOG_ENABLED` | `true` |
-| `DASHBOARD_LOG_LEVEL` | `DEBUG` |
-| `DASHBOARD_LOG_MAX_BYTES` | `20971520` |
-| `DASHBOARD_LOG_BACKUP_COUNT` | `5` |
+| `DASHBOARD_LOG_LEVEL` | `INFO` |
+| `DASHBOARD_LOG_RETENTION_DAYS` | `7` (minimum `3`) |
+
+`DASHBOARD_LOG_MAX_BYTES` and `DASHBOARD_LOG_BACKUP_COUNT` remain accepted for
+configuration compatibility but no longer drive the active file handler. The current
+handler rotates at UTC midnight and deletes dated backups beyond
+`DASHBOARD_LOG_RETENTION_DAYS`.
 
 ## Runtime Rules
 
@@ -121,8 +138,11 @@ Selected dashboard logging defaults:
 - The Backtest and Live Trade tabs share
   `runtime/dashboard/state/saved_channels.json`. On first use, existing entries from
   the former live runtime channel file are merged into this shared library once.
-- Dashboard file logging rotates at the configured byte limit and keeps the configured
-  number of backups; the Logs tab reports both policy and current disk usage.
+- Dashboard file logging rotates at UTC midnight and keeps seven dated backups by
+  default. Polling heartbeats are DEBUG-only; order, fill, protection, PnL, health, and
+  failure events remain available at INFO or above.
+- Futures funding is not part of `LiveTrade.fees`. Toobit posts it separately through
+  `/api/v1/futures/balanceFlow` with flow type `32` (`FUNDING_SETTLEMENT`).
 
 ## Backtest Candle Budget
 
