@@ -1,6 +1,6 @@
 # Triak_Trade
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 Triak_Trade is a modular Telegram signal intelligence platform focused on safe parsing, AI-assisted classification, backtesting, demo/live session monitoring, and operator visibility.
 
@@ -198,12 +198,21 @@ Known behavior worth keeping in mind:
 - Live sessions remain blocked unless `LIVE_TRADING_LIVE_MODE_ENABLED=true`.
 - All dashboard sessions share one account execution coordinator. It serializes exchange mutations, nets opposite signals by default, deduplicates matching same-direction signals as consensus, and keeps distinct same-direction signals as separately owned logical legs in the aggregate exchange position.
 - Every exchange-executed logical leg must have an owned quantity-scoped stop and all feasible take-profit orders. Protection setup and repair fail closed by flattening the affected logical quantity when protection cannot be verified.
-- Exchange-position disappearance is confirmed across at least two snapshots and a 15-second grace window before a local trade is closed. A transient Toobit position-snapshot delay therefore cannot silently abandon a live position.
+- A live entry with distinct range endpoints splits the original risk-sized volume into 25% at the lower endpoint, 50% at the midpoint, and 25% at the upper endpoint. TP1 after a midpoint fill cancels the last leg; if only the first leg has filled, TP1 keeps both later orders and TP2 cancels them. Stop/manual exits still cancel all pending legs, and undersized positions fall back to one midpoint order without increasing volume.
+- Protection replacement preserves the existing stop until the replacement submission succeeds. If repair and emergency flattening both fail, an exponential-backoff circuit breaker blocks new entries instead of continuously mutating the exchange.
+- Exchange-position disappearance is confirmed across at least two snapshots and a 15-second grace window. Without complete owned close-fill evidence, the local trade remains unresolved, the session becomes critical, and new entries are blocked; the engine never invents a zero-PnL close.
+- Filled close orders are recovered from signed user-trade history before position snapshots are reconciled. Exchange contract counts are converted to asset quantities, and delayed fills cannot reduce logical quantity twice.
+- A session with open or pending trades cannot be manually stopped. Unexpected worker exits are retried under recovery supervision, and inactive sessions with unresolved trades are marked critical and blocked from reuse.
 - Full-position closes first release unowned Triak take-profit reservations from already-closed trades, then reconcile the remaining exchange quantity. Manual/non-Triak orders and protection owned by another active leg are left untouched.
+- `risk_per_trade_pct=120` is a legacy API name for an allocation factor. At `10x` leverage it starts from `12%` margin allocation before min/max allocation and stop-risk caps; it does not permit a 120% account loss.
+- Live trade PnL currently tracks exchange fills and trading commissions but does not attribute futures funding flows to individual logical trades. Funding remains a separate account-ledger item and must be included when reconciling net account performance.
+- Dashboard file logs rotate at UTC midnight and retain seven daily backups by default. High-frequency Telegram polling heartbeats are DEBUG-only; financial and failure events remain visible at INFO or above.
 - Run only one dashboard executor process per Toobit account; coordination is process-wide, not a distributed lock across multiple replicas.
 
 The full policy and recovery model is documented in
 [docs/09-account-execution-coordination.md](docs/09-account-execution-coordination.md).
+Operational state, recovery, logging, and funding boundaries are documented in
+[docs/10-live-trading-operations.md](docs/10-live-trading-operations.md).
 
 ## Ajil Gateway
 

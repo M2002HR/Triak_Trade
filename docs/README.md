@@ -1,6 +1,6 @@
 # Triak_Trade Documentation
 
-> Last reviewed against the running stack: 2026-07-31.
+> Last reviewed against the running stack: 2026-08-04.
 
 This directory contains repository-owned technical documentation for Triak_Trade, with extra depth around backtesting, reporting, and runtime controls.
 
@@ -21,6 +21,7 @@ Scope:
 | [07-data-and-config.md](07-data-and-config.md) | Market data, settings, and safety gates |
 | [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md) | Current risks, behavior gaps, and follow-up work |
 | [09-account-execution-coordination.md](09-account-execution-coordination.md) | Multi-channel account netting, ownership, protection, and recovery |
+| [10-live-trading-operations.md](10-live-trading-operations.md) | Live lifecycle, reconciliation, health, logs, PnL, and funding operations |
 
 ## Current Intent
 
@@ -29,6 +30,7 @@ Triak_Trade is a modular platform for:
 - Backtesting and report generation
 - Demo/live session monitoring through the dashboard
 - Safe operator observability and verification
+- Fail-closed live lifecycle and exchange-ledger reconciliation
 
 Key architectural rules reflected in the docs:
 - `Decimal` for financial logic
@@ -39,6 +41,6 @@ Key architectural rules reflected in the docs:
 
 ## Notes About Accuracy
 
-- These docs were updated against the current repository state on `2026-07-31`.
+- These docs were updated against the current repository and running stack on `2026-08-04`.
 - They intentionally prefer present behavior over aspirational behavior.
 - Known mismatches and open risks are tracked explicitly in [08-bugs-and-recommendations.md](08-bugs-and-recommendations.md).
