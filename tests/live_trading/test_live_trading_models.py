@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from triak_trade.live_trading.models import (
     LiveAccountInfo,
+    LiveEntryOrderPlan,
     LiveSession,
     LiveSessionConfig,
     LiveTrade,
@@ -78,6 +79,30 @@ class TestLiveTrade:
         t = self._make_trade()
         assert t.remaining_quantity == t.quantity
 
+    def test_range_entry_ledger_survives_serialization(self) -> None:
+        trade = self._make_trade()
+        trade.entry_order_plan = [
+            LiveEntryOrderPlan(
+                leg_index=0,
+                label="range_start",
+                price=Decimal("49000"),
+                quantity=Decimal("0.0025"),
+                fraction=Decimal("0.25"),
+                order_id="entry_start",
+                status="PARTIALLY_FILLED",
+                executed_quantity=Decimal("0.001"),
+                average_fill_price=Decimal("49010"),
+            )
+        ]
+        trade.entry_planned_quantity = Decimal("0.01")
+        trade.entry_filled_quantity = Decimal("0.001")
+
+        restored = LiveTrade.model_validate(trade.model_dump(mode="json"))
+
+        assert restored.entry_order_plan == trade.entry_order_plan
+        assert restored.entry_planned_quantity == Decimal("0.01")
+        assert restored.entry_filled_quantity == Decimal("0.001")
+
     def test_closed_trade_preserves_zero_remaining_quantity_on_reload(self) -> None:
         payload = self._make_trade().model_dump(mode="json")
         payload["status"] = "closed"
@@ -112,6 +137,48 @@ class TestLiveTrade:
         t.add_attribution(attr)
         assert len(t.message_history) == 1
         assert t.last_attribution() == attr
+
+    def test_add_attribution_merges_duplicate_telegram_message(self) -> None:
+        t = self._make_trade()
+        original = MessageAttribution(
+            message_id=200,
+            channel_id="chan1",
+            channel_label="@chan1",
+            message_preview="tp update",
+            message_date=_utc(),
+            action="update",
+            notes=["first"],
+        )
+        repeated = original.model_copy(
+            update={"action": "partial_close", "notes": ["first", "fill applied"]}
+        )
+
+        t.add_attribution(original)
+        t.add_attribution(repeated)
+        t.add_attribution(original)
+
+        assert len(t.message_history) == 1
+        assert t.message_history[0].action == "partial_close"
+        assert t.message_history[0].notes == ["first", "fill applied"]
+
+
+def test_live_session_recovery_only_defaults_false_and_round_trips() -> None:
+    session = LiveSession(
+        session_id="ls_recovery",
+        channels=["@channel"],
+        trading_mode="live",
+        initial_balance=Decimal("0"),
+        risk_per_trade_pct=Decimal("120"),
+        strategy_key="tp_trailing_risk_managed",
+        use_ai=True,
+        interval="1m",
+    )
+
+    assert session.recovery_only is False
+    recovered = LiveSession.model_validate(
+        {**session.model_dump(mode="json"), "recovery_only": True}
+    )
+    assert recovered.recovery_only is True
 
 
 class TestLiveSession:

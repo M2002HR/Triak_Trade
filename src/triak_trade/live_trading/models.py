@@ -69,7 +69,7 @@ class LiveExchangeOrderSnapshot(BaseModel):
 
 
 class LiveExchangePositionSnapshot(BaseModel):
-    """Compact exchange position view for session/trade syncing."""
+    """Compact exchange position view using asset quantities, not contract counts."""
 
     symbol: str
     exchange_symbol: str | None = None
@@ -102,6 +102,21 @@ class LiveTakeProfitOrderPlan(BaseModel):
     quantity: Decimal = Decimal("0")
     order_id: str | None = None
     client_order_id: str | None = None
+
+
+class LiveEntryOrderPlan(BaseModel):
+    """Durable metadata for one independently reconciled entry order."""
+
+    leg_index: int
+    label: str
+    price: Decimal
+    quantity: Decimal
+    fraction: Decimal
+    order_id: str | None = None
+    client_order_id: str | None = None
+    status: str = "PLANNED"
+    executed_quantity: Decimal = Decimal("0")
+    average_fill_price: Decimal = Decimal("0")
 
 
 class LiveTrade(BaseModel):
@@ -141,6 +156,9 @@ class LiveTrade(BaseModel):
     entry_submitted_at: datetime | None = None
     entry_filled_at: datetime | None = None
     entry_order_expires_at: datetime | None = None
+    entry_order_plan: list[LiveEntryOrderPlan] = Field(default_factory=list)
+    entry_planned_quantity: Decimal = Decimal("0")
+    entry_filled_quantity: Decimal = Decimal("0")
     sl_order_id: str | None = None
     sl_order_client_id: str | None = None
     sl_order_api_version: str | None = None
@@ -154,7 +172,10 @@ class LiveTrade(BaseModel):
     exchange_position_missing_since: datetime | None = None
     exchange_position_missing_confirmations: int = 0
     protection_sync_failures: int = 0
+    consecutive_protection_failures: int = 0
     last_protection_sync_error_at: datetime | None = None
+    protection_retry_at: datetime | None = None
+    pending_fill_audit_quantity: Decimal = Decimal("0")
     processed_exchange_fill_ids: list[str] = Field(default_factory=list)
     account_coordination_action: str | None = None
     account_coordination_notes: list[str] = Field(default_factory=list)
@@ -217,6 +238,21 @@ class LiveTrade(BaseModel):
         return self.status == "waiting_entry"
 
     def add_attribution(self, attribution: MessageAttribution) -> None:
+        if any(existing is attribution for existing in self.message_history):
+            self.updated_at = _utc_now()
+            return
+        if attribution.message_id > 0:
+            for existing in self.message_history:
+                if (
+                    existing.message_id == attribution.message_id
+                    and existing.channel_id == attribution.channel_id
+                ):
+                    existing.action = attribution.action
+                    for note in attribution.notes:
+                        if note not in existing.notes:
+                            existing.notes.append(note)
+                    self.updated_at = _utc_now()
+                    return
         self.message_history.append(attribution)
         self.updated_at = _utc_now()
 
@@ -289,6 +325,10 @@ class LiveSession(BaseModel):
     stopped_at: datetime | None = None
     last_error: str | None = None
     errors: list[str] = Field(default_factory=list)
+    health_status: str = "healthy"
+    health_issues: list[str] = Field(default_factory=list)
+    new_entries_blocked: bool = False
+    recovery_only: bool = False
 
     # Paper trading balance (demo mode)
     paper_balance: Decimal = Decimal("0")
