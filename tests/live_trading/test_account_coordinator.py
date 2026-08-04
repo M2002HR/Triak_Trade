@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,7 +16,7 @@ from triak_trade.live_trading.account_coordinator import (
     AccountPositionPolicy,
     run_account_coordination_dry_run,
 )
-from triak_trade.live_trading.models import LiveTrade
+from triak_trade.live_trading.models import LiveEntryOrderPlan, LiveTrade
 
 
 def _trade(
@@ -233,6 +235,67 @@ def test_fill_and_order_ownership_are_account_wide() -> None:
     assert not coordinator.order_is_owned_by("order-1", "second")
 
 
+def test_restore_claims_every_range_entry_order() -> None:
+    coordinator = AccountExecutionCoordinator()
+    trade = _trade("range")
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=f"range_{index}",
+            price=Decimal("90") + Decimal(index * 10),
+            quantity=Decimal("1"),
+            fraction=Decimal("0.25") if index != 1 else Decimal("0.50"),
+            order_id=f"range-order-{index}",
+            status="NEW",
+        )
+        for index in range(3)
+    ]
+
+    coordinator.restore_trade(trade, trading_mode="live")
+
+    assert all(
+        coordinator.order_is_owned_by(f"range-order-{index}", trade.trade_id)
+        for index in range(3)
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_range_fill_reserves_unfilled_legs_and_blocks_netting() -> None:
+    coordinator = AccountExecutionCoordinator()
+    trade = _trade("range", quantity="25")
+    trade.entry_filled_quantity = Decimal("25")
+    trade.entry_order_plan = [
+        LiveEntryOrderPlan(
+            leg_index=index,
+            label=f"range_{index}",
+            price=Decimal("90") + Decimal(index * 10),
+            quantity=quantity,
+            fraction=fraction,
+            order_id=f"range-order-{index}",
+            status="FILLED" if index == 0 else "NEW",
+            executed_quantity=Decimal("25") if index == 0 else Decimal("0"),
+            average_fill_price=Decimal("90") if index == 0 else Decimal("0"),
+        )
+        for index, (quantity, fraction) in enumerate(
+            (
+                (Decimal("25"), Decimal("0.25")),
+                (Decimal("50"), Decimal("0.50")),
+                (Decimal("25"), Decimal("0.25")),
+            )
+        )
+    ]
+    coordinator.register_trade(trade, trading_mode="live")
+
+    assert coordinator.bucket_logical_quantity(
+        trading_mode="live",
+        symbol=trade.symbol,
+        side=trade.side,
+    ) == Decimal("100")
+    opposite = _trade("opposite", side="short", quantity="10", stop="105")
+    with pytest.raises(AccountExecutionConflictError, match="cancel it first"):
+        await coordinator.coordinate_open(opposite, trading_mode="live")
+
+
 def test_duplicate_durable_order_ownership_blocks_bucket() -> None:
     coordinator = AccountExecutionCoordinator()
     first = _trade("first")
@@ -246,6 +309,41 @@ def test_duplicate_durable_order_ownership_blocks_bucket() -> None:
     reason = coordinator.bucket_block_reason(second, trading_mode="live")
     assert reason is not None
     assert "multiple logical owners" in reason
+
+
+def test_restore_stopped_session_blocks_bucket_without_registering_stale_leg() -> None:
+    coordinator = AccountExecutionCoordinator()
+    stopped_trade = _trade("stopped", session_id="ls_stopped")
+    store = MagicMock()
+    store.list_sessions.return_value = [
+        SimpleNamespace(session_id="ls_stopped", trading_mode="live", status="stopped")
+    ]
+    store.list_trades.return_value = [stopped_trade]
+
+    coordinator.restore_from_store(store)
+
+    assert coordinator.bucket_logical_quantity(
+        trading_mode="live",
+        symbol="BTCUSDT",
+        side="long",
+    ) == Decimal("0")
+    reason = coordinator.bucket_block_reason(stopped_trade, trading_mode="live")
+    assert reason is not None
+    assert "stopped session" in reason
+
+
+def test_restore_duplicate_legacy_fill_keeps_first_owner_without_poisoning_bucket() -> None:
+    coordinator = AccountExecutionCoordinator()
+    first = _trade("first")
+    second = _trade("second", session_id="ls_two", channel_id="@two")
+    first.processed_exchange_fill_ids = ["trade:legacy"]
+    second.processed_exchange_fill_ids = ["trade:legacy"]
+
+    coordinator.restore_trade(first, trading_mode="live")
+    coordinator.restore_trade(second, trading_mode="live")
+
+    assert coordinator.fill_owner("trade:legacy") == "first"
+    assert coordinator.bucket_block_reason(second, trading_mode="live") is None
 
 
 @pytest.mark.asyncio

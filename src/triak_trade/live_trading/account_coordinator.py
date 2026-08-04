@@ -63,6 +63,7 @@ class AccountTradeLeg:
     entry_price: Decimal
     stop_loss: Decimal | None
     remaining_quantity: Decimal
+    pending_entry_quantity: Decimal
     balance_at_entry: Decimal
     opened_at: datetime
     status: str
@@ -76,6 +77,10 @@ class AccountTradeLeg:
             symbol=self.symbol,
             side=self.side,
         )
+
+    @property
+    def reserved_quantity(self) -> Decimal:
+        return self.remaining_quantity + self.pending_entry_quantity
 
 
 @dataclass(frozen=True)
@@ -145,7 +150,7 @@ class AccountExecutionCoordinator:
         self._legs: dict[str, AccountTradeLeg] = {}
         self._order_owners: dict[str, str] = {}
         self._fill_owners: dict[str, str] = {}
-        self._blocked_buckets: dict[AccountBucketKey, str] = {}
+        self._blocked_buckets: dict[AccountBucketKey, set[str]] = {}
 
     @classmethod
     def from_settings(cls, settings: object) -> AccountExecutionCoordinator:
@@ -231,16 +236,40 @@ class AccountExecutionCoordinator:
         for session in store.list_sessions(limit=session_limit):
             session_id = str(getattr(session, "session_id", ""))
             trading_mode = str(getattr(session, "trading_mode", "demo"))
+            session_status = str(getattr(session, "status", "stopped"))
             if not session_id:
                 continue
             for trade in store.list_trades(session_id, limit=5000):
-                self.restore_trade(trade, trading_mode=trading_mode)
+                self._restore_trade(
+                    trade,
+                    trading_mode=trading_mode,
+                    register_open_leg=session_status in {"starting", "running", "draining"},
+                )
 
     def restore_trade(self, trade: LiveTrade, *, trading_mode: str) -> None:
         """Restore durable fill/order ownership and any still-open logical leg."""
 
-        if trade.is_open:
+        self._restore_trade(trade, trading_mode=trading_mode, register_open_leg=True)
+
+    def _restore_trade(
+        self,
+        trade: LiveTrade,
+        *,
+        trading_mode: str,
+        register_open_leg: bool,
+    ) -> None:
+        """Restore one trade while keeping stopped-session legs out of active netting."""
+
+        if trade.is_open and register_open_leg:
             self.register_trade(trade, trading_mode=trading_mode)
+        elif trade.is_open:
+            self.block_trade_bucket(
+                trade,
+                trading_mode=trading_mode,
+                reason=(
+                    f"unresolved open trade {trade.trade_id} belongs to a stopped session"
+                ),
+            )
         for fill_id in trade.processed_exchange_fill_ids:
             self._restore_fill_owner(fill_id, trade, trading_mode=trading_mode)
         for order_id in self._trade_order_ids(trade):
@@ -255,6 +284,34 @@ class AccountExecutionCoordinator:
     ) -> None:
         """Register or refresh a logical trade leg."""
 
+        pending_entry_terminal = {
+            "CANCELED",
+            "CANCELLED",
+            "ORDER_CANCELED",
+            "REJECTED",
+            "ORDER_REJECTED",
+            "FAILED",
+            "ORDER_FAILED",
+            "EXPIRED",
+            "FILLED",
+            "ORDER_FILLED",
+            "PARTIALLY_CANCELED",
+            "PARTIALLY_CANCELLED",
+            "NOT_SUBMITTED",
+        }
+        pending_entry_quantity = sum(
+            (
+                max(item.quantity - item.executed_quantity, Decimal("0"))
+                for item in trade.entry_order_plan
+                if item.status.upper() not in pending_entry_terminal
+            ),
+            Decimal("0"),
+        )
+        physical_remaining_quantity = (
+            Decimal("0")
+            if trade.entry_order_plan and trade.entry_filled_quantity <= Decimal("0")
+            else max(trade.remaining_quantity, Decimal("0"))
+        )
         leg = AccountTradeLeg(
             trade_id=trade.trade_id,
             session_id=trade.session_id,
@@ -265,7 +322,8 @@ class AccountExecutionCoordinator:
             side=trade.side.lower(),
             entry_price=trade.entry_price,
             stop_loss=trade.stop_loss,
-            remaining_quantity=max(trade.remaining_quantity, Decimal("0")),
+            remaining_quantity=physical_remaining_quantity,
+            pending_entry_quantity=pending_entry_quantity,
             balance_at_entry=max(trade.balance_at_entry, Decimal("0")),
             opened_at=trade.opened_at,
             status=trade.status,
@@ -328,6 +386,35 @@ class AccountExecutionCoordinator:
             owner = self._fill_owners.get(fill_id)
             return owner is None or owner == trade_id
 
+    def fill_owner(self, fill_id: str) -> str | None:
+        with self._registry_lock:
+            return self._fill_owners.get(fill_id)
+
+    def block_trade_bucket(self, trade: LiveTrade, *, trading_mode: str, reason: str) -> None:
+        key = self._bucket_for_trade(trade, trading_mode=trading_mode)
+        with self._registry_lock:
+            self._blocked_buckets.setdefault(key, set()).add(reason)
+
+    def clear_trade_bucket_block(
+        self,
+        trade: LiveTrade,
+        *,
+        trading_mode: str,
+        reason_prefix: str | None = None,
+    ) -> None:
+        key = self._bucket_for_trade(trade, trading_mode=trading_mode)
+        with self._registry_lock:
+            if reason_prefix is None:
+                self._blocked_buckets.pop(key, None)
+                return
+            reasons = self._blocked_buckets.get(key)
+            if reasons is None:
+                return
+            matching = {reason for reason in reasons if reason.startswith(reason_prefix)}
+            reasons.difference_update(matching)
+            if not reasons:
+                self._blocked_buckets.pop(key, None)
+
     def mark_fill_owner(
         self,
         fill_id: str,
@@ -340,7 +427,7 @@ class AccountExecutionCoordinator:
             owner = self._fill_owners.get(fill_id)
             if owner is not None:
                 if owner != trade.trade_id:
-                    self._blocked_buckets[bucket] = (
+                    self._blocked_buckets.setdefault(bucket, set()).add(
                         f"exchange fill {fill_id} is already owned by trade {owner}"
                     )
                     return False
@@ -360,7 +447,7 @@ class AccountExecutionCoordinator:
         with self._registry_lock:
             return sum(
                 (
-                    leg.remaining_quantity
+                    leg.reserved_quantity
                     for leg in self._legs.values()
                     if leg.bucket == key
                     and leg.trade_id != exclude_trade_id
@@ -388,7 +475,8 @@ class AccountExecutionCoordinator:
     ) -> str | None:
         key = self._bucket_for_trade(trade, trading_mode=trading_mode)
         with self._registry_lock:
-            return self._blocked_buckets.get(key)
+            reasons = self._blocked_buckets.get(key)
+            return "; ".join(sorted(reasons)) if reasons else None
 
     async def coordinate_open(
         self,
@@ -484,7 +572,7 @@ class AccountExecutionCoordinator:
                 for leg in self._legs.values()
                 if leg.bucket == key
                 and leg.trade_id != trade.trade_id
-                and leg.remaining_quantity > Decimal("0")
+                and leg.reserved_quantity > Decimal("0")
                 and leg.status in {"waiting_entry", "open", "partial_close"}
             ]
 
@@ -501,7 +589,7 @@ class AccountExecutionCoordinator:
                 leg
                 for leg in self._legs.values()
                 if leg.bucket == key
-                and leg.remaining_quantity > Decimal("0")
+                and leg.reserved_quantity > Decimal("0")
                 and leg.status in {"waiting_entry", "open", "partial_close"}
             ]
         return sorted(result, key=lambda item: (item.opened_at, item.trade_id))
@@ -517,7 +605,7 @@ class AccountExecutionCoordinator:
         for leg in self._opposite_legs(trade, trading_mode=trading_mode):
             if offset >= requested:
                 break
-            if leg.status == "waiting_entry":
+            if leg.status == "waiting_entry" or leg.pending_entry_quantity > Decimal("0"):
                 raise AccountExecutionConflictError(
                     "cannot net against an opposite pending entry; cancel it first"
                 )
@@ -606,7 +694,7 @@ class AccountExecutionCoordinator:
             side=leg.side,
             entry_price=leg.entry_price,
             stop_loss=leg.stop_loss,
-        ) * leg.remaining_quantity
+        ) * leg.reserved_quantity
 
     def _stop_risk_per_unit(
         self,
@@ -639,9 +727,10 @@ class AccountExecutionCoordinator:
                 self._fill_owners[fill_id] = trade.trade_id
                 return
             if owner != trade.trade_id:
-                self._blocked_buckets[
-                    self._bucket_for_trade(trade, trading_mode=trading_mode)
-                ] = f"duplicate durable fill ownership: {fill_id} ({owner}, {trade.trade_id})"
+                # Legacy records can contain a duplicate claim. The first
+                # restored owner remains authoritative; do not permanently
+                # poison the execution bucket for historical metadata damage.
+                return
 
     def _restore_order_owner(
         self,
@@ -664,7 +753,7 @@ class AccountExecutionCoordinator:
         if owner is None or owner == trade_id:
             self._order_owners[order_id] = trade_id
             return
-        self._blocked_buckets[bucket] = (
+        self._blocked_buckets.setdefault(bucket, set()).add(
             f"exchange order {order_id} has multiple logical owners: {owner}, {trade_id}"
         )
 
@@ -672,6 +761,7 @@ class AccountExecutionCoordinator:
     def _trade_order_ids(trade: LiveTrade) -> list[str]:
         order_ids = [
             trade.entry_order_id,
+            *(item.order_id for item in trade.entry_order_plan),
             trade.sl_order_id,
             *trade.tp_order_ids,
             *(item.order_id for item in trade.tp_order_plan),
