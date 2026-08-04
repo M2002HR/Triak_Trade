@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from logging.handlers import TimedRotatingFileHandler
 
 from triak_trade.config.settings import Settings
 from triak_trade.core.logging import (
@@ -12,6 +13,10 @@ from triak_trade.core.logging import (
     safe_preview,
     sanitize_log_fields,
 )
+
+
+def test_default_dashboard_file_log_level_is_info() -> None:
+    assert Settings.model_fields["DASHBOARD_LOG_LEVEL"].default == "INFO"
 
 
 def test_logging_emits_structured_json() -> None:
@@ -100,3 +105,23 @@ def test_file_logging_captures_debug_fields_and_redacts(tmp_path) -> None:
     assert payload["message_id"] == 42
     assert payload["api_key"] == "***REDACTED***"
     assert "bearer-value" not in log_path.read_text(encoding="utf-8")
+
+
+def test_file_logging_rotates_daily_and_retains_at_least_three_days(tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        DASHBOARD_FILE_LOG_ENABLED=True,
+        DASHBOARD_LOG_FILE=str(tmp_path / "dashboard.log"),
+        DASHBOARD_LOG_RETENTION_DAYS=7,
+    )
+
+    configure_logging(settings)
+
+    file_handler = next(
+        handler
+        for handler in logging.getLogger().handlers
+        if isinstance(handler, TimedRotatingFileHandler)
+    )
+    assert file_handler.when == "MIDNIGHT"
+    assert file_handler.backupCount == 7
+    assert file_handler.utc is True

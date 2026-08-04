@@ -7,7 +7,7 @@ import re
 import sys
 from collections.abc import MutableMapping
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, cast
 
@@ -189,11 +189,13 @@ def configure_logging(settings: Settings) -> None:
     if settings.DASHBOARD_FILE_LOG_ENABLED:
         log_path = Path(settings.DASHBOARD_LOG_FILE)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
+        file_handler = TimedRotatingFileHandler(
             log_path,
-            maxBytes=settings.DASHBOARD_LOG_MAX_BYTES,
-            backupCount=settings.DASHBOARD_LOG_BACKUP_COUNT,
+            when="midnight",
+            interval=1,
+            backupCount=settings.DASHBOARD_LOG_RETENTION_DAYS,
             encoding="utf-8",
+            utc=True,
         )
         file_handler.setLevel(file_level)
         file_handler.setFormatter(RenameEventKey())
