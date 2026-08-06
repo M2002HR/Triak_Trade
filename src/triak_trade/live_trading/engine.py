@@ -170,6 +170,7 @@ class LiveTradingEngine:
         self._owns_telegram_client = telegram_client is None
 
         self._running = False
+        self._stop_requested = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._message_task: asyncio.Task[None] | None = None
         self._last_poll_heartbeat_at: datetime | None = None
@@ -284,6 +285,11 @@ class LiveTradingEngine:
             use_ai=self.session.use_ai,
             strategy_key=self.session.strategy_key,
         )
+        if self._stop_requested:
+            self.session.mark_stopped()
+            self.store.save_session(self.session)
+            self._emit_session_update()
+            return
         self._running = True
         self._loop = asyncio.get_running_loop()
         self._setup_components()
@@ -293,9 +299,13 @@ class LiveTradingEngine:
             if self.session.recovery_only
             else await self._bootstrap_channel_cursors()
         )
+        if self._stop_requested:
+            return
 
         # Fetch initial account info immediately
         await self._refresh_account()
+        if self._stop_requested:
+            return
 
         self.session.mark_running()
         self.store.save_session(self.session)
@@ -395,6 +405,7 @@ class LiveTradingEngine:
 
     def stop(self) -> None:
         """Thread-safe stop — cancels the Telegram polling task."""
+        self._stop_requested = True
         self._running = False
         self._log_event(logging.INFO, "live_trading.stop_requested")
         loop = self._loop
@@ -1027,30 +1038,53 @@ class LiveTradingEngine:
                     reason="followup_exchange_position_missing",
                 )
                 if not trade_is_live:
-                    trace.debug_notes.append(
-                        "related_signal_blocked_exchange_reconciliation_required="
-                        f"{related_trade.trade_id}"
-                    )
-                    trace.signal_id = related_signal_id
-                    trace.trade_id = related_trade.trade_id
-                    trace.correlation_method = "exchange_reconciliation_required"
-                    trace.correlation_note = "related_trade_state_is_not_authoritative"
-                    trace.final_status = "exchange_reconciliation_required"
-                    trace.effect_summary = (
-                        f"Trade {related_trade.trade_id} requires exchange reconciliation; "
-                        "message was not applied"
-                    )
-                    self._push_trace(trace)
-                    self.store.save_session(self.session)
-                    self._emit_session_update()
-                    self._log_event(
-                        logging.CRITICAL,
-                        "live_trading.message_blocked_exchange_reconciliation_required",
-                        signal_id=related_signal_id,
-                        **self._trade_log_fields(related_trade),
-                        **self._message_log_fields(message),
-                    )
-                    return
+                    if not related_trade.is_open:
+                        trace.debug_notes.append(
+                            "related_signal_detached_confirmed_exchange_position_missing="
+                            f"{related_trade.trade_id}"
+                        )
+                        related_signal_id = None
+                        trace.correlation_method = (
+                            "new_signal"
+                            if parsed.action is SignalAction.OPEN
+                            else "closed_exchange_trade_detached"
+                        )
+                        trace.correlation_note = (
+                            "related_trade_auto_closed_after_confirmed_missing_"
+                            "exchange_position"
+                        )
+                        self._log_event(
+                            logging.INFO,
+                            "live_trading.related_signal_detached_after_exchange_close",
+                            signal_id=related_trade.signal_id,
+                            **self._trade_log_fields(related_trade),
+                            **self._message_log_fields(message),
+                        )
+                    else:
+                        trace.debug_notes.append(
+                            "related_signal_blocked_exchange_reconciliation_required="
+                            f"{related_trade.trade_id}"
+                        )
+                        trace.signal_id = related_signal_id
+                        trace.trade_id = related_trade.trade_id
+                        trace.correlation_method = "exchange_reconciliation_required"
+                        trace.correlation_note = "related_trade_state_is_not_authoritative"
+                        trace.final_status = "exchange_reconciliation_required"
+                        trace.effect_summary = (
+                            f"Trade {related_trade.trade_id} requires exchange reconciliation; "
+                            "message was not applied"
+                        )
+                        self._push_trace(trace)
+                        self.store.save_session(self.session)
+                        self._emit_session_update()
+                        self._log_event(
+                            logging.CRITICAL,
+                            "live_trading.message_blocked_exchange_reconciliation_required",
+                            signal_id=related_signal_id,
+                            **self._trade_log_fields(related_trade),
+                            **self._message_log_fields(message),
+                        )
+                        return
         promoted_reason = self._unmatched_visual_followup_promotion_reason(
             message=message,
             parsed=parsed,
@@ -1606,18 +1640,31 @@ class LiveTradingEngine:
                 reason="followup_exchange_position_missing",
             )
             if not trade_is_live:
-                trace.final_status = "exchange_reconciliation_required"
-                trace.effect_summary = (
-                    f"Trade {trade.trade_id} requires exchange reconciliation; "
-                    "follow-up was not applied"
-                )
-                self._log_event(
-                    logging.CRITICAL,
-                    "live_trading.followup_blocked_exchange_reconciliation_required",
-                    signal_id=signal_id,
-                    **self._trade_log_fields(trade),
-                    **self._message_log_fields(message),
-                )
+                if not trade.is_open:
+                    trace.final_status = "no_open_trade"
+                    trace.effect_summary = (
+                        f"Trade {trade.trade_id} was already closed on the exchange"
+                    )
+                    self._log_event(
+                        logging.INFO,
+                        "live_trading.followup_ignored_exchange_trade_closed",
+                        signal_id=signal_id,
+                        **self._trade_log_fields(trade),
+                        **self._message_log_fields(message),
+                    )
+                else:
+                    trace.final_status = "exchange_reconciliation_required"
+                    trace.effect_summary = (
+                        f"Trade {trade.trade_id} requires exchange reconciliation; "
+                        "follow-up was not applied"
+                    )
+                    self._log_event(
+                        logging.CRITICAL,
+                        "live_trading.followup_blocked_exchange_reconciliation_required",
+                        signal_id=signal_id,
+                        **self._trade_log_fields(trade),
+                        **self._message_log_fields(message),
+                    )
                 return
 
         channel_label = self._channel_label(message.channel_id)
@@ -2999,6 +3046,7 @@ class LiveTradingEngine:
         spec = await self._futures_client.get_contract_spec(trade.symbol)
         if spec is None:
             raise ValueError(f"Contract spec unavailable for {trade.symbol}")
+        await self._reconcile_stopped_session_bucket_if_flat(trade)
         decision = await self._account_coordinator.coordinate_open(
             trade,
             trading_mode=self.session.trading_mode,
@@ -3214,6 +3262,111 @@ class LiveTradingEngine:
             fill_count=len(fills),
             **self._trade_log_fields(trade),
         )
+
+    async def _reconcile_stopped_session_bucket_if_flat(self, trade: LiveTrade) -> None:
+        """Release stale stopped-session ownership only after exchange-flat confirmation."""
+
+        blocked_reason = self._account_coordinator.bucket_block_reason(
+            trade,
+            trading_mode=self.session.trading_mode,
+        )
+        if not blocked_reason or "belongs to a stopped session" not in blocked_reason:
+            return
+        assert self._futures_client is not None
+        use_demo_symbol = self._use_demo_exchange_symbol()
+        positions = await self._futures_client.get_open_positions(
+            use_demo_symbol=use_demo_symbol
+        )
+        position_snapshots = [self._position_snapshot(item) for item in positions]
+        if self._find_matching_exchange_position(trade=trade, positions=position_snapshots):
+            self._log_event(
+                logging.WARNING,
+                "live_trading.stopped_session_bucket_retained_exchange_position_present",
+                blocked_reason=blocked_reason,
+                **self._trade_log_fields(trade),
+            )
+            return
+        open_orders = await self._futures_client.get_open_orders(
+            trade.symbol,
+            use_demo_symbol=use_demo_symbol,
+        )
+        try:
+            open_orders.extend(
+                await self._futures_client.get_open_algo_orders(
+                    trade.symbol,
+                    use_demo_symbol=use_demo_symbol,
+                )
+            )
+        except Exception:
+            pass
+        open_order_ids = {
+            str(getattr(order, "order_id", None) or getattr(order, "orderId", None) or "")
+            for order in open_orders
+        }
+        released_trade_ids: list[str] = []
+        for session in self.store.list_sessions(limit=500):
+            if session.status in {"starting", "running"}:
+                continue
+            for stale_trade in self.store.list_open_trades(session.session_id):
+                if stale_trade.symbol != trade.symbol or stale_trade.side != trade.side:
+                    continue
+                owned_order_ids = {
+                    str(order_id)
+                    for order_id in (
+                        stale_trade.entry_order_id,
+                        stale_trade.sl_order_id,
+                        *stale_trade.tp_order_ids,
+                    )
+                    if order_id
+                }
+                if owned_order_ids & open_order_ids:
+                    self._log_event(
+                        logging.WARNING,
+                        "live_trading.stopped_session_bucket_retained_owned_order_present",
+                        stale_trade_id=stale_trade.trade_id,
+                        owned_open_order_ids=sorted(owned_order_ids & open_order_ids),
+                        **self._trade_log_fields(trade),
+                    )
+                    continue
+                unaccounted_quantity = max(Decimal("0"), stale_trade.remaining_quantity)
+                stale_trade.status = "closed"
+                stale_trade.close_reason = "stopped_session_exchange_flat_auto_reconciled"
+                stale_trade.closed_at = _utc_now()
+                stale_trade.remaining_quantity = Decimal("0")
+                stale_trade.pending_fill_audit_quantity += unaccounted_quantity
+                stale_trade.unrealized_pnl = Decimal("0")
+                stale_trade.exchange_position = None
+                stale_trade.last_exchange_sync_error = None
+                self.store.save_trade(stale_trade)
+                session.open_positions_count = max(0, session.open_positions_count - 1)
+                session.closed_trades_count += 1
+                issue_prefix = (
+                    f"unresolved open trade {stale_trade.trade_id} belongs to a stopped session"
+                )
+                session.health_issues = [
+                    issue for issue in session.health_issues if not issue.startswith(issue_prefix)
+                ]
+                if not session.health_issues:
+                    session.health_status = "healthy"
+                    session.new_entries_blocked = False
+                    if session.last_error and issue_prefix in session.last_error:
+                        session.last_error = None
+                self.store.save_session(session)
+                self._account_coordinator.clear_trade_bucket_block(
+                    stale_trade,
+                    trading_mode=session.trading_mode,
+                    reason_prefix=issue_prefix,
+                )
+                released_trade_ids.append(stale_trade.trade_id)
+        if released_trade_ids:
+            self._log_event(
+                logging.WARNING,
+                "live_trading.stopped_session_bucket_auto_reconciled",
+                released_trade_ids=released_trade_ids,
+                exchange_position_present=False,
+                owned_open_order_present=False,
+                **self._trade_log_fields(trade),
+            )
 
     def _build_range_entry_order_plan(
         self,
@@ -4907,8 +5060,81 @@ class LiveTradingEngine:
             self.store.save_trade(trade)
             self._emit_trade_update(trade)
             return True
-        self._mark_trade_reconciliation_required(trade=trade, reason=reason)
+        await self._resolve_confirmed_missing_exchange_position(
+            context=context,
+            trade=trade,
+            reason=reason,
+        )
         return False
+
+    async def _resolve_confirmed_missing_exchange_position(
+        self,
+        *,
+        context: ChannelContext | None,
+        trade: LiveTrade,
+        reason: str,
+        symbol_user_trades: list[Any] | None = None,
+        history_orders: list[Any] | None = None,
+    ) -> None:
+        """Recover close fills when possible, otherwise trust confirmed zero exposure."""
+
+        if self._futures_client is None or not trade.is_open:
+            return
+        recovered_user_trades = symbol_user_trades
+        recovered_history_orders = history_orders
+        if recovered_user_trades is None:
+            try:
+                recovered_user_trades = await self._futures_client.get_user_trades(
+                    trade.symbol,
+                    limit=100,
+                    use_demo_symbol=self._use_demo_exchange_symbol(),
+                )
+            except Exception as exc:
+                recovered_user_trades = []
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.missing_position_user_trades_query_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    **self._trade_log_fields(trade),
+                )
+        if recovered_history_orders is None:
+            try:
+                recovered_history_orders = await self._futures_client.get_order_history(
+                    trade.symbol,
+                    limit=100,
+                    use_demo_symbol=self._use_demo_exchange_symbol(),
+                )
+            except Exception as exc:
+                recovered_history_orders = []
+                self._log_event(
+                    logging.WARNING,
+                    "live_trading.missing_position_order_history_query_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    **self._trade_log_fields(trade),
+                )
+        try:
+            await self._reconcile_missing_exchange_position_fills(
+                trade=trade,
+                symbol_user_trades=recovered_user_trades,
+                history_orders=recovered_history_orders,
+            )
+        except Exception as exc:
+            self._log_event(
+                logging.WARNING,
+                "live_trading.missing_position_fill_recovery_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **self._trade_log_fields(trade),
+            )
+        if not trade.is_open or trade.signal_id not in self._open_trades:
+            return
+        self._mark_trade_closed_on_exchange(
+            context=context,
+            trade=trade,
+            reason=f"confirmed_exchange_position_missing:{reason}",
+        )
 
     def _mark_trade_reconciliation_required(self, *, trade: LiveTrade, reason: str) -> None:
         issue = (
@@ -5037,10 +5263,12 @@ class LiveTradingEngine:
     ) -> None:
         if trade.signal_id not in self._open_trades:
             return
+        unaccounted_quantity = max(Decimal("0"), trade.remaining_quantity)
         trade.status = "closed"
         trade.close_reason = reason
         trade.closed_at = _utc_now()
         trade.remaining_quantity = Decimal("0")
+        trade.pending_fill_audit_quantity += unaccounted_quantity
         trade.unrealized_pnl = Decimal("0")
         trade.exchange_position = None
         trade.sl_order_id = None
@@ -5048,7 +5276,7 @@ class LiveTradingEngine:
         trade.tp_order_plan = []
         trade.required_tp_order_count = 0
         self._clear_exchange_position_miss_state(trade, recovered=False)
-        trade.last_exchange_sync_error = reason
+        trade.last_exchange_sync_error = None
         trade.add_attribution(
             MessageAttribution(
                 message_id=0,
@@ -5057,14 +5285,27 @@ class LiveTradingEngine:
                 message_preview="exchange position missing during sync",
                 message_date=_utc_now(),
                 action="closed",
-                notes=[reason],
+                notes=[
+                    reason,
+                    "exchange_zero_exposure_authoritative",
+                    "close_fill_history_unavailable",
+                    f"unaccounted_close_quantity={unaccounted_quantity}",
+                ],
             )
         )
+        for prefix in (
+            f"protection unavailable for {trade.trade_id}:",
+            f"exchange quantity drift for {trade.trade_id}",
+            f"exchange reconciliation required for {trade.trade_id}:",
+            f"range_entry_cancel_unconfirmed:{trade.trade_id}:",
+        ):
+            self._clear_trade_health_issue(trade, prefix=prefix)
         self._open_trades.pop(trade.signal_id, None)
         self._account_coordinator.unregister_trade(trade.trade_id)
         self.session.open_positions_count = max(0, self.session.open_positions_count - 1)
         self.session.closed_trades_count += 1
         self.store.save_trade(trade)
+        self.store.save_session(self.session)
         self._emit_trade_update(trade)
         if context is not None:
             self._mark_signal_terminal(
@@ -5075,8 +5316,10 @@ class LiveTradingEngine:
             )
         self._log_event(
             logging.WARNING,
-            "live_trading.trade_marked_closed_from_exchange_sync",
+            "live_trading.trade_auto_closed_from_confirmed_zero_position",
             reason=reason,
+            close_fill_history_available=False,
+            unaccounted_close_quantity=str(unaccounted_quantity),
             **self._trade_log_fields(trade),
         )
 
@@ -7882,9 +8125,12 @@ class LiveTradingEngine:
                             )
                     self._emit_trade_update(trade)
                     continue
-                self._mark_trade_reconciliation_required(
+                await self._resolve_confirmed_missing_exchange_position(
+                    context=context,
                     trade=trade,
                     reason="exchange_position_missing_snapshot",
+                    symbol_user_trades=by_symbol_user_trades.get(trade.symbol, []),
+                    history_orders=by_symbol_history_orders.get(trade.symbol, []),
                 )
                 continue
             self._clear_exchange_position_miss_state(trade)

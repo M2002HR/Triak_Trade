@@ -202,6 +202,122 @@ def _ignored_signal() -> ParsedSignal:
     )
 
 
+@pytest.mark.asyncio
+async def test_stop_requested_before_start_prevents_engine_restart(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._setup_components = MagicMock()
+
+    engine.stop()
+    await engine.start()
+
+    assert engine.session.status == "stopped"
+    assert engine._running is False
+    engine._setup_components.assert_not_called()
+
+
+def _stopped_session_blocker(engine: LiveTradingEngine) -> tuple[LiveSession, LiveTrade]:
+    session = _session().model_copy(
+        update={
+            "session_id": "ls_stopped",
+            "status": "stopped",
+            "open_positions_count": 1,
+            "health_status": "critical",
+            "new_entries_blocked": True,
+        }
+    )
+    stale_trade = _trade(session.session_id).model_copy(
+        update={
+            "trade_id": "trade_stale",
+            "signal_id": "sig_stale",
+            "entry_order_id": "entry_stale",
+        }
+    )
+    issue = (
+        f"unresolved open trade {stale_trade.trade_id} belongs to a stopped session"
+    )
+    session.health_issues = [issue]
+    session.last_error = issue
+    engine.store.save_session(session)
+    engine.store.save_trade(stale_trade)
+    engine._account_coordinator.block_trade_bucket(
+        stale_trade,
+        trading_mode=session.trading_mode,
+        reason=issue,
+    )
+    return session, stale_trade
+
+
+@pytest.mark.asyncio
+async def test_stopped_session_bucket_auto_reconciles_when_exchange_is_flat(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    session, stale_trade = _stopped_session_blocker(engine)
+    candidate = _trade(engine.session.session_id).model_copy(update={"trade_id": "candidate"})
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_open_orders.return_value = []
+    engine._futures_client.get_open_algo_orders.return_value = []
+
+    await engine._reconcile_stopped_session_bucket_if_flat(candidate)
+
+    reconciled = engine.store.load_trade(session.session_id, stale_trade.trade_id)
+    assert reconciled is not None
+    assert reconciled.status == "closed"
+    assert reconciled.remaining_quantity == Decimal("0")
+    assert reconciled.pending_fill_audit_quantity == stale_trade.remaining_quantity
+    assert reconciled.close_reason == "stopped_session_exchange_flat_auto_reconciled"
+    assert (
+        engine._account_coordinator.bucket_block_reason(
+            candidate,
+            trading_mode=engine.session.trading_mode,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_stopped_session_bucket_is_retained_when_exchange_position_exists(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    session, stale_trade = _stopped_session_blocker(engine)
+    candidate = _trade(engine.session.session_id).model_copy(update={"trade_id": "candidate"})
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = [SimpleNamespace()]
+    engine._position_snapshot = MagicMock(return_value=SimpleNamespace())  # type: ignore[method-assign]
+    engine._find_matching_exchange_position = MagicMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace()
+    )
+
+    await engine._reconcile_stopped_session_bucket_if_flat(candidate)
+
+    retained = engine.store.load_trade(session.session_id, stale_trade.trade_id)
+    assert retained is not None
+    assert retained.is_open
+
+
+@pytest.mark.asyncio
+async def test_stopped_session_bucket_is_retained_when_owned_order_exists(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    session, stale_trade = _stopped_session_blocker(engine)
+    candidate = _trade(engine.session.session_id).model_copy(update={"trade_id": "candidate"})
+    engine._futures_client = AsyncMock()
+    engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_open_orders.return_value = [
+        SimpleNamespace(order_id=stale_trade.entry_order_id)
+    ]
+    engine._futures_client.get_open_algo_orders.return_value = []
+
+    await engine._reconcile_stopped_session_bucket_if_flat(candidate)
+
+    retained = engine.store.load_trade(session.session_id, stale_trade.trade_id)
+    assert retained is not None
+    assert retained.is_open
+
+
 def test_stop_cooldown_grows_after_consecutive_same_direction_stops(
     tmp_path: Path,
 ) -> None:
@@ -5038,7 +5154,7 @@ async def test_handle_followup_close_retries_exchange_residual_until_flat(
 
 
 @pytest.mark.asyncio
-async def test_process_message_blocks_when_related_trade_requires_reconciliation(
+async def test_process_message_auto_closes_missing_trade_and_accepts_new_signal(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -5050,6 +5166,8 @@ async def test_process_message_blocks_when_related_trade_requires_reconciliation
     engine._sync_signal_snapshot(context=context, state=state, trade=trade)
     engine._futures_client = AsyncMock()
     engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_user_trades.return_value = []
+    engine._futures_client.get_order_history.return_value = []
     trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=30)
     trade.exchange_position_missing_confirmations = 1
     engine._classifier = SimpleNamespace(
@@ -5075,14 +5193,21 @@ async def test_process_message_blocks_when_related_trade_requires_reconciliation
     trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
     traces = engine.store.list_message_traces(engine.session.session_id, limit=5)
 
-    assert new_signal is None
+    assert new_signal is not None
+    assert new_signal.status == "pending_consolidation"
     assert old_signal is not None
-    assert old_signal.status == "open"
+    assert old_signal.status == "closed"
     assert trade_reloaded is not None
-    assert trade_reloaded.status == "open"
-    assert "sig_test" in engine._open_trades
-    assert traces[0].final_status == "exchange_reconciliation_required"
-    assert engine.session.new_entries_blocked is True
+    assert trade_reloaded.status == "closed"
+    assert trade_reloaded.remaining_quantity == Decimal("0")
+    assert trade_reloaded.pending_fill_audit_quantity == Decimal("0.01")
+    assert "sig_test" not in engine._open_trades
+    assert traces[0].final_status == "pending_consolidation"
+    assert any(
+        note.startswith("related_signal_detached_confirmed_exchange_position_missing=")
+        for note in traces[0].debug_notes
+    )
+    assert engine.session.new_entries_blocked is False
 
 
 @pytest.mark.asyncio
@@ -5134,7 +5259,7 @@ async def test_pending_signal_update_sl_keeps_open_action_and_opens_after_consol
 
 
 @pytest.mark.asyncio
-async def test_handle_followup_blocks_stale_exchange_trade_before_updating(
+async def test_handle_followup_auto_closes_stale_exchange_trade_without_blocking(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -5146,6 +5271,8 @@ async def test_handle_followup_blocks_stale_exchange_trade_before_updating(
     engine._sync_signal_snapshot(context=context, state=state, trade=trade)
     engine._futures_client = AsyncMock()
     engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_user_trades.return_value = []
+    engine._futures_client.get_order_history.return_value = []
     trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=30)
     trade.exchange_position_missing_confirmations = 1
     trace = LiveMessageTrace(
@@ -5165,14 +5292,15 @@ async def test_handle_followup_blocks_stale_exchange_trade_before_updating(
     )
 
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
-    assert trace.final_status == "exchange_reconciliation_required"
+    assert trace.final_status == "no_open_trade"
     assert signal is not None
-    assert signal.status == "open"
-    assert "sig_test" in engine._open_trades
+    assert signal.status == "closed"
+    assert "sig_test" not in engine._open_trades
+    assert engine.session.new_entries_blocked is False
 
 
 @pytest.mark.asyncio
-async def test_sync_exchange_state_blocks_trade_when_position_and_close_fills_are_missing(
+async def test_sync_exchange_state_auto_closes_confirmed_missing_position_without_fills(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path)
@@ -5189,18 +5317,42 @@ async def test_sync_exchange_state_blocks_trade_when_position_and_close_fills_ar
     engine._futures_client.get_user_trades.return_value = []
     trade.exchange_position_missing_since = datetime.now(timezone.utc) - timedelta(seconds=30)
     trade.exchange_position_missing_confirmations = 1
+    stale_issue = (
+        f"exchange reconciliation required for {trade.trade_id}: "
+        "followup_exchange_position_missing; exchange position is missing and no complete "
+        "owned close-fill history was available"
+    )
+    engine._account_coordinator.block_trade_bucket(
+        trade,
+        trading_mode=engine.session.trading_mode,
+        reason=stale_issue,
+    )
+    engine._set_session_health_issue(stale_issue, critical=True)
 
     await engine._sync_exchange_state()
 
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     trade_reloaded = engine.store.load_trade(engine.session.session_id, "trade_test")
     assert signal is not None
-    assert signal.status == "open"
+    assert signal.status == "closed"
     assert trade_reloaded is not None
-    assert trade_reloaded.status == "open"
-    assert "no complete owned close-fill" in (trade_reloaded.last_exchange_sync_error or "")
-    assert engine._open_trades == {"sig_test": trade}
-    assert engine.session.health_status == "critical"
+    assert trade_reloaded.status == "closed"
+    assert trade_reloaded.close_reason == (
+        "confirmed_exchange_position_missing:exchange_position_missing_snapshot"
+    )
+    assert trade_reloaded.last_exchange_sync_error is None
+    assert trade_reloaded.pending_fill_audit_quantity == Decimal("0.01")
+    assert engine._open_trades == {}
+    assert engine.session.health_status == "healthy"
+    assert engine.session.new_entries_blocked is False
+    assert engine.session.health_issues == []
+    assert (
+        engine._account_coordinator.bucket_block_reason(
+            trade,
+            trading_mode=engine.session.trading_mode,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -5302,6 +5454,8 @@ async def test_ensure_trade_still_open_on_exchange_requires_confirmed_miss(
     engine._sync_signal_snapshot(context=context, state=state, trade=trade)
     engine._futures_client = AsyncMock()
     engine._futures_client.get_open_positions.return_value = []
+    engine._futures_client.get_user_trades.return_value = []
+    engine._futures_client.get_order_history.return_value = []
 
     first_seen = await engine._ensure_trade_still_open_on_exchange(
         context=context,
@@ -5323,11 +5477,16 @@ async def test_ensure_trade_still_open_on_exchange_requires_confirmed_miss(
 
     signal = engine.store.load_signal_snapshot(engine.session.session_id, "sig_test")
     assert second_seen is False
-    assert trade.status == "open"
+    assert trade.status == "closed"
+    assert trade.close_reason == (
+        "confirmed_exchange_position_missing:followup_exchange_position_missing"
+    )
+    assert trade.last_exchange_sync_error is None
+    assert trade.pending_fill_audit_quantity == Decimal("0.01")
     assert signal is not None
-    assert signal.status == "open"
-    assert "sig_test" in engine._open_trades
-    assert engine.session.new_entries_blocked is True
+    assert signal.status == "closed"
+    assert "sig_test" not in engine._open_trades
+    assert engine.session.new_entries_blocked is False
 
 
 def test_finalize_closed_trade_clears_pending_exchange_position_missing_state(
