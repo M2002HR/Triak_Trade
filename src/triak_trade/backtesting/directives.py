@@ -28,7 +28,6 @@ _CLOSE_MARKERS = (
     "سیو سود",
     "سیوسود",
     "ببندید",
-    "ببند",
     "کلوز",
     "close position",
     "take profit now",
@@ -72,7 +71,10 @@ def detect_close_instruction(text: str | None) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    return any(marker in lowered for marker in _CLOSE_MARKERS)
+    if any(marker in lowered for marker in _CLOSE_MARKERS):
+        return True
+    # Do not treat conversational forms such as «ببندم» as a close command.
+    return bool(re.search(r"(?:^|\s|[،؛,.!?])ببند(?:ید)?(?=\s|$|[،؛,.!?])", lowered))
 
 
 def detect_close_all_instruction(text: str | None) -> bool:
@@ -124,6 +126,28 @@ def detect_tp_list_update(text: str | None) -> list[Decimal]:
         return []
     values = [Decimal(match) for match in _NUMBER_RE.findall(text.replace(",", ""))]
     return values if len(values) >= 2 else []
+
+
+def detect_percentage_tp_update(text: str | None) -> list[Decimal]:
+    """Extract a percentage TP ladder from labels such as «TP 40% 80% ...»."""
+    if not text:
+        return []
+    lowered = text.lower()
+    if not any(marker in lowered for marker in ("tp", "تیپی", "تارگت", "target", "اهداف")):
+        return []
+    values = [Decimal(match.group("pct")) for match in _CLOSE_PERCENT_RE.finditer(lowered)]
+    return values if len(values) >= 2 else []
+
+
+def detect_stop_loss_value(text: str | None) -> Decimal | None:
+    """Extract an absolute stop value from a follow-up update."""
+    if not text:
+        return None
+    match = re.search(
+        r"(?:stop\s*loss|stop|sl|استاپ|حد\s*ضرر)\s*[:=]?\s*(?P<price>\d+(?:\.\d+)?)",
+        text.lower(),
+    )
+    return Decimal(match.group("price")) if match else None
 
 
 def apply_text_directive_action(action: SignalAction, text: str | None) -> SignalAction:

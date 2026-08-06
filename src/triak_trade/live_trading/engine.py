@@ -20,6 +20,8 @@ from triak_trade.backtesting.directives import (
     apply_text_directive_action,
     detect_close_all_instruction,
     detect_move_stop_to_entry,
+    detect_percentage_tp_update,
+    detect_stop_loss_value,
     detect_tp_list_update,
     extract_close_fraction,
     normalize_related_signal_action,
@@ -973,12 +975,25 @@ class LiveTradingEngine:
 
         # ── Text-directive upgrades (matches backtest real_runner logic) ──────
         # 1. close_all overrides ANY AI action, even IGNORE/UNKNOWN
-        close_all_detected = detect_close_all_instruction(message.text)
+        ai_non_actionable = (
+            parsed.action is SignalAction.IGNORE
+            and any(
+                note.startswith("classification=")
+                and note.split("=", 1)[1] in {
+                    "UNRELATED",
+                    "ADVERTISEMENT",
+                    "GENERAL_ANALYSIS",
+                    "RESULT_REPORT",
+                }
+                for note in trace.debug_notes
+            )
+        )
+        close_all_detected = detect_close_all_instruction(message.text) and not ai_non_actionable
         if close_all_detected and parsed.action is not SignalAction.CLOSE:
             parsed = parsed.model_copy(update={"action": SignalAction.CLOSE})
 
         # 2. For UNKNOWN/IGNORE: try text-based promotion before giving up
-        if parsed.action in (SignalAction.IGNORE, SignalAction.UNKNOWN):
+        if parsed.action in (SignalAction.IGNORE, SignalAction.UNKNOWN) and not ai_non_actionable:
             upgraded = apply_text_directive_action(parsed.action, message.text)
             if upgraded not in (SignalAction.IGNORE, SignalAction.UNKNOWN):
                 parsed = parsed.model_copy(update={"action": upgraded})
@@ -1116,6 +1131,37 @@ class LiveTradingEngine:
             trace.debug_notes = [
                 note for note in trace.debug_notes if note != "no_signal_for_followup"
             ]
+        related_trade_for_directive = (
+            self._open_trades.get(related_signal_id) if related_signal_id is not None else None
+        )
+        percentage_tps = detect_percentage_tp_update(message.text)
+        if (
+            related_trade_for_directive is not None
+            and parsed.action is SignalAction.UNKNOWN
+            and percentage_tps
+        ):
+            multiplier = Decimal("100") * Decimal(str(max(1, related_trade_for_directive.leverage)))
+            prices = [
+                (
+                    related_trade_for_directive.entry_price
+                    * (Decimal("1") + pct / multiplier)
+                    if related_trade_for_directive.side == TradeSide.LONG.value
+                    else related_trade_for_directive.entry_price
+                    * (Decimal("1") - pct / multiplier)
+                ).quantize(Decimal("0.00000001"))
+                for pct in percentage_tps
+            ]
+            parsed = parsed.model_copy(
+                update={
+                    "action": SignalAction.UPDATE_TP,
+                    "take_profits": prices,
+                    "stop_loss": detect_stop_loss_value(message.text),
+                }
+            )
+            trace.debug_notes.append(
+                "percentage_tp_update_converted="
+                + ",".join(str(price) for price in prices)
+            )
         self._log_event(
             logging.INFO,
             "live_trading.message_correlated",

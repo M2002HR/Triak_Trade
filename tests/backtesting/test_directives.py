@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from triak_trade.backtesting.directives import detect_tp_list_update
+from triak_trade.backtesting.directives import (
+    detect_close_instruction,
+    detect_percentage_tp_update,
+    detect_stop_loss_value,
+    detect_tp_list_update,
+)
 
 
 def test_detect_tp_list_update_extracts_ladder() -> None:
@@ -32,3 +37,21 @@ def test_detect_tp_list_update_empty() -> None:
 def test_detect_tp_list_update_ignores_target_hit_report_numbers() -> None:
     values = detect_tp_list_update("50 درصد سود با لوریج 20 تارگت 1 ازش کشیدیم بیرون")
     assert values == []
+
+
+def test_detect_percentage_tp_update_extracts_persian_ladder() -> None:
+    values = detect_percentage_tp_update("تیپی 40% 80% 120% 160% 240% استاپ 0.1605")
+    assert values == [
+        Decimal("40"),
+        Decimal("80"),
+        Decimal("120"),
+        Decimal("160"),
+        Decimal("240"),
+    ]
+    assert detect_stop_loss_value("تیپی 40% 80% استاپ 0.1605") == Decimal("0.1605")
+
+
+def test_conversational_persian_close_word_is_not_an_instruction() -> None:
+    assert detect_close_instruction("یه جوری مارکت کریپتو رو ببندم نسخه پیچش کنم") is False
+    assert detect_close_instruction("این پوزیشن رو ببند") is True
+    assert detect_close_instruction("پوزیشن را ببندید") is True

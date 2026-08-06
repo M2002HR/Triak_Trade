@@ -683,6 +683,39 @@ async def test_new_open_detaches_same_side_signal_without_open_trade(
 
 
 @pytest.mark.asyncio
+async def test_authoritative_ai_ignore_cannot_be_promoted_to_close_all(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal(), status=SignalStatus.OPEN)
+    trade = _trade(engine.session.session_id)
+    context.add_signal(state, pending=False)
+    engine._open_trades[state.signal_id] = trade
+    ignored = _open_signal(action=SignalAction.IGNORE).model_copy(
+        update={"symbol": None, "side": TradeSide.UNKNOWN}
+    )
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, current_context: SimpleNamespace(
+            parsed_signal=ignored,
+            classification="UNRELATED",
+            related_signal_id=None,
+            debug_notes=[
+                "classifier=ai",
+                "classification=UNRELATED",
+                "reasoning_summary=conversational message",
+            ],
+        )
+    )
+
+    await engine._process_message(
+        _message(303, "داستان همه پوزیشن‌ها را ببندید جالبه")  # noqa: RUF001
+    )
+
+    trace = engine.store.list_message_traces(engine.session.session_id, limit=1)[0]
+    assert trace.final_status == "ignored"
+    assert trade.is_open
+
+
+@pytest.mark.asyncio
 async def test_poll_messages_once_persists_heartbeat_without_new_messages(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine._running = True
