@@ -197,6 +197,39 @@ class TestTrailingTakeProfitStrategy:
         )
         assert action.new_stop_loss == Decimal("120")
 
+    def test_third_of_five_targets_moves_stop_to_first_target(self):
+        strategy = TrailingTakeProfitStrategy()
+        action = strategy.get_target_hit_action(
+            targets_hit_so_far=2,
+            remaining_targets_including_this=3,
+            entry_price=Decimal("100"),
+            take_profits=[
+                Decimal("110"),
+                Decimal("120"),
+                Decimal("130"),
+                Decimal("140"),
+                Decimal("150"),
+            ],
+        )
+        assert action.new_stop_loss == Decimal("110")
+
+    def test_second_of_five_targets_keeps_base_stop_action(self):
+        strategy = TrailingTakeProfitStrategy()
+        action = strategy.get_target_hit_action(
+            targets_hit_so_far=1,
+            remaining_targets_including_this=4,
+            entry_price=Decimal("100"),
+            take_profits=[
+                Decimal("110"),
+                Decimal("120"),
+                Decimal("130"),
+                Decimal("140"),
+                Decimal("150"),
+            ],
+        )
+        assert action.new_stop_loss is None
+        assert action.move_sl_to_entry is False
+
 
 class TestSyntheticTakeProfits:
     def test_long_synthetic_targets_use_notional_profit_steps(self):

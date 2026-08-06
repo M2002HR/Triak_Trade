@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from triak_trade.backtesting.strategies.trailing_tp import TrailingTakeProfitStrategy
 from triak_trade.domain.enums import EntryType, MarketType, SignalAction, SignalStatus, TradeSide
 from triak_trade.domain.ids import make_signal_id
 from triak_trade.domain.models import ParsedSignal, RawTelegramMessage, SignalState
@@ -3649,6 +3650,9 @@ async def test_delayed_fills_do_not_reduce_quantity_twice_after_snapshot_clamp(
     trade = _trade(engine.session.session_id).model_copy(
         update={
             "symbol": "SOLUSDT",
+            "side": "short",
+            "entry_price": Decimal("72.93"),
+            "stop_loss": Decimal("78.99"),
             "quantity": Decimal("0.43"),
             "remaining_quantity": Decimal("0.43"),
             "take_profits": [Decimal("72.53")],
@@ -3690,7 +3694,7 @@ async def test_delayed_fills_do_not_reduce_quantity_twice_after_snapshot_clamp(
             trade_id=f"sol_delayed_{index}",
             order_id=f"sol_tp_{index}",
             time=now_ms + index,
-            side="SELL_CLOSE",
+            side="BUY_CLOSE",
             order_type="LIMIT",
             qty=Decimal("0.15"),
             price=Decimal("72.53"),
@@ -4604,6 +4608,119 @@ async def test_apply_tp_hit_promotes_stop_to_previous_target_without_double_coun
 
     assert trade.targets_hit == 2
     assert trade.stop_loss == Decimal("51000")
+
+
+def test_strategy_stop_reconciliation_repairs_multi_target_progress(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._strategy = TrailingTakeProfitStrategy(risk_free_on_first_tp=True)
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "side": "long",
+            "entry_price": Decimal("100"),
+            "stop_loss": Decimal("90"),
+            "take_profits": [
+                Decimal("110"),
+                Decimal("120"),
+                Decimal("130"),
+                Decimal("140"),
+            ],
+            "targets_hit": 3,
+        }
+    )
+
+    changed = engine._reconcile_strategy_stop_loss_after_targets(trade)
+
+    assert changed is True
+    assert trade.stop_loss == Decimal("120")
+
+
+def test_strategy_stop_reconciliation_uses_two_target_gap_for_large_ladder(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._strategy = TrailingTakeProfitStrategy(risk_free_on_first_tp=True)
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "side": "long",
+            "entry_price": Decimal("100"),
+            "stop_loss": Decimal("90"),
+            "take_profits": [
+                Decimal("110"),
+                Decimal("120"),
+                Decimal("130"),
+                Decimal("140"),
+                Decimal("150"),
+            ],
+            "targets_hit": 3,
+        }
+    )
+
+    changed = engine._reconcile_strategy_stop_loss_after_targets(trade)
+
+    assert changed is True
+    assert trade.stop_loss == Decimal("110")
+
+
+def test_strategy_stop_reconciliation_never_loosens_existing_stop(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._strategy = TrailingTakeProfitStrategy(risk_free_on_first_tp=True)
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "side": "short",
+            "entry_price": Decimal("100"),
+            "stop_loss": Decimal("75"),
+            "take_profits": [
+                Decimal("90"),
+                Decimal("80"),
+                Decimal("70"),
+            ],
+            "targets_hit": 2,
+        }
+    )
+
+    changed = engine._reconcile_strategy_stop_loss_after_targets(trade)
+
+    assert changed is False
+    assert trade.stop_loss == Decimal("75")
+
+
+def test_exchange_target_recovery_applies_large_ladder_gap_after_third_tp(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine._strategy = TrailingTakeProfitStrategy(risk_free_on_first_tp=True)
+    trade = _trade(engine.session.session_id).model_copy(
+        update={
+            "side": "long",
+            "entry_price": Decimal("100"),
+            "stop_loss": Decimal("90"),
+            "take_profits": [
+                Decimal("110"),
+                Decimal("120"),
+                Decimal("130"),
+                Decimal("140"),
+                Decimal("150"),
+            ],
+        }
+    )
+    attribution = MessageAttribution(
+        message_id=0,
+        channel_id=trade.channel_id,
+        channel_label=trade.channel_label,
+        message_preview="recovered TP3 fill",
+        message_date=datetime.now(timezone.utc),
+        action="partial_close",
+    )
+
+    engine._apply_strategy_after_exchange_target_fill(
+        trade=trade,
+        target_index=2,
+        attribution=attribution,
+    )
+
+    assert trade.targets_hit == 3
+    assert trade.stop_loss == Decimal("110")
+    assert "next_stop_loss=110" in attribution.notes
 
 
 @pytest.mark.asyncio

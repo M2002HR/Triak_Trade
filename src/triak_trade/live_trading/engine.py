@@ -4854,22 +4854,53 @@ class LiveTradingEngine:
         if self._strategy is None:
             trade.targets_hit = max(trade.targets_hit, target_index + 1)
             return
-        remaining = len(trade.take_profits) - target_index
+        trade.targets_hit = max(trade.targets_hit, target_index + 1)
+        previous_stop_loss = trade.stop_loss
+        if self._reconcile_strategy_stop_loss_after_targets(trade):
+            attribution.notes.append(f"next_stop_loss={trade.stop_loss}")
+        elif previous_stop_loss == trade.stop_loss:
+            attribution.notes.append(f"next_stop_loss_unchanged={trade.stop_loss}")
+
+    def _reconcile_strategy_stop_loss_after_targets(self, trade: LiveTrade) -> bool:
+        """Replay completed target actions and retain the most protective stop."""
+
+        if self._strategy is None or trade.targets_hit <= 0 or not trade.take_profits:
+            return False
+        completed_targets = min(trade.targets_hit, len(trade.take_profits))
+        last_target_index = completed_targets - 1
         action = self._strategy.get_target_hit_action(
-            targets_hit_so_far=target_index,
-            remaining_targets_including_this=remaining,
+            targets_hit_so_far=last_target_index,
+            remaining_targets_including_this=len(trade.take_profits) - last_target_index,
             entry_price=trade.entry_price,
             take_profits=trade.take_profits,
         )
         new_stop_loss = getattr(action, "new_stop_loss", None)
-        move_sl_to_entry = getattr(action, "move_sl_to_entry", False)
-        if isinstance(new_stop_loss, Decimal) and trade.stop_loss != new_stop_loss:
-            trade.stop_loss = new_stop_loss
-            attribution.notes.append(f"next_stop_loss={new_stop_loss}")
-        elif move_sl_to_entry is True and trade.stop_loss != trade.entry_price:
-            trade.stop_loss = trade.entry_price
-            attribution.notes.append(f"next_stop_loss={trade.entry_price}")
-        trade.targets_hit = max(trade.targets_hit, target_index + 1)
+        desired_stop = (
+            new_stop_loss if isinstance(new_stop_loss, Decimal) else trade.entry_price
+        )
+        current_stop = trade.stop_loss
+        if current_stop is not None:
+            desired_stop = (
+                max(current_stop, desired_stop)
+                if trade.side == TradeSide.LONG.value
+                else min(current_stop, desired_stop)
+            )
+        if desired_stop == current_stop:
+            return False
+        trade.stop_loss = desired_stop
+        if trade.message_history:
+            trade.message_history[-1].notes.append(
+                "strategy_stop_reconciled_after_targets="
+                f"{trade.targets_hit}:{desired_stop}"
+            )
+        self._log_event(
+            logging.INFO,
+            "live_trading.strategy_stop_reconciled_after_targets",
+            previous_stop_loss=self._decimal_text(current_stop),
+            reconciled_stop_loss=self._decimal_text(desired_stop),
+            **self._trade_log_fields(trade),
+        )
+        return True
 
     async def _fetch_trade_exchange_position_quantity(
         self,
@@ -5346,6 +5377,8 @@ class LiveTradingEngine:
     ) -> None:
         if self._futures_client is None or not trade.is_open:
             return
+        if self._reconcile_strategy_stop_loss_after_targets(trade):
+            refresh_stop_loss = True
         self._log_event(
             logging.INFO,
             "live_trading.exchange_protection_sync_started",

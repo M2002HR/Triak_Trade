@@ -1,4 +1,4 @@
-"""Trailing stop strategy that advances the stop to the previous TP."""
+"""Trailing stop strategy that advances the stop behind completed TPs."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ class TrailingTakeProfitStrategy(DefaultRiskManagedStrategy):
 
     Rules:
     - After TP1: optional breakeven if ``risk_free_on_first_tp`` is enabled.
-    - After TP2: stop loss moves to TP1.
-    - After TP3: stop loss moves to TP2.
-    - And so on.
+    - With fewer than five targets, the stop trails one target behind.
+    - With five or more targets, TP2 keeps the stop at breakeven and from TP3
+      onward the stop trails two targets behind (TP3 -> TP1, TP4 -> TP2, ...).
     """
 
     name: str = "tp_trailing_risk_managed"
@@ -40,7 +40,10 @@ class TrailingTakeProfitStrategy(DefaultRiskManagedStrategy):
         current_target_index = targets_hit_so_far
         if current_target_index <= 0:
             return base
-        previous_tp_index = current_target_index - 1
+        trailing_gap = 2 if len(take_profits) >= 5 else 1
+        previous_tp_index = current_target_index - trailing_gap
+        if previous_tp_index < 0:
+            return base
         if previous_tp_index >= len(take_profits):
             return base
         return TargetHitAction(
