@@ -11,7 +11,7 @@ from triak_trade.agents.context import ChannelContext
 from triak_trade.ai.classifier import AIMessageClassifier
 from triak_trade.ai.gateway_client import AjilGatewayClient
 from triak_trade.config.settings import Settings
-from triak_trade.domain.enums import SignalAction, TradeSide
+from triak_trade.domain.enums import EntryType, SignalAction, TradeSide
 from triak_trade.domain.models import RawTelegramMessage
 
 
@@ -228,6 +228,19 @@ def test_ai_classifier_normalizes_reversed_entry_range_from_ai() -> None:
     assert result.parsed_signal.action is SignalAction.OPEN
     assert result.parsed_signal.entry_low == Decimal("68000")
     assert result.parsed_signal.entry_high == Decimal("68200")
+
+
+def test_ai_classifier_promotes_two_bound_limit_zone_to_range() -> None:
+    payload = _result_payload("NEW_SIGNAL", "open")
+    payload["entry_type"] = "limit"
+    classifier = AIMessageClassifier(
+        settings=Settings(),
+        gateway_client=_client(payload),
+    )
+
+    result = classifier.classify(_raw("x"), _context())
+
+    assert result.parsed_signal.entry_type is EntryType.RANGE
 
 
 def test_ai_classifier_fallback_to_regex_on_failure() -> None:

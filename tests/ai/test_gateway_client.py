@@ -179,6 +179,24 @@ def test_gateway_client_normalizes_reversed_entry_range_when_symbol_comes_from_h
     assert result.entry_high == Decimal("68200")
 
 
+def test_gateway_client_promotes_two_bound_limit_zone_to_range(
+    context: AIMessageContext,
+) -> None:
+    payload = _ok_payload()
+    payload["entry_type"] = "limit"
+    payload["entry_low"] = "68000"
+    payload["entry_high"] = "68200"
+    client = AjilGatewayClient(
+        base_url="http://mocked.local",
+        timeout_seconds=10,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    )
+
+    result = client.classify_message(context)
+
+    assert result.entry_type == "range"
+
+
 def test_gateway_client_routes_caption_images_to_gemini_multimodal() -> None:
     observed: dict[str, object] = {}
     context = AIMessageContext(

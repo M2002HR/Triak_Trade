@@ -244,6 +244,13 @@ class AIMessageClassifier(MessageClassifier):
         market = self._map_market(result.market)
         side = self._map_side(result.side)
         entry_type = self._map_entry_type(result.entry_type)
+        if (
+            entry_type in {EntryType.LIMIT, EntryType.UNKNOWN}
+            and result.entry_low is not None
+            and result.entry_high is not None
+            and result.entry_low != result.entry_high
+        ):
+            entry_type = EntryType.RANGE
 
         return ParsedSignal(
             action=action,

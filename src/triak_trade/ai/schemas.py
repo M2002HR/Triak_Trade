@@ -100,6 +100,11 @@ class AIClassificationResult(BaseModel):
 
         if self.entry_low is not None and self.entry_high is not None:
             self.entry_low, self.entry_high = sorted((self.entry_low, self.entry_high))
+            if (
+                self.entry_low != self.entry_high
+                and self.entry_type.lower() not in {"market", "trigger", "stop"}
+            ):
+                self.entry_type = "range"
         return self
 
     @field_validator("entry_low", "entry_high", "stop_loss", mode="before")

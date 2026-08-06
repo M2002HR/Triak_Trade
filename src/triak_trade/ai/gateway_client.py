@@ -700,6 +700,13 @@ class AjilGatewayClient:
     @staticmethod
     def _normalize_entry_type(raw: Any, *, entry_low: Any, entry_high: Any) -> str:
         value = str(raw or "").strip().lower()
+        if (
+            value not in {"market", "trigger", "stop"}
+            and entry_low is not None
+            and entry_high is not None
+            and str(entry_low) != str(entry_high)
+        ):
+            return "range"
         if value in {"market", "limit", "range", "trigger", "stop"}:
             if value == "stop":
                 return "trigger"
