@@ -191,7 +191,8 @@
 
   function bindSessionActions(target) {
     target.querySelectorAll("[data-session-open]").forEach((button) => {
-      button.addEventListener("click", () => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
         openSessionModal(button.dataset.sessionOpen);
       });
     });
@@ -559,7 +560,7 @@
       const payload = await response.json();
       if (!response.ok || !payload.detail) {
         if (!options.silent) {
-          showError(payload.detail || "Failed to load session details.");
+          renderSessionDetailError(payload.detail || "Failed to load session details.");
         }
         return;
       }
@@ -569,9 +570,30 @@
       }
     } catch (error) {
       if (!options.silent) {
-        showError(`Network error: ${error.message}`);
+        renderSessionDetailError(`Unable to load session details: ${error.message}`);
       }
     }
+  }
+
+  function renderSessionDetailError(message) {
+    setText("lt-session-modal-title", "Session details unavailable");
+    const summary = document.getElementById("lt-session-modal-summary");
+    if (summary) {
+      summary.innerHTML = `<p class="issue-item">${esc(message)}</p>`;
+    }
+    [
+      "lt-session-modal-messages",
+      "lt-session-modal-open-trades",
+      "lt-session-modal-closed-trades",
+      "lt-session-modal-signals",
+      "lt-session-modal-exchange",
+    ].forEach((id) => {
+      const target = document.getElementById(id);
+      if (target) {
+        target.innerHTML = '<p class="empty-state">No details available.</p>';
+      }
+    });
+    showError(message);
   }
 
   function renderSessionDetail(detail) {
@@ -1149,15 +1171,26 @@
     }
   }
 
-  async function stopSession(sessionId) {
+  async function stopSession(sessionId, force = false) {
     if (!sessionId) {
       return;
     }
     try {
       const response = await api(`/api/live/sessions/${encodeURIComponent(sessionId)}/stop`, {
         method: "POST",
+        body: JSON.stringify({ force }),
       });
       const result = await response.json();
+      if (response.status === 409 && result.confirmation_required && !force) {
+        const confirmed = confirm(
+          `${result.detail}\n\nStopping now leaves these exchange positions and their existing orders ` +
+          "unmanaged by Triak Trade. Are you sure you want to force stop this session?"
+        );
+        if (confirmed) {
+          await stopSession(sessionId, true);
+        }
+        return;
+      }
       if (!response.ok || !result.stopped) {
         showError(result.detail || "Failed to stop session.");
         return;

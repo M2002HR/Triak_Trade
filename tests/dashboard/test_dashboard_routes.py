@@ -641,6 +641,7 @@ def test_live_trading_page_is_english_only(tmp_path: Path) -> None:
     assert "Needs Attention" not in text
     assert "Message Stream" in text
     assert "Recent Closed Trades" in text
+    assert "/static/live_trading.js?v=" in text
     assert "اطلاعات" not in text
     assert "سشن" not in text
 
@@ -875,12 +876,73 @@ def test_live_session_detail_endpoint_is_session_specific(tmp_path: Path, monkey
         "get_session_detail",
         lambda session_id: detail if session_id == "ls_modal" else None,
     )
+    refresh_exchange_state = AsyncMock(return_value=True)
+    monkeypatch.setattr(live_coordinator, "refresh_exchange_state", refresh_exchange_state)
 
     response = client_obj.get("/api/live/sessions/ls_modal", headers=headers())
     assert response.status_code == 200
     payload = response.json()["detail"]
     assert payload["session"]["session_id"] == "ls_modal"
     assert payload["messages"][0]["session_id"] == "ls_modal"
+    refresh_exchange_state.assert_not_awaited()
+
+
+def test_live_session_stop_requires_confirmation_for_open_trades(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+
+    def blocked_stop(session_id: str, *, force: bool = False):
+        assert session_id == "ls_open"
+        assert force is False
+        raise ValueError("Session stop is blocked while open or pending trades exist: BTCUSDT")
+
+    monkeypatch.setattr(live_coordinator, "stop_session", blocked_stop)
+
+    response = client_obj.post(
+        "/api/live/sessions/ls_open/stop",
+        headers=headers(),
+        json={"force": False},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["confirmation_required"] is True
+    assert "BTCUSDT" in response.json()["detail"]
+
+
+def test_live_session_stop_passes_force_confirmation(tmp_path: Path, monkeypatch) -> None:
+    app = create_dashboard_app(settings(tmp_path))
+    client_obj = LocalASGIClient(app)
+    live_coordinator = app.state.live_coordinator
+    session = LiveSession(
+        session_id="ls_force",
+        channels=["https://t.me/demo"],
+        trading_mode="live",
+        initial_balance=Decimal("0"),
+        risk_per_trade_pct=Decimal("120"),
+        strategy_key="tp_trailing_risk_managed",
+        use_ai=True,
+        interval="1m",
+        status="stopped",
+    )
+
+    def forced_stop(session_id: str, *, force: bool = False):
+        assert session_id == "ls_force"
+        assert force is True
+        return session
+
+    monkeypatch.setattr(live_coordinator, "stop_session", forced_stop)
+
+    response = client_obj.post(
+        "/api/live/sessions/ls_force/stop",
+        headers=headers(),
+        json={"force": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["stopped"] is True
 
 
 def test_live_session_history_delete_endpoint(tmp_path: Path, monkeypatch) -> None:

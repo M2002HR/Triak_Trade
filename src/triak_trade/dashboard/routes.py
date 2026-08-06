@@ -655,7 +655,17 @@ def build_router(
             else {}
         )
         session_id = payload.get("session_id") if isinstance(payload, dict) else None
-        session = live_coordinator.stop_session(str(session_id) if session_id else None)
+        force = bool(payload.get("force", False)) if isinstance(payload, dict) else False
+        try:
+            session = live_coordinator.stop_session(
+                str(session_id) if session_id else None,
+                force=force,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"detail": str(exc), "confirmation_required": True},
+                status_code=409,
+            )
         if session is None:
             return JSONResponse({"detail": "no_active_session"}, status_code=404)
         return JSONResponse({"stopped": True, "session": session.model_dump(mode="json")})
@@ -663,7 +673,19 @@ def build_router(
     @router.post("/api/live/sessions/{session_id}/stop")
     async def stop_live_session_by_id(request: Request, session_id: str) -> JSONResponse:
         auth.require_api(request)
-        session = live_coordinator.stop_session(session_id)
+        payload = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
+        force = bool(payload.get("force", False)) if isinstance(payload, dict) else False
+        try:
+            session = live_coordinator.stop_session(session_id, force=force)
+        except ValueError as exc:
+            return JSONResponse(
+                {"detail": str(exc), "confirmation_required": True},
+                status_code=409,
+            )
         if session is None:
             return JSONResponse({"detail": "session_not_found"}, status_code=404)
         return JSONResponse({"stopped": True, "session": session.model_dump(mode="json")})
@@ -684,7 +706,6 @@ def build_router(
     @router.get("/api/live/sessions/{session_id}")
     async def get_live_session_detail(request: Request, session_id: str) -> JSONResponse:
         auth.require_api(request)
-        await live_coordinator.refresh_exchange_state(session_id)
         detail = live_coordinator.get_session_detail(session_id)
         if detail is None:
             return JSONResponse({"detail": "session_not_found"}, status_code=404)
@@ -869,6 +890,7 @@ def _static_asset_version() -> str:
     candidates = [
         STATIC_DIR / "dashboard.js",
         STATIC_DIR / "backtest_analysis.js",
+        STATIC_DIR / "live_trading.js",
         STATIC_DIR / "dashboard.css",
     ]
     mtimes = [int(path.stat().st_mtime) for path in candidates if path.exists()]

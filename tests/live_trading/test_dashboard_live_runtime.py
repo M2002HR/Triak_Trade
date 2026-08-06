@@ -256,6 +256,54 @@ class TestDashboardLiveCoordinatorState:
 
             assert coord.store.load_session(session.session_id).status == "running"
 
+    def test_force_stop_session_leaves_open_trade_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = _make_settings()
+            settings.LIVE_TRADING_RUNTIME_DIR = tmpdir
+            settings.DASHBOARD_RUNTIME_DIR = tmpdir
+            coord = DashboardLiveCoordinator(settings=settings)
+            session = LiveSession(
+                session_id="ls_force",
+                channels=["https://t.me/demo"],
+                trading_mode="live",
+                initial_balance=Decimal("0"),
+                risk_per_trade_pct=Decimal("120"),
+                strategy_key="tp_trailing_risk_managed",
+                use_ai=True,
+                interval="1m",
+                status="running",
+            )
+            trade = LiveTrade(
+                trade_id="trade_force",
+                session_id=session.session_id,
+                signal_id="sig_force",
+                channel_id="@demo",
+                channel_input="https://t.me/demo",
+                channel_label="@demo",
+                symbol="BTCUSDT",
+                side="long",
+                entry_price=Decimal("100"),
+                quantity=Decimal("1"),
+                remaining_quantity=Decimal("1"),
+                stop_loss=Decimal("95"),
+                take_profits=[Decimal("110")],
+                balance_at_entry=Decimal("100"),
+                status="open",
+            )
+            engine = MagicMock()
+            engine.session = session
+            coord.store.save_session(session)
+            coord.store.save_trade(trade)
+            coord._engines[session.session_id] = engine
+
+            stopped = coord.stop_session(session.session_id, force=True)
+
+            assert stopped is session
+            assert stopped.status == "stopped"
+            engine.stop.assert_called_once_with()
+            assert session.session_id in coord._force_stopped_session_ids
+            assert coord.store.load_trade(session.session_id, trade.trade_id) == trade
+
     def test_inactive_session_with_open_trade_is_flagged_critical(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             settings = _make_settings()

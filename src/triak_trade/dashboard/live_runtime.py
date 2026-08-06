@@ -92,6 +92,7 @@ class DashboardLiveCoordinator:
         self._lock = threading.Lock()
         self._engines: dict[str, LiveTradingEngine] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._force_stopped_session_ids: set[str] = set()
         self._flag_unresolved_inactive_sessions()
         self._recover_incomplete_sessions()
 
@@ -273,14 +274,19 @@ class DashboardLiveCoordinator:
         )
         return session
 
-    def stop_session(self, session_id: str | None = None) -> LiveSession | None:
+    def stop_session(
+        self,
+        session_id: str | None = None,
+        *,
+        force: bool = False,
+    ) -> LiveSession | None:
         target_session_id = session_id or self._current_session_id()
         if not target_session_id:
             self._log_event(logging.INFO, "dashboard.live_stop_skipped", reason="no_target_session")
             return None
         engine: LiveTradingEngine | None = None
         open_trades = self.store.list_open_trades(target_session_id)
-        if open_trades:
+        if open_trades and not force:
             symbols = sorted({trade.symbol for trade in open_trades})
             self._log_event(
                 logging.WARNING,
@@ -293,9 +299,35 @@ class DashboardLiveCoordinator:
                 "Session stop is blocked while open or pending trades exist: "
                 + ", ".join(symbols)
             )
+        if open_trades:
+            self._log_event(
+                logging.WARNING,
+                "dashboard.live_stop_forced_with_open_trades",
+                session_id=target_session_id,
+                open_trade_count=len(open_trades),
+                symbols=sorted({trade.symbol for trade in open_trades}),
+                exchange_positions_left_unmanaged=True,
+            )
         with self._lock:
             engine = self._engines.get(target_session_id)
         if engine is not None:
+            if force:
+                with self._lock:
+                    self._force_stopped_session_ids.add(target_session_id)
+                warning = (
+                    "Session was force-stopped with open trades; exchange positions and "
+                    "existing orders were left unmanaged by Triak Trade."
+                )
+                engine.session.mark_stopped()
+                engine.session.health_status = "critical"
+                engine.session.new_entries_blocked = True
+                engine.session.last_error = warning
+                if warning not in engine.session.health_issues:
+                    engine.session.health_issues.append(warning)
+                if warning not in engine.session.errors:
+                    engine.session.errors.append(warning)
+                self.store.save_session(engine.session)
+                self._notify_session(engine.session)
             engine.stop()
             self._log_event(
                 logging.INFO,
@@ -720,6 +752,16 @@ class DashboardLiveCoordinator:
                         error=str(exc),
                     )
 
+                with self._lock:
+                    force_stopped = session_id in self._force_stopped_session_ids
+                if force_stopped:
+                    self._log_event(
+                        logging.WARNING,
+                        "dashboard.live_engine_recovery_suppressed_after_force_stop",
+                        session_id=session_id,
+                    )
+                    break
+
                 open_trades = self.store.list_open_trades(session_id)
                 if not open_trades:
                     if failure is not None:
@@ -783,6 +825,7 @@ class DashboardLiveCoordinator:
             with self._lock:
                 self._engines.pop(session_id, None)
                 self._threads.pop(session_id, None)
+                self._force_stopped_session_ids.discard(session_id)
             self._log_event(
                 logging.INFO,
                 "dashboard.live_engine_thread_stopped",
