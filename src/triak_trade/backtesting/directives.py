@@ -133,9 +133,18 @@ def detect_percentage_tp_update(text: str | None) -> list[Decimal]:
     if not text:
         return []
     lowered = text.lower()
-    if not any(marker in lowered for marker in ("tp", "تیپی", "تارگت", "target", "اهداف")):
-        return []
     values = [Decimal(match.group("pct")) for match in _CLOSE_PERCENT_RE.finditer(lowered)]
+    explicit_marker = any(
+        marker in lowered for marker in ("tp", "تیپی", "تارگت", "target", "اهداف")
+    )
+    # Some channels label a ladder as profit percentages and include an SL,
+    # without the words TP/target. Treat that unambiguously structured form as
+    # a target update, while avoiding ordinary single-percentage profit reports.
+    structured_ladder = len(values) >= 3 and any(
+        marker in lowered for marker in ("sl", "stop", "استاپ", "حد ضرر", "حدضرر")
+    )
+    if not explicit_marker and not structured_ladder:
+        return []
     return values if len(values) >= 2 else []
 
 

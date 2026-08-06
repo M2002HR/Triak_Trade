@@ -716,6 +716,45 @@ async def test_authoritative_ai_ignore_cannot_be_promoted_to_close_all(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_percentage_profit_ladder_cannot_be_promoted_to_loss_close(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    context = engine._get_or_create_context("@testchan")
+    state = _state(_open_signal(), status=SignalStatus.OPEN)
+    trade = _trade(engine.session.session_id)
+    context.add_signal(state, pending=False)
+    engine._open_trades[state.signal_id] = trade
+    unknown_update = _open_signal(action=SignalAction.UNKNOWN).model_copy(
+        update={"symbol": trade.symbol, "side": TradeSide.LONG, "stop_loss": None}
+    )
+    engine._classifier = SimpleNamespace(
+        classify=lambda raw, current_context: SimpleNamespace(
+            parsed_signal=unknown_update,
+            classification="SIGNAL_UPDATE",
+            related_signal_id=state.signal_id,
+            debug_notes=["classifier=ai", "classification=SIGNAL_UPDATE"],
+        )
+    )
+
+    await engine._process_message(
+        _message(304, "سیو سود\n30%\n80%\n120%\n160%\n240%\nاستاپ 49000")  # noqa: RUF001
+    )
+
+    trace = engine.store.list_message_traces(engine.session.session_id, limit=1)[0]
+    assert trace.final_status == "updated_tp"
+    assert trace.parsed_action == SignalAction.UPDATE_TP.value
+    assert trade.is_open
+    assert trade.remaining_quantity == trade.quantity
+    assert trade.realized_pnl == Decimal("0")
+    assert trade.take_profits == [
+        Decimal("51500.00000000"),
+        Decimal("54000.00000000"),
+        Decimal("56000.00000000"),
+        Decimal("58000.00000000"),
+        Decimal("62000.00000000"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_poll_messages_once_persists_heartbeat_without_new_messages(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine._running = True

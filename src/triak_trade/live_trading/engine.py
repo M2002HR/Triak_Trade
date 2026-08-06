@@ -993,8 +993,17 @@ class LiveTradingEngine:
             parsed = parsed.model_copy(update={"action": SignalAction.CLOSE})
 
         # 2. For UNKNOWN/IGNORE: try text-based promotion before giving up
+        percentage_tp_hint = bool(detect_percentage_tp_update(message.text))
         if parsed.action in (SignalAction.IGNORE, SignalAction.UNKNOWN) and not ai_non_actionable:
-            upgraded = apply_text_directive_action(parsed.action, message.text)
+            # A structured percentage ladder (often posted with an SL) is a
+            # target update, never a close fraction. Do not let a coincidental
+            # "profit/close" word promote the message to CLOSE before the
+            # correlation-aware percentage conversion below can run.
+            upgraded = (
+                parsed.action
+                if percentage_tp_hint
+                else apply_text_directive_action(parsed.action, message.text)
+            )
             if upgraded not in (SignalAction.IGNORE, SignalAction.UNKNOWN):
                 parsed = parsed.model_copy(update={"action": upgraded})
             else:
@@ -1158,6 +1167,7 @@ class LiveTradingEngine:
                     "stop_loss": detect_stop_loss_value(message.text),
                 }
             )
+            trace.parsed_action = parsed.action.value
             trace.debug_notes.append(
                 "percentage_tp_update_converted="
                 + ",".join(str(price) for price in prices)

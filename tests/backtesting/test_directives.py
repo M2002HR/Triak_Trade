@@ -51,6 +51,20 @@ def test_detect_percentage_tp_update_extracts_persian_ladder() -> None:
     assert detect_stop_loss_value("تیپی 40% 80% استاپ 0.1605") == Decimal("0.1605")
 
 
+def test_detect_percentage_tp_update_accepts_structured_profit_ladder_with_stop() -> None:
+    values = detect_percentage_tp_update(
+        "سیو سود\n30%\n80%\n120%\n160%\n240%\nاستاپ 0.1138"  # noqa: RUF001
+    )
+    assert values == [
+        Decimal("30"),
+        Decimal("80"),
+        Decimal("120"),
+        Decimal("160"),
+        Decimal("240"),
+    ]
+    assert detect_percentage_tp_update("سیو سود 30%") == []
+
+
 def test_conversational_persian_close_word_is_not_an_instruction() -> None:
     assert detect_close_instruction("یه جوری مارکت کریپتو رو ببندم نسخه پیچش کنم") is False
     assert detect_close_instruction("این پوزیشن رو ببند") is True
