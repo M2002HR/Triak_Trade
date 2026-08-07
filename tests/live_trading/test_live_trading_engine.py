@@ -5631,6 +5631,61 @@ async def test_sync_exchange_state_clears_pending_miss_when_position_reappears(
 
 
 @pytest.mark.asyncio
+async def test_sync_exchange_state_isolates_one_trade_reconciliation_failure(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    broken = _trade(engine.session.session_id).model_copy(
+        update={"trade_id": "trade_broken", "signal_id": "sig_broken", "symbol": "HFTUSDT"}
+    )
+    healthy = _trade(engine.session.session_id).model_copy(
+        update={"trade_id": "trade_healthy", "signal_id": "sig_healthy", "symbol": "GWEIUSDT"}
+    )
+    engine._open_trades = {broken.signal_id: broken, healthy.signal_id: healthy}
+    engine._futures_client = AsyncMock()
+
+    def position(symbol: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            symbol_internal=symbol,
+            side="LONG",
+            position=Decimal("0.01"),
+            available=Decimal("0.01"),
+            avg_price=Decimal("50000"),
+            last_price=Decimal("50010"),
+            mark_price=Decimal("50010"),
+            leverage=10,
+            margin=Decimal("50"),
+            unrealized_pnl=Decimal("0.1"),
+            realized_pnl=Decimal("0"),
+            liquidation_price=Decimal("45000"),
+            margin_type="CROSS",
+            exchange_symbol=symbol.replace("USDT", "-SWAP-USDT"),
+        )
+
+    engine._futures_client.get_open_positions.return_value = [
+        position("HFTUSDT"),
+        position("GWEIUSDT"),
+    ]
+    engine._futures_client.get_order_history.return_value = []
+    engine._futures_client.get_open_orders.return_value = []
+    engine._futures_client.get_open_algo_orders.return_value = []
+    engine._futures_client.get_user_trades.return_value = []
+    engine._futures_client.get_contract_spec.return_value = SimpleNamespace(
+        contract_multiplier=Decimal("1")
+    )
+    engine._reconcile_exchange_trade_protection = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[ValueError("Contract spec unavailable for HFTUSDT"), None]
+    )
+
+    await engine._sync_exchange_state()
+
+    assert engine._reconcile_exchange_trade_protection.await_count == 2
+    assert broken.last_exchange_sync_error == "Contract spec unavailable for HFTUSDT"
+    assert healthy.last_exchange_sync_error is None
+    assert healthy.last_exchange_sync_at is not None
+
+
+@pytest.mark.asyncio
 async def test_ensure_trade_still_open_on_exchange_requires_confirmed_miss(
     tmp_path: Path,
 ) -> None:

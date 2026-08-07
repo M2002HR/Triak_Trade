@@ -6408,6 +6408,39 @@ class LiveTradingEngine:
             **self._trade_log_fields(trade),
         )
 
+    async def _reconcile_exchange_trade_protection_safely(
+        self,
+        *,
+        trade: LiveTrade,
+        open_regular_orders: list[Any],
+        open_protection_orders: list[Any],
+        symbol_user_trades: list[Any],
+        allow_repair: bool = True,
+    ) -> bool:
+        """Reconcile one trade without allowing its failure to abort the account sync."""
+        try:
+            await self._reconcile_exchange_trade_protection(
+                trade=trade,
+                open_regular_orders=open_regular_orders,
+                open_protection_orders=open_protection_orders,
+                symbol_user_trades=symbol_user_trades,
+                allow_repair=allow_repair,
+            )
+        except Exception as exc:
+            trade.last_exchange_sync_error = str(exc)
+            trade.last_exchange_sync_at = _utc_now()
+            self._persist_trade_runtime_state(trade)
+            self._log_event(
+                logging.ERROR,
+                "live_trading.exchange_trade_reconciliation_failed_isolated",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                account_sync_continues=True,
+                **self._trade_log_fields(trade),
+            )
+            return False
+        return True
+
     def _exchange_take_profit_orders(
         self,
         trade: LiveTrade,
@@ -8176,7 +8209,7 @@ class LiveTradingEngine:
                 # positions endpoint converges. Reconcile confirmed fills
                 # immediately, but require repeated missing snapshots across
                 # the configured grace window before abandoning ownership.
-                await self._reconcile_exchange_trade_protection(
+                protection_reconciled = await self._reconcile_exchange_trade_protection_safely(
                     trade=trade,
                     open_regular_orders=by_symbol_open_regular_orders.get(
                         trade.symbol,
@@ -8189,6 +8222,8 @@ class LiveTradingEngine:
                     symbol_user_trades=by_symbol_user_trades.get(trade.symbol, []),
                     allow_repair=False,
                 )
+                if not protection_reconciled:
+                    continue
                 if trade.signal_id not in self._open_trades:
                     continue
                 await self._reconcile_missing_exchange_position_fills(
@@ -8223,12 +8258,14 @@ class LiveTradingEngine:
                 )
                 continue
             self._clear_exchange_position_miss_state(trade)
-            await self._reconcile_exchange_trade_protection(
+            protection_reconciled = await self._reconcile_exchange_trade_protection_safely(
                 trade=trade,
                 open_regular_orders=by_symbol_open_regular_orders.get(trade.symbol, []),
                 open_protection_orders=by_symbol_open_protection_orders.get(trade.symbol, []),
                 symbol_user_trades=by_symbol_user_trades.get(trade.symbol, []),
             )
+            if not protection_reconciled:
+                continue
             if trade.signal_id not in self._open_trades:
                 continue
             trade.exchange_order_history = list(by_symbol_orders.get(trade.symbol, []))
