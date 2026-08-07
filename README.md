@@ -76,6 +76,7 @@ Normalizer and deterministic parser
 - signed and real-integration tests require explicit environment gates
 - live execution remains blocked by default
 - uncertain reconciliation does not invent fills or profit/loss values
+- one trade's reconciliation failure cannot block owned-fill processing for other trades
 - protection and recovery logic fail closed when state cannot be verified
 - runtime secrets come from the root `.env.local`
 

@@ -83,6 +83,20 @@ This mode restores durable ownership and runs account, price, fill, and protecti
 reconciliation, but does not bootstrap or poll Telegram, submit pending entries, or run
 signal consolidation. It exits only after its unresolved logical trades converge.
 
+### R11 - One symbol cannot abort account-wide protection reconciliation
+
+The GWEIUSDT incident exposed account-sync failure coupling: TP1 filled on the exchange,
+but a preceding stale HFTUSDT trade raised `Contract spec unavailable`. That exception
+aborted the shared loop before GWEI could consume its owned fill, leaving local quantity,
+`targets_hit`, and the trailing stop stale.
+
+Protection reconciliation is now guarded per trade. The failing trade records its own
+sync error and a structured isolated-failure event, while subsequent trades continue in
+the same cycle. The recovered GWEI state advanced to `targets_hit=1`, reconciled the
+remaining exchange quantity, and replaced the stop at breakeven. A regression test uses
+one failing symbol followed by one healthy symbol and verifies that both reconciliation
+attempts run.
+
 ## High-Priority Risks
 
 ### B0 - Live funding is not attributed to logical trades

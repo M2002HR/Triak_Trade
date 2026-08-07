@@ -109,6 +109,15 @@ Reconciliation is ordered to prevent stale snapshots and duplicate accounting:
    fills can reapply quantity
 7. verify owned stop and take-profit coverage for the logical remainder
 
+Protection reconciliation is isolated per logical trade. A contract-spec, order-query,
+fill-conversion, or protection-repair failure for one symbol is persisted on that trade
+and emitted as `live_trading.exchange_trade_reconciliation_failed_isolated`; it does not
+abort reconciliation for later trades in the same account snapshot. This guarantees
+that an unrelated stale symbol cannot prevent a confirmed TP fill from advancing
+`targets_hit`, reconciling remaining quantity, and applying the strategy stop update.
+The failed trade remains visible for retry and investigation rather than being silently
+treated as synchronized.
+
 A missing aggregate position snapshot is provisional for two observations and at least
 15 seconds by default. Reappearance clears the pending state. Reaching the threshold
 still does not authorize a fabricated local close: complete owned close-fill evidence is
